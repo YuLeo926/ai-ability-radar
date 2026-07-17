@@ -1,8 +1,10 @@
 mod classify;
+mod claude;
 mod codex;
 mod process;
 
 pub use classify::*;
+pub use claude::*;
 pub use codex::*;
 pub use process::*;
 
