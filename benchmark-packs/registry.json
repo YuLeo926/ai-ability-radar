@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "packs": [
+    {
+      "id": "client-quick",
+      "version": "1.0.0",
+      "path": "client-quick-v1",
+      "license": "Apache-2.0",
+      "bundled": true,
+      "content_sha256": "cfd2b36af1688432626ee80e453d60cd1d8cb4f87371df5f53def6b551e06f8f"
+    },
+    {
+      "id": "cli-quick",
+      "version": "1.0.0",
+      "path": "cli-quick-v1",
+      "license": "Apache-2.0",
+      "bundled": true,
+      "content_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ]
+}

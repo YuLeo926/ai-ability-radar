@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "id": "client-quick",
+  "version": "1.0.0",
+  "title": "客户端快速体检",
+  "target_kinds": ["chat_gpt_client", "claude_client"],
+  "tasks": [
+    {
+      "id": "instruction-filter",
+      "category": "instruction_following",
+      "prompt_file": "prompts/instruction-filter.json.txt",
+      "starter_dir": null,
+      "time_budget_secs": 120,
+      "max_turns": 1,
+      "grader": {
+        "type": "exact_json",
+        "expected": {"count": 3, "names": ["Mira", "An", "Bo"]}
+      }
+    },
+    {
+      "id": "instruction-csv",
+      "category": "instruction_following",
+      "prompt_file": "prompts/instruction-csv.txt",
+      "starter_dir": null,
+      "time_budget_secs": 120,
+      "max_turns": 1,
+      "grader": {"type": "exact_text", "expected": "sku,total\nB2,42\nC3,35"}
+    },
+    {
+      "id": "instruction-inventory",
+      "category": "instruction_following",
+      "prompt_file": "prompts/instruction-inventory.json.txt",
+      "starter_dir": null,
+      "time_budget_secs": 120,
+      "max_turns": 1,
+      "grader": {
+        "type": "exact_json",
+        "expected": [{"sku": "C", "net": 90}, {"sku": "A", "net": 72}]
+      }
+    },
+    {
+      "id": "logic-schedule",
+      "category": "logic",
+      "prompt_file": "prompts/logic-schedule.txt",
+      "starter_dir": null,
+      "time_budget_secs": 120,
+      "max_turns": 1,
+      "grader": {
+        "type": "exact_json",
+        "expected": {"09:00": "D", "10:00": "B", "11:00": "A", "12:00": "C"}
+      }
+    },
+    {
+      "id": "logic-truth",
+      "category": "logic",
+      "prompt_file": "prompts/logic-truth.txt",
+      "starter_dir": null,
+      "time_budget_secs": 120,
+      "max_turns": 1,
+      "grader": {"type": "exact_json", "expected": {"liar": "B", "box": 3}}
+    },
+    {
+      "id": "logic-capacity",
+      "category": "logic",
+      "prompt_file": "prompts/logic-capacity.txt",
+      "starter_dir": null,
+      "time_budget_secs": 120,
+      "max_turns": 1,
+      "grader": {"type": "exact_json", "expected": {"trips": 4, "unused": 6}}
+    },
+    {
+      "id": "review-python",
+      "category": "code_review",
+      "prompt_file": "prompts/review-python.txt",
+      "starter_dir": null,
+      "time_budget_secs": 180,
+      "max_turns": 1,
+      "grader": {"type": "json_string_set", "expected": ["A", "D"]}
+    },
+    {
+      "id": "review-typescript",
+      "category": "code_review",
+      "prompt_file": "prompts/review-typescript.txt",
+      "starter_dir": null,
+      "time_budget_secs": 180,
+      "max_turns": 1,
+      "grader": {"type": "json_string_set", "expected": ["A", "C"]}
+    }
+  ]
+}

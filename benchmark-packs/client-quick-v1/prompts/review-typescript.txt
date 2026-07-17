@@ -1,0 +1,16 @@
+下面 TypeScript 代码中只有两个标记行存在独立缺陷。只输出缺陷标签组成的 JSON 数组，不得解释。
+
+async function load(ids: string[]) {
+  const rows = await ids.map(async id =>
+    (await fetch(`/api/${id}`)).json());                  // [A]
+  return rows;                                            // [B]
+}
+
+function isEnabled(value: string | undefined) {
+  return Boolean(value);                                  // [C]
+}
+
+候选缺陷定义：
+- 返回的是 Promise 数组而不是已经解析的数据。
+- 字符串 "false" 会被 Boolean 转成 true。
+- 使用模板字符串构造该固定路径不单独计为缺陷。

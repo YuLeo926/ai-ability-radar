@@ -1,0 +1,14 @@
+下面 Python 代码中只有两个标记行存在独立缺陷。只输出缺陷标签组成的 JSON 数组，不得解释。
+
+def append_item(item, bucket=[]):             # [A]
+    bucket.append(item)                       # [B]
+    return bucket[:]                          # [C]
+
+def load_user(name):
+    query = f"SELECT * FROM users WHERE name='{name}'"  # [D]
+    return db.execute(query).fetchone()        # [E]
+
+候选缺陷定义：
+- 可变默认参数导致不同调用共享状态。
+- SQL 字符串拼接导致注入风险。
+- 返回浅拷贝本身不构成这里要求识别的独立缺陷。

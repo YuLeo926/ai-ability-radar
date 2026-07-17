@@ -1,0 +1,7 @@
+只输出 JSON 数组，不得添加其他文字。计算 net=price*(100-discount)/100，只保留 stock>0 且 net>=70 的商品。每项只能包含 sku 和 net；按 net 从高到低排序。
+
+商品：
+{"sku":"A","price":80,"discount":10,"stock":3}
+{"sku":"B","price":120,"discount":50,"stock":9}
+{"sku":"C","price":100,"discount":10,"stock":2}
+{"sku":"D","price":90,"discount":0,"stock":0}

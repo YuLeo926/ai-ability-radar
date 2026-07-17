@@ -1,0 +1,4 @@
+严格遵守以下要求：只输出一个 JSON 对象，不得使用 Markdown，不得添加解释。保留 active=true 且 score>=70 的人员，按 score 从高到低排序；分数相同时按 name 的 Unicode 升序排序。对象只能有 count 和 names 两个键。
+
+数据：
+[{"name":"Bo","score":88,"active":true},{"name":"Li","score":99,"active":false},{"name":"An","score":88,"active":true},{"name":"Mira","score":91,"active":true},{"name":"Xu","score":69,"active":true}]
