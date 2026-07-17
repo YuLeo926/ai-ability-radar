@@ -172,6 +172,17 @@ impl RunRepository {
         Ok(())
     }
 
+    pub fn set_run_status(&self, run_id: Uuid, status: RunStatus) -> Result<(), StorageError> {
+        let changed = self.connection.lock().execute(
+            "UPDATE runs SET status_json=?2 WHERE id=?1",
+            params![run_id.to_string(), serde_json::to_string(&status)?],
+        )?;
+        if changed == 0 {
+            return Err(StorageError::RunNotFound(run_id));
+        }
+        Ok(())
+    }
+
     pub fn get_run(&self, run_id: Uuid) -> Result<Option<RunRecord>, StorageError> {
         let connection = self.connection.lock();
         let mut statement = connection.prepare(&format!("{RUN_SELECT_SQL} WHERE id=?1"))?;

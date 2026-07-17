@@ -1,9 +1,11 @@
 mod domain;
 mod grading;
+mod orchestration;
 mod packs;
 mod storage;
 
 pub use domain::*;
 pub use grading::*;
+pub use orchestration::*;
 pub use packs::*;
 pub use storage::*;

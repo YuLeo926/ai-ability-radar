@@ -89,6 +89,18 @@ fn startup_marks_only_abandoned_running_runs_interrupted() {
 }
 
 #[test]
+fn status_updates_reject_unknown_runs() {
+    let dir = tempdir().unwrap();
+    let repo = RunRepository::open(&dir.path().join("ability.db")).unwrap();
+    let unknown_run = Uuid::new_v4();
+
+    assert!(matches!(
+        repo.set_run_status(unknown_run, RunStatus::Running),
+        Err(StorageError::RunNotFound(id)) if id == unknown_run
+    ));
+}
+
+#[test]
 fn replacing_a_checkpoint_keeps_completed_task_count_unique() {
     let dir = tempdir().unwrap();
     let repo = RunRepository::open(&dir.path().join("ability.db")).unwrap();
