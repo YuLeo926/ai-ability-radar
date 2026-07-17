@@ -1,0 +1,12 @@
+{
+  "name": "ai-ability-radar",
+  "private": true,
+  "workspaces": [
+    "apps/desktop"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace apps/desktop",
+    "test": "npm run test --workspace apps/desktop",
+    "tauri": "npm run tauri --workspace apps/desktop"
+  }
+}
