@@ -88,13 +88,16 @@ test("history navigation is exact and is not active on unrelated child paths", (
   ).toBeInTheDocument();
 });
 
-test("result routes retain the requested run identifier", () => {
+test("result routes do not expose the technical run identifier", () => {
   renderRoute("/results/run-42");
 
   expect(
     screen.getByRole("heading", { name: "体检结果" }),
   ).toBeInTheDocument();
-  expect(screen.getByText("测试编号：run-42")).toBeInTheDocument();
+  expect(
+    screen.getByText("正在读取这次体检的本地结果。"),
+  ).toBeInTheDocument();
+  expect(screen.queryByText(/run-42/)).not.toBeInTheDocument();
 });
 
 test("manual target routes show the selected client", () => {
@@ -112,9 +115,8 @@ test("CLI target routes show the selected command-line tool", () => {
   renderRoute("/cli/codex_cli");
 
   expect(
-    screen.getByRole("heading", { name: "Codex CLI 体检" }),
+    screen.getByRole("status", { name: "正在检查 Codex CLI 环境" }),
   ).toBeInTheDocument();
-  expect(screen.getByText("自动运行流程将在后续任务中接入。")).toBeInTheDocument();
 });
 
 test("unknown routes explain the problem and offer a way home", async () => {

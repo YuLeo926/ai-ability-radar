@@ -1,9 +1,9 @@
 import { Route, Routes } from "react-router-dom";
 import { AppShell } from "../components/AppShell";
+import { CliRunPage } from "../pages/CliRunPage";
 import { HomePage } from "../pages/HomePage";
 import { ManualRunPage } from "../pages/ManualRunPage";
 import {
-  CliRunPage,
   HistoryPage,
   NotFoundPage,
   ResultPage,

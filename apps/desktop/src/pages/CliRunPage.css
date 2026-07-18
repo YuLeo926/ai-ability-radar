@@ -1,0 +1,279 @@
+.cli-run-page {
+  box-sizing: border-box;
+  width: min(100%, 62rem);
+  margin: 0 auto;
+  padding: clamp(1.5rem, 4vw, 3.5rem);
+  color: #17312c;
+  font-family:
+    "Segoe UI Variable Text", "Microsoft YaHei UI", "Segoe UI", sans-serif;
+  line-height: 1.65;
+}
+
+.cli-run-page *,
+.cli-run-page *::before,
+.cli-run-page *::after {
+  box-sizing: border-box;
+}
+
+.cli-run-page h1,
+.cli-run-page h2,
+.cli-run-page p,
+.cli-run-page dl,
+.cli-run-page dd {
+  margin-block: 0;
+}
+
+.cli-run-page h1 {
+  max-width: 20ch;
+  color: #102a25;
+  font-size: clamp(2rem, 5vw, 3rem);
+  line-height: 1.12;
+  text-align: left;
+  letter-spacing: -0.04em;
+}
+
+.cli-run-page h2 {
+  color: #17312c;
+  font-size: 1rem;
+  letter-spacing: 0.02em;
+}
+
+.cli-run-page .eyebrow {
+  color: #43655e;
+  font-size: 0.78rem;
+  font-weight: 750;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.cli-setup,
+.cli-loading-page,
+.cli-progress-page {
+  display: grid;
+  gap: 1rem;
+}
+
+.cli-pack-summary {
+  color: #29463f;
+  font-size: 1.08rem;
+  font-weight: 720;
+  font-variant-numeric: tabular-nums;
+}
+
+.cli-card,
+.cli-progress-card,
+.cli-cancel-card,
+.cli-alert-card {
+  display: grid;
+  gap: 0.8rem;
+  padding: clamp(1rem, 3vw, 1.5rem);
+  border: 1px solid #c8d9d4;
+  border-radius: 0.85rem;
+  background: #fbfdfc;
+  box-shadow: 0 1rem 2.5rem rgba(34, 74, 65, 0.06);
+}
+
+.cli-environment-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.cli-environment-list div {
+  display: grid;
+  gap: 0.1rem;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid #d8e4e1;
+  border-radius: 0.55rem;
+  background: #f4faf8;
+}
+
+.cli-environment-list dt {
+  color: #557069;
+  font-size: 0.78rem;
+  font-weight: 730;
+  letter-spacing: 0.06em;
+}
+
+.cli-environment-list dd {
+  overflow-wrap: anywhere;
+  color: #17312c;
+  font-weight: 650;
+}
+
+.cli-run-page .notice {
+  display: grid;
+  gap: 0.35rem;
+  padding: 1.1rem 1.25rem;
+  border: 1px solid #c8d9d4;
+  border-left: 0.35rem solid #147d70;
+  border-radius: 0.75rem;
+  background: #f4faf8;
+}
+
+.cli-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(13rem, 0.55fr);
+  gap: 1rem;
+  padding-top: 0.5rem;
+}
+
+.cli-run-page .field {
+  display: grid;
+  gap: 0.45rem;
+  min-width: 0;
+  color: #29463f;
+  font-weight: 650;
+}
+
+.cli-run-page input,
+.cli-run-page select {
+  width: 100%;
+  min-width: 0;
+  min-height: 2.75rem;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid #a9c0ba;
+  border-radius: 0.55rem;
+  background: #fff;
+  color: #102a25;
+  font: inherit;
+}
+
+.cli-run-page input:focus-visible,
+.cli-run-page select:focus-visible,
+.cli-run-page button:focus-visible,
+.cli-run-page a:focus-visible {
+  outline: 0.2rem solid #f4aa49;
+  outline-offset: 0.16rem;
+}
+
+.cli-run-page .check-row {
+  display: flex;
+  grid-column: 1 / -1;
+  gap: 0.7rem;
+  align-items: flex-start;
+  color: #29463f;
+  font-weight: 650;
+}
+
+.cli-run-page .check-row input {
+  width: 1.15rem;
+  min-height: 1.15rem;
+  margin-top: 0.3rem;
+}
+
+.cli-run-page .hint {
+  max-width: 70ch;
+  color: #557069;
+  font-size: 0.9rem;
+}
+
+.cli-run-page .form-error {
+  max-width: 68ch;
+  color: #982f28;
+  font-weight: 650;
+}
+
+.cli-run-page button {
+  width: fit-content;
+  min-height: 2.7rem;
+  padding: 0.6rem 1.05rem;
+  border: 1px solid #0f675d;
+  border-radius: 999px;
+  background: #116d62;
+  color: #fff;
+  font: inherit;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.cli-run-page button:hover:not(:disabled) {
+  background: #0c594f;
+}
+
+.cli-run-page button:disabled {
+  border-color: #bdcbc7;
+  background: #dbe4e1;
+  color: #647771;
+  cursor: not-allowed;
+}
+
+.cli-run-page button.secondary {
+  border-color: #8eaaa3;
+  background: transparent;
+  color: #174c43;
+}
+
+.cli-run-page button.danger {
+  border-color: #9e3b33;
+  background: #a9443b;
+}
+
+.cli-run-page button.danger:hover:not(:disabled) {
+  background: #8a352f;
+}
+
+.cli-progress-card {
+  background:
+    linear-gradient(135deg, rgba(20, 125, 112, 0.08), transparent 60%),
+    #fbfdfc;
+}
+
+.cli-progress-number {
+  color: #102a25;
+  font-size: clamp(1.5rem, 4vw, 2.2rem);
+  font-weight: 780;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
+}
+
+.cli-progress-card progress {
+  width: 100%;
+  height: 0.65rem;
+  accent-color: #147d70;
+}
+
+.cli-live-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.5rem;
+  color: #35514b;
+  font-weight: 680;
+  font-variant-numeric: tabular-nums;
+}
+
+.cli-cancel-card {
+  border-left: 0.35rem solid #a9443b;
+  background: #fff8f6;
+}
+
+.cli-actions,
+.cli-stop-state {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+@media (max-width: 42rem) {
+  .cli-fields,
+  .cli-environment-list {
+    grid-template-columns: 1fr;
+  }
+
+  .cli-run-page h1 {
+    font-size: clamp(1.85rem, 9vw, 2.6rem);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .cli-run-page button {
+    transition:
+      background-color 140ms ease,
+      transform 140ms ease;
+  }
+
+  .cli-run-page button:active:not(:disabled) {
+    transform: translateY(1px);
+  }
+}

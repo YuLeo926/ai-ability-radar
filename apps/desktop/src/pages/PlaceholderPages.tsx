@@ -1,28 +1,4 @@
-import { Link, useLocation, useParams } from "react-router-dom";
-
-const labels: Record<string, string> = {
-  chat_gpt_client: "ChatGPT 客户端",
-  claude_client: "Claude 客户端",
-  codex_cli: "Codex CLI",
-  claude_code: "Claude Code",
-};
-
-function useSelectedTarget(fallback: string): string {
-  const { target } = useParams();
-  return (target && labels[target]) || fallback;
-}
-
-export function CliRunPage() {
-  const target = useSelectedTarget("CLI");
-  return (
-    <main className="page placeholder-page">
-      <p className="eyebrow">自动快速体检</p>
-      <h1>{target} 体检</h1>
-      <p>自动运行流程将在后续任务中接入。</p>
-      <Link to="/">返回开始页</Link>
-    </main>
-  );
-}
+import { Link, useLocation } from "react-router-dom";
 
 export function HistoryPage() {
   return (
@@ -36,7 +12,6 @@ export function HistoryPage() {
 }
 
 export function ResultPage() {
-  const { runId } = useParams();
   const location = useLocation();
   const navigationState = location.state as
     | { manualRunCompleted?: boolean }
@@ -48,7 +23,7 @@ export function ResultPage() {
       {navigationState?.manualRunCompleted ? (
         <p role="status">全部任务已完成，结果已保存到本机。</p>
       ) : null}
-      <p>测试编号：{runId}</p>
+      <p>正在读取这次体检的本地结果。</p>
       <Link to="/history">查看历史记录</Link>
     </main>
   );
