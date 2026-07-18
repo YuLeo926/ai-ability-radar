@@ -230,3 +230,61 @@ fn invalid_numeric_or_path_values_are_rejected_before_persistence() {
     assert!(repo.save_task_result(&invalid).is_err());
     assert!(repo.get_task_results(run.id).unwrap().is_empty());
 }
+
+#[test]
+fn finish_without_score_terminalizes_only_running_runs_and_clears_score() {
+    let dir = tempdir().unwrap();
+    let repo = RunRepository::open(&dir.path().join("ability.db")).unwrap();
+    let mut run = sample_run();
+    run.status = RunStatus::Running;
+    run.score = Some(ScoreSummary {
+        ability_score: 100.0,
+        passed_tasks: 1,
+        valid_tasks: 1,
+        total_tasks: 8,
+        category_scores: BTreeMap::from([(Category::InstructionFollowing, 100.0)]),
+    });
+    repo.insert_run(&run).unwrap();
+
+    repo.finish_without_score(run.id, RunStatus::Cancelled)
+        .unwrap();
+
+    let stored = repo.get_run(run.id).unwrap().unwrap();
+    assert_eq!(stored.status, RunStatus::Cancelled);
+    assert!(stored.finished_at.is_some());
+    assert_eq!(stored.score, None);
+}
+
+#[test]
+fn finish_without_score_rejects_invalid_status_missing_and_non_running_runs() {
+    let dir = tempdir().unwrap();
+    let repo = RunRepository::open(&dir.path().join("ability.db")).unwrap();
+    let mut running = sample_run();
+    running.status = RunStatus::Running;
+    repo.insert_run(&running).unwrap();
+
+    assert!(matches!(
+        repo.finish_without_score(running.id, RunStatus::Completed),
+        Err(StorageError::InvalidData(message)) if message.contains("cancelled or interrupted")
+    ));
+    let unchanged = repo.get_run(running.id).unwrap().unwrap();
+    assert_eq!(unchanged.status, RunStatus::Running);
+    assert!(unchanged.finished_at.is_none());
+
+    let missing = Uuid::new_v4();
+    assert!(matches!(
+        repo.finish_without_score(missing, RunStatus::Interrupted),
+        Err(StorageError::RunNotFound(id)) if id == missing
+    ));
+
+    repo.set_run_status(running.id, RunStatus::Completed)
+        .unwrap();
+    assert!(matches!(
+        repo.finish_without_score(running.id, RunStatus::Interrupted),
+        Err(StorageError::InvalidData(message)) if message.contains("running")
+    ));
+    assert_eq!(
+        repo.get_run(running.id).unwrap().unwrap().status,
+        RunStatus::Completed
+    );
+}

@@ -8,12 +8,14 @@ version = "0.1.0"
 dependencies = [
  "ability-core",
  "async-trait",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
+ "uuid",
  "windows-sys 0.61.2",
 ]
 

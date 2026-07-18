@@ -172,6 +172,51 @@ impl RunRepository {
         Ok(())
     }
 
+    pub fn finish_without_score(
+        &self,
+        run_id: Uuid,
+        status: RunStatus,
+    ) -> Result<(), StorageError> {
+        if !matches!(status, RunStatus::Cancelled | RunStatus::Interrupted) {
+            return Err(StorageError::InvalidData(
+                "finish_without_score requires cancelled or interrupted status".into(),
+            ));
+        }
+
+        let connection = self.connection.lock();
+        let changed = connection.execute(
+            "UPDATE runs
+             SET status_json=?2, finished_at=?3, score_json=NULL
+             WHERE id=?1 AND status_json=?4",
+            params![
+                run_id.to_string(),
+                serde_json::to_string(&status)?,
+                Utc::now().to_rfc3339(),
+                serde_json::to_string(&RunStatus::Running)?,
+            ],
+        )?;
+        if changed == 1 {
+            return Ok(());
+        }
+
+        let existing_status: Option<String> = connection
+            .query_row(
+                "SELECT status_json FROM runs WHERE id=?1",
+                [run_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match existing_status {
+            None => Err(StorageError::RunNotFound(run_id)),
+            Some(existing_status) => Err(StorageError::InvalidData(format!(
+                "finish_without_score requires a running run, found {}",
+                serde_json::from_str::<RunStatus>(&existing_status)
+                    .map(|value| format!("{value:?}"))
+                    .unwrap_or(existing_status)
+            ))),
+        }
+    }
+
     pub fn set_run_status(&self, run_id: Uuid, status: RunStatus) -> Result<(), StorageError> {
         let changed = self.connection.lock().execute(
             "UPDATE runs SET status_json=?2 WHERE id=?1",
@@ -202,6 +247,34 @@ impl RunRepository {
         let rows = statement.query_map([run_id.to_string()], row_to_task_result)?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StorageError::from)
+    }
+
+    pub fn get_run_task_counts(&self, run_id: Uuid) -> Result<Option<(u32, u32)>, StorageError> {
+        let counts: Option<(i64, i64)> = self
+            .connection
+            .lock()
+            .query_row(
+                "SELECT completed_tasks,total_tasks FROM runs WHERE id=?1",
+                [run_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        counts
+            .map(|(completed_tasks, total_tasks)| {
+                let completed_tasks = u32::try_from(completed_tasks).map_err(|_| {
+                    StorageError::InvalidData("stored completed_tasks is out of range".into())
+                })?;
+                let total_tasks = u32::try_from(total_tasks).map_err(|_| {
+                    StorageError::InvalidData("stored total_tasks is out of range".into())
+                })?;
+                if completed_tasks > total_tasks {
+                    return Err(StorageError::InvalidData(
+                        "stored completed_tasks exceeds total_tasks".into(),
+                    ));
+                }
+                Ok((completed_tasks, total_tasks))
+            })
+            .transpose()
     }
 
     pub fn list_runs(&self) -> Result<Vec<RunRecord>, StorageError> {

@@ -1,11 +1,13 @@
 mod classify;
 mod claude;
+mod cli_run;
 mod codex;
 mod process;
 mod verifier;
 
 pub use classify::*;
 pub use claude::*;
+pub use cli_run::*;
 pub use codex::*;
 pub use process::*;
 pub use verifier::*;
