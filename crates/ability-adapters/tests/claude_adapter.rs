@@ -1,6 +1,6 @@
 use ability_adapters::{
     AdapterCompletion, AdapterError, AgentAdapter, AuthState, ClaudeCodeAdapter, ExecutionRequest,
-    OutputStream, ProcessError, ProcessOutput, ProcessRunner, ProcessSpec,
+    OutputStream, ProcessEnvironment, ProcessError, ProcessOutput, ProcessRunner, ProcessSpec,
 };
 use ability_core::FailureKind;
 use async_trait::async_trait;
@@ -59,6 +59,7 @@ async fn claude_uses_only_constrained_noninteractive_arguments() {
     assert_eq!(specs[0].current_dir, PathBuf::from("C:/temp/task"));
     assert_eq!(specs[0].timeout, Duration::from_secs(600));
     assert!(specs[0].env.is_empty());
+    assert_eq!(specs[0].environment, ProcessEnvironment::Inherit);
     assert_eq!(
         specs[0].args,
         vec![

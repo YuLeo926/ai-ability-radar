@@ -1,6 +1,6 @@
 use ability_adapters::{
     AdapterCompletion, AdapterError, AgentAdapter, AuthState, CodexAdapter, ExecutionRequest,
-    OutputStream, ProcessError, ProcessOutput, ProcessRunner, ProcessSpec,
+    OutputStream, ProcessEnvironment, ProcessError, ProcessOutput, ProcessRunner, ProcessSpec,
 };
 use ability_core::FailureKind;
 use async_trait::async_trait;
@@ -58,6 +58,7 @@ async fn codex_uses_ephemeral_json_workspace_write() {
     assert!(matches!(result, AdapterCompletion::Completed { .. }));
     let specs = seen.lock().unwrap();
     assert_eq!(specs[0].program, "codex");
+    assert_eq!(specs[0].environment, ProcessEnvironment::Inherit);
     assert_eq!(
         specs[0].args,
         vec![

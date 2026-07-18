@@ -1,6 +1,6 @@
 use crate::{
-    AdapterCompletion, AdapterError, AgentAdapter, AuthState, ExecutionRequest, ProcessError,
-    ProcessRunner, ProcessSpec, TargetAvailability, classify_cli_failure,
+    AdapterCompletion, AdapterError, AgentAdapter, AuthState, ExecutionRequest, ProcessEnvironment,
+    ProcessError, ProcessRunner, ProcessSpec, TargetAvailability, classify_cli_failure,
     is_agent_budget_exhaustion,
 };
 use ability_core::{FailureKind, TargetKind};
@@ -113,6 +113,7 @@ fn detection_spec(args: Vec<String>) -> ProcessSpec {
         args,
         current_dir: std::env::temp_dir(),
         env: BTreeMap::new(),
+        environment: ProcessEnvironment::Inherit,
         timeout: Duration::from_secs(10),
     }
 }
@@ -155,6 +156,7 @@ fn execution_spec(request: ExecutionRequest) -> ProcessSpec {
         args,
         current_dir: request.workspace,
         env: BTreeMap::new(),
+        environment: ProcessEnvironment::Inherit,
         timeout: Duration::from_secs(request.time_budget_secs),
     }
 }

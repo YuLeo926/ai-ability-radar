@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "id": "cli-quick",
+  "version": "1.0.0",
+  "title": "CLI 快速体检",
+  "target_kinds": ["codex_cli", "claude_code"],
+  "tasks": [
+    {
+      "id": "dedupe-events",
+      "category": "cli_coding",
+      "prompt_file": "tasks/dedupe-events/prompt.md",
+      "starter_dir": "tasks/dedupe-events/starter",
+      "time_budget_secs": 1800,
+      "max_turns": 20,
+      "grader": {
+        "type": "external_verifier",
+        "verifier_id": "dedupe-events-v1"
+      }
+    },
+    {
+      "id": "retry-schedule",
+      "category": "cli_coding",
+      "prompt_file": "tasks/retry-schedule/prompt.md",
+      "starter_dir": "tasks/retry-schedule/starter",
+      "time_budget_secs": 1800,
+      "max_turns": 20,
+      "grader": {
+        "type": "external_verifier",
+        "verifier_id": "retry-schedule-v1"
+      }
+    }
+  ]
+}

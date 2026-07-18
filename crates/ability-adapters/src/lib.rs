@@ -2,11 +2,13 @@ mod classify;
 mod claude;
 mod codex;
 mod process;
+mod verifier;
 
 pub use classify::*;
 pub use claude::*;
 pub use codex::*;
 pub use process::*;
+pub use verifier::*;
 
 use ability_core::{FailureKind, TargetKind};
 use async_trait::async_trait;

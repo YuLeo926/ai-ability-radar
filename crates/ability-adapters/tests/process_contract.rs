@@ -1,6 +1,6 @@
 use ability_adapters::{
-    MAX_CAPTURE_BYTES_PER_STREAM, OutputStream, ProcessError, ProcessRunner, ProcessSpec,
-    TokioProcessRunner,
+    MAX_CAPTURE_BYTES_PER_STREAM, OutputStream, ProcessEnvironment, ProcessError, ProcessRunner,
+    ProcessSpec, TokioProcessRunner,
 };
 use std::collections::BTreeMap;
 #[cfg(windows)]
@@ -21,6 +21,7 @@ fn spec(script: impl Into<String>) -> ProcessSpec {
         args: vec!["-NoProfile".into(), "-Command".into(), script.into()],
         current_dir: tempdir().unwrap().keep(),
         env: BTreeMap::new(),
+        environment: ProcessEnvironment::Inherit,
         timeout: Duration::from_secs(5),
     }
 }
@@ -89,6 +90,7 @@ async fn preserves_argument_boundaries_and_overlays_environment() {
         ],
         current_dir: directory.path().to_path_buf(),
         env,
+        environment: ProcessEnvironment::Inherit,
         timeout: Duration::from_secs(5),
     };
 
@@ -97,6 +99,34 @@ async fn preserves_argument_boundaries_and_overlays_environment() {
         .await
         .unwrap();
     assert_eq!(output.stdout, "space value|&;|<>$()|overlay value");
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn environment_policy_distinguishes_inherit_from_clear() {
+    let environment_probe = || {
+        let mut command = spec("exit 0");
+        command.program = std::env::var("ComSpec").unwrap();
+        command.args = vec![
+            "/d".into(),
+            "/c".into(),
+            "if defined PATH (echo False) else (echo True)".into(),
+        ];
+        command
+    };
+    let inherited = TokioProcessRunner
+        .run(environment_probe(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(inherited.stdout.trim(), "False");
+
+    let mut cleared = environment_probe();
+    cleared.environment = ProcessEnvironment::Clear;
+    let cleared = TokioProcessRunner
+        .run(cleared, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(cleared.stdout.trim(), "True");
 }
 
 #[test]

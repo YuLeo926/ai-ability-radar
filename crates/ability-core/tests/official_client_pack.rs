@@ -27,7 +27,14 @@ fn client_quick_pack_has_the_approved_shape_and_gold_answers() {
         .find(|entry| entry.id == "cli-quick")
         .unwrap();
     assert_eq!(cli_entry.path, "cli-quick-v1");
-    assert_eq!(cli_entry.content_sha256, "0".repeat(64));
+    assert_eq!(cli_entry.content_sha256.len(), 64);
+    assert!(
+        cli_entry
+            .content_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    );
+    assert_ne!(cli_entry.content_sha256, "0".repeat(64));
     let mut unsealed_client_registry = registry.clone();
     unsealed_client_registry
         .packs

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -34,7 +34,14 @@ pub struct ProcessSpec {
     pub args: Vec<String>,
     pub current_dir: PathBuf,
     pub env: BTreeMap<String, String>,
+    pub environment: ProcessEnvironment,
     pub timeout: Duration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessEnvironment {
+    Inherit,
+    Clear,
 }
 
 impl fmt::Debug for ProcessSpec {
@@ -45,6 +52,7 @@ impl fmt::Debug for ProcessSpec {
             .field("args", &self.args)
             .field("current_dir", &self.current_dir)
             .field("env_keys", &self.env.keys().collect::<Vec<_>>())
+            .field("environment", &self.environment)
             .field("timeout", &self.timeout)
             .finish()
     }
@@ -110,7 +118,15 @@ impl ProcessRunner for TokioProcessRunner {
 
         let started = Instant::now();
         let mut supervisor = ProcessSupervisor::new().map_err(ProcessError::Supervision)?;
-        let mut command = Command::new(&spec.program);
+        let program = if spec.environment == ProcessEnvironment::Clear {
+            resolve_from_parent_path(&spec.program)
+        } else {
+            PathBuf::from(&spec.program)
+        };
+        let mut command = Command::new(program);
+        if spec.environment == ProcessEnvironment::Clear {
+            command.env_clear();
+        }
         command
             .args(&spec.args)
             .current_dir(&spec.current_dir)
@@ -223,6 +239,30 @@ impl ProcessRunner for TokioProcessRunner {
             }
         }
     }
+}
+
+fn resolve_from_parent_path(program: &str) -> PathBuf {
+    let program_path = Path::new(program);
+    if program_path.is_absolute() || program_path.components().count() > 1 {
+        return program_path.to_path_buf();
+    }
+    let Some(path) = std::env::var_os("PATH") else {
+        return program_path.to_path_buf();
+    };
+    for directory in std::env::split_paths(&path) {
+        let candidate = directory.join(program);
+        if candidate.is_file() {
+            return candidate;
+        }
+        #[cfg(windows)]
+        if candidate.extension().is_none() {
+            let executable = candidate.with_extension("exe");
+            if executable.is_file() {
+                return executable;
+            }
+        }
+    }
+    program_path.to_path_buf()
 }
 
 enum CaptureEvent {
