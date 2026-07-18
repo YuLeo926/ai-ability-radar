@@ -402,14 +402,14 @@ fn write_delayed_sentinel_helper(
             gate.to_string_lossy().replace('\'', "''")
         )
     });
-    let overflow = writes_overflow
-        .then(|| {
-            format!(
-                "; [Console]::Error.Write('Z' * {})",
-                MAX_CAPTURE_BYTES_PER_STREAM + 1
-            )
-        })
-        .unwrap_or_default();
+    let overflow = if writes_overflow {
+        format!(
+            "; [Console]::Error.Write('Z' * {})",
+            MAX_CAPTURE_BYTES_PER_STREAM + 1
+        )
+    } else {
+        String::new()
+    };
     std::fs::write(
         &helper,
         format!(

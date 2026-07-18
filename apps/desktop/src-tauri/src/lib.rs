@@ -4,7 +4,8 @@ mod dto;
 
 use app_state::AppState;
 use commands::{
-    cancel_run, export_public_report, get_bootstrap, get_run_detail, list_runs, next_manual_step,
+    cancel_run, delete_raw_artifacts, delete_run, delete_target_history, export_public_report,
+    get_bootstrap, get_run_detail, list_runs, next_manual_step, resume_cli_run, resume_manual_run,
     start_cli_run, start_manual_run, submit_manual_answer,
 };
 use tauri::Manager;
@@ -17,10 +18,15 @@ macro_rules! command_inventory {
             next_manual_step,
             submit_manual_answer,
             start_cli_run,
+            resume_manual_run,
+            resume_cli_run,
             cancel_run,
             list_runs,
             get_run_detail,
             export_public_report,
+            delete_raw_artifacts,
+            delete_run,
+            delete_target_history,
         )
     };
 }
@@ -70,10 +76,15 @@ mod tests {
                 "next_manual_step",
                 "submit_manual_answer",
                 "start_cli_run",
+                "resume_manual_run",
+                "resume_cli_run",
                 "cancel_run",
                 "list_runs",
                 "get_run_detail",
                 "export_public_report",
+                "delete_raw_artifacts",
+                "delete_run",
+                "delete_target_history",
             ]
         );
     }

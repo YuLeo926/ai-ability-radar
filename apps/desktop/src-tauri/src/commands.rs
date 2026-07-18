@@ -1,18 +1,20 @@
 use crate::app_state::{
     probe_node, public_cli_version, supported_node_lts, AppState, CancellationRegistration,
-    CancellationRegistry,
+    CancellationRegistry, RunOperationRegistry,
 };
 use crate::dto::{
-    BootstrapDto, CliRunEventDto, ExportReportInput, PackSummaryDto, RunDetailDto, RunErrorEvent,
+    BootstrapDto, CliRunEventDto, DeleteTargetHistoryInput, ExportReportInput, PackSummaryDto,
+    ResumeRunInput, ResumeTargetSelectionInput, RunDetailDto, RunErrorEvent, RunIdInput,
     StartRunInput, SubmitAnswerInput, TaskResultDto,
 };
 use ability_adapters::{
-    AgentAdapter, AuthState, CliRunService, PrerequisiteStatus, TargetAvailability,
+    AgentAdapter, AuthState, CliRunService, PrerequisiteStatus, ProcessRunner, TargetAvailability,
 };
 use ability_core::{
-    EnvironmentFingerprint, LoadedPack, ManualStep, RunMode, RunRecord, RunRepository, RunStatus,
-    TargetKind, TargetSelection,
+    ArtifactStore, EnvironmentFingerprint, LoadedPack, ManualStep, RunMode, RunRecord,
+    RunRepository, RunStatus, TargetKind, TargetSelection,
 };
+use std::collections::BTreeMap;
 use std::fs;
 #[cfg(windows)]
 use std::io::Write;
@@ -45,6 +47,9 @@ struct PreparedCliRun {
     cancellation: CancellationToken,
     _registration: CancellationRegistration,
 }
+
+const SAFE_BACKGROUND_ERROR: &str =
+    "CLI 运行被中断；本次不会作为能力失败计分，请查看本地记录后重试。";
 
 fn validate_start(input: StartRunInput, family: StartFamily) -> Result<ValidatedStart, String> {
     if input.mode != RunMode::Quick {
@@ -123,6 +128,63 @@ fn safe_cli_model(value: &str) -> bool {
         && characters.all(|character| {
             character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | ':' | '/' | '-')
         })
+}
+
+fn target_kind_is_in_family(kind: TargetKind, family: StartFamily) -> bool {
+    match family {
+        StartFamily::Manual => {
+            matches!(kind, TargetKind::ChatGptClient | TargetKind::ClaudeClient)
+        }
+        StartFamily::Cli => matches!(kind, TargetKind::CodexCli | TargetKind::ClaudeCode),
+    }
+}
+
+fn validate_resume_target(
+    input: ResumeTargetSelectionInput,
+    family: StartFamily,
+) -> Result<TargetSelection, String> {
+    if !target_kind_is_in_family(input.kind, family) {
+        return Err("恢复目标不属于当前体检类型。".into());
+    }
+    if input.reported_model.is_empty()
+        || input.reported_model.chars().count() > 120
+        || input.reported_model.trim() != input.reported_model
+        || input.reported_model.chars().any(char::is_control)
+    {
+        return Err("恢复目标包含无效的模型名称。".into());
+    }
+    if family == StartFamily::Cli && !safe_cli_model(&input.reported_model) {
+        return Err("恢复目标包含无效的 CLI 模型名称。".into());
+    }
+    if input.reasoning_effort.as_deref().is_some_and(|value| {
+        !matches!(value, "low" | "medium" | "high") || value.chars().any(char::is_control)
+    }) {
+        return Err("恢复目标包含无效的推理档位。".into());
+    }
+    Ok(TargetSelection {
+        kind: input.kind,
+        reported_model: input.reported_model,
+        reasoning_effort: input.reasoning_effort,
+    })
+}
+
+fn load_matching_resume_run(
+    repository: &RunRepository,
+    run_id: Uuid,
+    expected_target: &TargetSelection,
+    family: StartFamily,
+) -> Result<RunRecord, String> {
+    let stored = repository
+        .get_run(run_id)
+        .map_err(|_| "无法读取这次体检，请稍后重试。".to_string())?
+        .ok_or_else(|| "没有找到这次体检。".to_string())?;
+    if stored.status != RunStatus::Interrupted
+        || !target_kind_is_in_family(stored.target.kind, family)
+        || stored.target != *expected_target
+    {
+        return Err("恢复请求与原体检配置不一致。".into());
+    }
+    Ok(stored)
 }
 
 fn validate_cli_readiness(
@@ -249,6 +311,34 @@ pub fn start_manual_run(
 }
 
 #[tauri::command]
+pub fn resume_manual_run(
+    state: State<'_, AppState>,
+    input: ResumeRunInput,
+) -> Result<RunRecord, String> {
+    let run_id = parse_run_id(&input.run_id)?;
+    let _operation = state
+        .run_operations
+        .claim([run_id])
+        .map_err(|_| "这次体检正在恢复、运行或清理数据，请勿重复操作。".to_string())?;
+    let expected_target = validate_resume_target(input.expected_target, StartFamily::Manual)?;
+    load_matching_resume_run(
+        &state.repository,
+        run_id,
+        &expected_target,
+        StartFamily::Manual,
+    )?;
+    state
+        .manual_runs
+        .resume(
+            run_id,
+            expected_target,
+            state.client_pack.clone(),
+            environment(&state.client_pack, None, None),
+        )
+        .map_err(|_| "无法恢复这次体检；本地检查点或运行环境已变化。".to_string())
+}
+
+#[tauri::command]
 pub fn next_manual_step(
     state: State<'_, AppState>,
     run_id: String,
@@ -302,6 +392,94 @@ pub async fn start_cli_run(
     Ok(run)
 }
 
+#[tauri::command]
+pub async fn resume_cli_run(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: ResumeRunInput,
+) -> Result<RunRecord, String> {
+    let run_id = parse_run_id(&input.run_id)?;
+    let _operation = state
+        .run_operations
+        .claim([run_id])
+        .map_err(|_| "这次体检正在恢复、运行或清理数据，请勿重复操作。".to_string())?;
+    let expected_target = validate_resume_target(input.expected_target, StartFamily::Cli)?;
+    resume_cli_run_with(
+        CliResumeContext {
+            repository: &state.repository,
+            service: &state.cli_runs,
+            pack: state.cli_pack.clone(),
+            adapters: &state.adapters,
+            runner: state.runner.clone(),
+            cancellations: &state.cancellations,
+        },
+        run_id,
+        expected_target,
+        |adapter, prepared| spawn_cli_run(app, &state, adapter, prepared),
+    )
+    .await
+}
+
+struct CliResumeContext<'a> {
+    repository: &'a RunRepository,
+    service: &'a CliRunService,
+    pack: Arc<LoadedPack>,
+    adapters: &'a BTreeMap<TargetKind, Arc<dyn AgentAdapter>>,
+    runner: Arc<dyn ProcessRunner>,
+    cancellations: &'a CancellationRegistry,
+}
+
+async fn resume_cli_run_with<S>(
+    context: CliResumeContext<'_>,
+    run_id: Uuid,
+    expected_target: TargetSelection,
+    spawn: S,
+) -> Result<RunRecord, String>
+where
+    S: FnOnce(Arc<dyn AgentAdapter>, PreparedCliRun),
+{
+    let CliResumeContext {
+        repository,
+        service,
+        pack,
+        adapters,
+        runner,
+        cancellations,
+    } = context;
+    let stored = load_matching_resume_run(repository, run_id, &expected_target, StartFamily::Cli)?;
+    let expected_kind = stored.target.kind;
+    let cancellation = CancellationToken::new();
+    let registration = cancellations
+        .register(run_id, cancellation.clone())
+        .map_err(|_| "这次体检正在恢复或运行，请勿重复启动。".to_string())?;
+    let adapter = adapters
+        .get(&expected_kind)
+        .cloned()
+        .ok_or_else(|| "当前版本不支持这个 CLI。".to_string())?;
+    let availability = adapter.detect().await;
+    let node = probe_node(runner).await;
+    let readiness = validate_cli_readiness(expected_kind, availability, node)?;
+    let run = service
+        .resume(
+            run_id,
+            expected_target,
+            &pack,
+            environment(
+                &pack,
+                Some(readiness.cli_version),
+                Some(readiness.node_version),
+            ),
+        )
+        .map_err(|_| "无法恢复这次 CLI 体检；检查点或运行环境已变化。".to_string())?;
+    let prepared = PreparedCliRun {
+        run: run.clone(),
+        cancellation,
+        _registration: registration,
+    };
+    spawn(adapter, prepared);
+    Ok(run)
+}
+
 fn spawn_cli_run(
     app: AppHandle,
     state: &AppState,
@@ -332,7 +510,7 @@ fn spawn_cli_run(
                 sender,
             )
             .await
-            .map_err(|error| error.to_string());
+            .map_err(|_| SAFE_BACKGROUND_ERROR.to_string());
         if let Some(error) = finish_background(&repository, run_id, result) {
             let _ = app.emit("run://error", error);
         }
@@ -344,27 +522,24 @@ fn finish_background(
     run_id: Uuid,
     result: Result<(), String>,
 ) -> Option<RunErrorEvent> {
-    let primary = result.err()?;
-    let terminalization_error = match repository.get_run(run_id) {
+    result.err()?;
+    match repository.get_run(run_id) {
         Ok(Some(run)) if run.status == RunStatus::Running => {
             match repository.finish_without_score(run_id, RunStatus::Interrupted) {
-                Ok(()) => None,
+                Ok(()) => {}
                 Err(error) => match repository.get_run(run_id) {
-                    Ok(Some(run)) if run.status != RunStatus::Running => None,
-                    _ => Some(error.to_string()),
+                    Ok(Some(run)) if run.status != RunStatus::Running => {}
+                    _ => {
+                        let _ = error;
+                    }
                 },
             }
         }
-        Ok(Some(_)) => None,
-        Ok(None) => Some(format!("run {run_id} was not found")),
-        Err(error) => Some(error.to_string()),
-    };
-    let message = terminalization_error.map_or(primary.clone(), |secondary| {
-        format!("{primary}; terminalization failed: {secondary}")
-    });
+        Ok(Some(_)) | Ok(None) | Err(_) => {}
+    }
     Some(RunErrorEvent {
         run_id: run_id.to_string(),
-        message,
+        message: SAFE_BACKGROUND_ERROR.into(),
     })
 }
 
@@ -387,6 +562,152 @@ pub fn get_run_detail(
     run_id: String,
 ) -> Result<Option<RunDetailDto>, String> {
     run_detail_from_repository(&state.repository, parse_run_id(&run_id)?)
+}
+
+#[tauri::command]
+pub fn delete_raw_artifacts(state: State<'_, AppState>, input: RunIdInput) -> Result<(), String> {
+    let run_id = parse_run_id(&input.run_id)?;
+    let store = ArtifactStore::new(state.artifact_root.clone());
+    delete_raw_artifacts_for(&state.repository, &store, &state.run_operations, run_id)
+}
+
+#[tauri::command]
+pub fn delete_run(state: State<'_, AppState>, input: RunIdInput) -> Result<bool, String> {
+    let run_id = parse_run_id(&input.run_id)?;
+    let store = ArtifactStore::new(state.artifact_root.clone());
+    delete_run_for(&state.repository, &store, &state.run_operations, run_id)
+}
+
+#[tauri::command]
+pub fn delete_target_history(
+    state: State<'_, AppState>,
+    input: DeleteTargetHistoryInput,
+) -> Result<u32, String> {
+    let expected = parse_expected_run_ids(&input.expected_run_ids)?;
+    let store = ArtifactStore::new(state.artifact_root.clone());
+    delete_target_history_for(
+        &state.repository,
+        &store,
+        &state.run_operations,
+        input.target,
+        &expected,
+    )
+}
+
+fn parse_expected_run_ids(values: &[String]) -> Result<Vec<Uuid>, String> {
+    if values.len() > 10_000 {
+        return Err("确认的历史记录数量超过支持范围。".into());
+    }
+    let mut ids = values
+        .iter()
+        .map(|value| parse_run_id(value))
+        .collect::<Result<Vec<_>, _>>()?;
+    ids.sort_unstable();
+    if ids.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err("确认的历史记录包含重复项，请重新检查。".into());
+    }
+    Ok(ids)
+}
+
+fn ensure_inactive_run(
+    repository: &RunRepository,
+    run_id: Uuid,
+) -> Result<Option<RunRecord>, String> {
+    let run = repository
+        .get_run(run_id)
+        .map_err(|_| "无法读取本地记录，请稍后重试。".to_string())?;
+    if run
+        .as_ref()
+        .is_some_and(|record| record.status == RunStatus::Running)
+    {
+        return Err("运行中的体检不能删除或清理数据。".into());
+    }
+    Ok(run)
+}
+
+fn delete_raw_artifacts_for(
+    repository: &RunRepository,
+    store: &ArtifactStore,
+    operations: &RunOperationRegistry,
+    run_id: Uuid,
+) -> Result<(), String> {
+    let _operation = operations
+        .claim([run_id])
+        .map_err(|_| "这次体检正在恢复、运行或清理数据，当前不能删除。".to_string())?;
+    let run =
+        ensure_inactive_run(repository, run_id)?.ok_or_else(|| "没有找到这次体检。".to_string())?;
+    store
+        .delete_run_artifacts(run_id, run.target.kind)
+        .map_err(|_| "无法安全删除本地原始数据；未更改体检记录。".to_string())?;
+    repository
+        .clear_artifact_references(run_id)
+        .map_err(|_| "原始数据已移除，但记录更新失败；可以安全重试。".to_string())?;
+    Ok(())
+}
+
+fn delete_run_for(
+    repository: &RunRepository,
+    store: &ArtifactStore,
+    operations: &RunOperationRegistry,
+    run_id: Uuid,
+) -> Result<bool, String> {
+    let _operation = operations
+        .claim([run_id])
+        .map_err(|_| "这次体检正在恢复、运行或清理数据，当前不能删除。".to_string())?;
+    let Some(run) = ensure_inactive_run(repository, run_id)? else {
+        return Ok(false);
+    };
+    store
+        .delete_run_artifacts(run_id, run.target.kind)
+        .map_err(|_| "无法安全删除本地原始数据；体检记录仍被保留。".to_string())?;
+    repository
+        .delete_run(run_id)
+        .map_err(|_| "原始数据已移除，但体检记录删除失败；可以安全重试。".to_string())
+}
+
+fn delete_target_history_for(
+    repository: &RunRepository,
+    store: &ArtifactStore,
+    operations: &RunOperationRegistry,
+    target: TargetKind,
+    expected_run_ids: &[Uuid],
+) -> Result<u32, String> {
+    let _operations = operations
+        .claim(expected_run_ids.iter().copied())
+        .map_err(|_| "部分体检正在恢复、运行或清理数据，当前不能批量删除。".to_string())?;
+    let runs = repository
+        .list_runs()
+        .map_err(|_| "无法读取本地历史，请稍后重试。".to_string())?;
+    let mut current = runs
+        .iter()
+        .filter(|run| run.target.kind == target)
+        .map(|run| run.id)
+        .collect::<Vec<_>>();
+    current.sort_unstable();
+    let mut expected = expected_run_ids.to_vec();
+    expected.sort_unstable();
+    if current != expected {
+        return Err("历史记录在确认后发生了变化，请重新检查再删除。".into());
+    }
+    if runs
+        .iter()
+        .any(|run| expected.binary_search(&run.id).is_ok() && run.status == RunStatus::Running)
+    {
+        return Err("运行中的体检不能删除。".into());
+    }
+    for run_id in &expected {
+        let persisted_target = runs
+            .iter()
+            .find(|run| run.id == *run_id)
+            .map(|run| run.target.kind)
+            .ok_or_else(|| "历史记录在确认后发生了变化，请重新检查再删除。".to_string())?;
+        store
+            .delete_run_artifacts(*run_id, persisted_target)
+            .map_err(|_| "无法安全删除全部本地原始数据；历史记录仍被保留。".to_string())?;
+    }
+    repository
+        .delete_target_history(target, &expected)
+        .map_err(|_| "原始数据已移除，但历史记录删除失败；可以安全重试。".to_string())
 }
 
 #[tauri::command]
@@ -1155,14 +1476,77 @@ mod tests {
     use super::*;
     use crate::app_state::CancellationRegistry;
     use crate::dto::{StartRunInput, TargetSelectionInput};
-    use ability_adapters::{AuthState, CliRunService, PrerequisiteStatus, TargetAvailability};
+    use ability_adapters::{
+        AdapterCompletion, AdapterError, AuthState, CliRunService, ExecutionRequest,
+        PrerequisiteStatus, ProcessError, ProcessOutput, ProcessRunner, ProcessSpec,
+        TargetAvailability,
+    };
     use ability_core::{
         Category, EnvironmentFingerprint, FailureKind, LoadedPack, PackLoader, RunMode, RunRecord,
         RunRepository, RunStatus, TargetKind, TargetSelection, TaskOutcome, TaskResult,
     };
+    use std::collections::BTreeMap;
     use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use tempfile::tempdir;
+
+    struct CountingAdapter {
+        detect_calls: AtomicUsize,
+        execute_calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl AgentAdapter for CountingAdapter {
+        fn kind(&self) -> TargetKind {
+            TargetKind::CodexCli
+        }
+
+        async fn detect(&self) -> TargetAvailability {
+            self.detect_calls.fetch_add(1, Ordering::SeqCst);
+            TargetAvailability {
+                kind: TargetKind::CodexCli,
+                installed: true,
+                version: Some("codex-cli 1.2.3".into()),
+                auth_state: AuthState::Ready,
+                prerequisites: Vec::new(),
+            }
+        }
+
+        async fn execute(
+            &self,
+            _request: ExecutionRequest,
+            _cancellation: CancellationToken,
+        ) -> Result<AdapterCompletion, AdapterError> {
+            self.execute_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(AdapterCompletion::Completed {
+                duration_ms: 1,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    struct CountingRunner {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl ProcessRunner for CountingRunner {
+        async fn run(
+            &self,
+            _spec: ProcessSpec,
+            _cancellation: CancellationToken,
+        ) -> Result<ProcessOutput, ProcessError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ProcessOutput {
+                exit_code: Some(0),
+                stdout: "v22.0.0".into(),
+                stderr: String::new(),
+                duration_ms: 1,
+            })
+        }
+    }
 
     #[test]
     fn target_values_are_normalized_before_use() {
@@ -1263,6 +1647,72 @@ mod tests {
         assert!(!cancellations.cancel(uuid::Uuid::new_v4()));
         drop(service);
         drop(pack);
+    }
+
+    #[tokio::test]
+    async fn cli_resume_target_mismatches_call_no_adapter_probe_spawn_or_registration() {
+        let mismatches: [fn(&mut TargetSelection); 3] = [
+            |target| target.kind = TargetKind::ClaudeCode,
+            |target| target.reported_model = "changed-model".into(),
+            |target| target.reasoning_effort = Some("high".into()),
+        ];
+
+        for mutate in mismatches {
+            let directory = tempdir().unwrap();
+            let repository =
+                Arc::new(RunRepository::open(&directory.path().join("runs.db")).unwrap());
+            let artifact_root = directory.path().join("artifacts");
+            let service = CliRunService::new(repository.clone(), artifact_root.clone());
+            let pack = cli_pack();
+            let run = insert_run(&repository, RunStatus::Running);
+            repository
+                .finish_without_score(run.id, RunStatus::Interrupted)
+                .unwrap();
+            let mut expected_target = run.target.clone();
+            mutate(&mut expected_target);
+
+            let adapter = Arc::new(CountingAdapter {
+                detect_calls: AtomicUsize::new(0),
+                execute_calls: AtomicUsize::new(0),
+            });
+            let mut adapters = BTreeMap::<TargetKind, Arc<dyn AgentAdapter>>::new();
+            adapters.insert(TargetKind::CodexCli, adapter.clone());
+            let runner = Arc::new(CountingRunner {
+                calls: AtomicUsize::new(0),
+            });
+            let cancellations = CancellationRegistry::default();
+            let spawn_calls = Arc::new(AtomicUsize::new(0));
+            let spawn_counter = spawn_calls.clone();
+
+            let result = resume_cli_run_with(
+                CliResumeContext {
+                    repository: &repository,
+                    service: &service,
+                    pack,
+                    adapters: &adapters,
+                    runner: runner.clone(),
+                    cancellations: &cancellations,
+                },
+                run.id,
+                expected_target,
+                move |_, _| {
+                    spawn_counter.fetch_add(1, Ordering::SeqCst);
+                },
+            )
+            .await;
+
+            assert!(result.is_err());
+            assert_eq!(adapter.detect_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(adapter.execute_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(runner.calls.load(Ordering::SeqCst), 0);
+            assert_eq!(spawn_calls.load(Ordering::SeqCst), 0);
+            assert!(!cancellations.cancel(run.id));
+            assert_eq!(
+                repository.get_run(run.id).unwrap().unwrap().status,
+                RunStatus::Interrupted
+            );
+            assert!(!artifact_root.exists());
+        }
     }
 
     #[test]
@@ -1400,7 +1850,7 @@ mod tests {
     }
 
     #[test]
-    fn background_errors_interrupt_only_running_rows_and_preserve_primary_error() {
+    fn background_errors_interrupt_only_running_rows_and_expose_only_safe_copy() {
         let directory = tempdir().unwrap();
         let repository = RunRepository::open(&directory.path().join("runs.db")).unwrap();
         let running = insert_run(&repository, RunStatus::Running);
@@ -1408,7 +1858,8 @@ mod tests {
         let event =
             finish_background(&repository, running.id, Err("primary failure".into())).unwrap();
 
-        assert!(event.message.contains("primary failure"));
+        assert_eq!(event.message, SAFE_BACKGROUND_ERROR);
+        assert!(!event.message.contains("primary failure"));
         assert_eq!(
             repository.get_run(running.id).unwrap().unwrap().status,
             RunStatus::Interrupted
@@ -1417,7 +1868,8 @@ mod tests {
         let completed = insert_run(&repository, RunStatus::Completed);
         let event =
             finish_background(&repository, completed.id, Err("late failure".into())).unwrap();
-        assert_eq!(event.message, "late failure");
+        assert_eq!(event.message, SAFE_BACKGROUND_ERROR);
+        assert!(!event.message.contains("late failure"));
         assert_eq!(
             repository.get_run(completed.id).unwrap().unwrap().status,
             RunStatus::Completed
@@ -1425,16 +1877,17 @@ mod tests {
     }
 
     #[test]
-    fn background_error_reports_secondary_terminalization_failure() {
+    fn background_error_never_exposes_secondary_terminalization_details() {
         let directory = tempdir().unwrap();
         let repository = RunRepository::open(&directory.path().join("runs.db")).unwrap();
         let missing = uuid::Uuid::new_v4();
 
         let event = finish_background(&repository, missing, Err("primary failure".into())).unwrap();
 
-        assert!(event.message.contains("primary failure"));
-        assert!(event.message.contains("terminalization"));
-        assert!(event.message.contains(&missing.to_string()));
+        assert_eq!(event.message, SAFE_BACKGROUND_ERROR);
+        assert!(!event.message.contains("primary failure"));
+        assert!(!event.message.contains("terminalization"));
+        assert!(!event.message.contains(&missing.to_string()));
     }
 
     #[test]
@@ -1473,6 +1926,134 @@ mod tests {
         assert!(serialized.contains("\"outcome\":\"failed\""));
         assert!(serialized.contains("\"failureKind\":\"wrong_answer\""));
         assert!(serialized.contains(&relative_artifact));
+    }
+
+    #[test]
+    fn raw_delete_is_retryable_when_database_reference_cleanup_is_injected_to_fail() {
+        let directory = tempdir().unwrap();
+        let database = directory.path().join("runs.db");
+        let repository = RunRepository::open(&database).unwrap();
+        let run = insert_run(&repository, RunStatus::Running);
+        let relative = format!("runs/{}/logs/dedupe-events.log", run.id);
+        repository
+            .save_task_result(&TaskResult {
+                run_id: run.id,
+                task_id: "dedupe-events".into(),
+                category: Category::CliCoding,
+                outcome: TaskOutcome::Passed,
+                score: Some(100.0),
+                failure_kind: None,
+                duration_ms: 1,
+                answer_rel_path: Some(relative),
+                detail: "pass".into(),
+            })
+            .unwrap();
+        repository
+            .finish_without_score(run.id, RunStatus::Interrupted)
+            .unwrap();
+        let artifact_root = directory.path().join("artifacts");
+        let raw = artifact_root
+            .join("runs")
+            .join(run.id.to_string())
+            .join("logs/dedupe-events.log");
+        std::fs::create_dir_all(raw.parent().unwrap()).unwrap();
+        std::fs::write(&raw, "private CLI log").unwrap();
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER fail_clear BEFORE UPDATE OF answer_rel_path ON task_results
+                 BEGIN SELECT RAISE(ABORT, 'C:\\Users\\Alice\\secret'); END;",
+            )
+            .unwrap();
+        drop(connection);
+        let store = ability_core::ArtifactStore::new(artifact_root);
+        let operations = RunOperationRegistry::default();
+
+        let error = delete_raw_artifacts_for(&repository, &store, &operations, run.id).unwrap_err();
+        assert!(!error.contains("Alice"));
+        assert!(!raw.exists());
+        assert!(repository.get_task_results(run.id).unwrap()[0]
+            .answer_rel_path
+            .is_some());
+
+        let connection = rusqlite::Connection::open(database).unwrap();
+        connection.execute_batch("DROP TRIGGER fail_clear").unwrap();
+        drop(connection);
+        delete_raw_artifacts_for(&repository, &store, &operations, run.id).unwrap();
+        assert_eq!(
+            repository.get_task_results(run.id).unwrap()[0].answer_rel_path,
+            None
+        );
+    }
+
+    #[test]
+    fn destructive_helpers_reject_active_and_stale_confirmations_before_file_deletion() {
+        let directory = tempdir().unwrap();
+        let repository = RunRepository::open(&directory.path().join("runs.db")).unwrap();
+        let active = insert_run(&repository, RunStatus::Running);
+        let artifact_root = directory.path().join("artifacts");
+        let active_raw = artifact_root
+            .join("runs")
+            .join(active.id.to_string())
+            .join("logs/active.log");
+        std::fs::create_dir_all(active_raw.parent().unwrap()).unwrap();
+        std::fs::write(&active_raw, "active").unwrap();
+        let store = ability_core::ArtifactStore::new(artifact_root.clone());
+        let operations = RunOperationRegistry::default();
+
+        assert!(delete_run_for(&repository, &store, &operations, active.id).is_err());
+        assert!(active_raw.exists());
+
+        repository
+            .finish_without_score(active.id, RunStatus::Interrupted)
+            .unwrap();
+        let recovery_claim = operations.claim([active.id]).unwrap();
+        assert!(
+            delete_run_for(&repository, &store, &operations, active.id).is_err(),
+            "a recovery claim must reject deletion before artifact access"
+        );
+        assert!(active_raw.exists());
+        drop(recovery_claim);
+
+        let new_run = insert_run(&repository, RunStatus::Running);
+        repository
+            .finish_without_score(new_run.id, RunStatus::Interrupted)
+            .unwrap();
+        let new_raw = artifact_root
+            .join("runs")
+            .join(new_run.id.to_string())
+            .join("logs/new.log");
+        std::fs::create_dir_all(new_raw.parent().unwrap()).unwrap();
+        std::fs::write(&new_raw, "new").unwrap();
+
+        let one_batch_member = operations.claim([new_run.id]).unwrap();
+        assert!(
+            delete_target_history_for(
+                &repository,
+                &store,
+                &operations,
+                TargetKind::CodexCli,
+                &[active.id, new_run.id],
+            )
+            .is_err(),
+            "a conflicting batch claim must reject before touching any artifact"
+        );
+        assert!(active_raw.exists());
+        assert!(new_raw.exists());
+        drop(one_batch_member);
+
+        assert!(delete_target_history_for(
+            &repository,
+            &store,
+            &operations,
+            TargetKind::CodexCli,
+            &[active.id],
+        )
+        .is_err());
+        assert!(active_raw.exists());
+        assert!(new_raw.exists());
+        assert!(repository.get_run(active.id).unwrap().is_some());
+        assert!(repository.get_run(new_run.id).unwrap().is_some());
     }
 
     #[test]

@@ -506,6 +506,70 @@
   color: #174c43;
 }
 
+.evidence-button.danger {
+  border-color: #8e382d;
+  background: #9f4135;
+  color: #fff;
+}
+
+.evidence-button.danger-outline {
+  border-color: #b16459;
+  background: transparent;
+  color: #80382f;
+}
+
+.inline-confirmation {
+  display: grid;
+  gap: 0.7rem;
+  margin-top: 0.9rem;
+  padding: 1rem;
+  border: 1px solid #d5a097;
+  border-radius: 0.8rem;
+  background: #fff7f5;
+  color: #5b302a;
+}
+
+.inline-confirmation h3,
+.inline-confirmation p {
+  margin: 0;
+}
+
+.inline-confirmation .form-error {
+  padding: 0.7rem 0.8rem;
+  border-left: 0.25rem solid #b84e3b;
+  background: #fff0ed;
+  color: #742f25;
+}
+
+.inline-confirmation-actions,
+.data-management-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
+.data-management,
+.history-data-controls {
+  margin-top: 1rem;
+}
+
+.data-management > p {
+  max-width: 52rem;
+  color: #557069;
+}
+
+.data-management-actions {
+  margin-top: 0.9rem;
+}
+
+.data-status {
+  padding: 0.8rem 0.9rem;
+  border-left: 0.3rem solid #147d70;
+  background: #edf6f3;
+  color: #29463f;
+  font-weight: 700;
+}
+
 .evidence-state {
   display: grid;
   min-height: 55vh;
@@ -585,7 +649,10 @@
 
 .history-record {
   display: grid;
-  grid-template-columns: minmax(12rem, 1.4fr) minmax(9rem, 1fr) auto;
+  grid-template-columns:
+    minmax(12rem, 1.4fr)
+    minmax(9rem, 1fr)
+    repeat(2, auto);
   gap: 0.8rem;
   align-items: center;
   padding: 0.7rem 0.8rem;

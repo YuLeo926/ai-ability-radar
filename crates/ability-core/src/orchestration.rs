@@ -1,13 +1,11 @@
 use crate::{
-    EnvironmentFingerprint, FailureKind, GraderSpec, LoadedPack, RunMode, RunRecord, RunRepository,
-    RunStatus, StorageError, TargetKind, TargetSelection, TaskOutcome, TaskResult,
-    grade_submission, summarize_scores,
+    ArtifactStore, EnvironmentFingerprint, FailureKind, GraderSpec, LoadedPack,
+    RecoveryArtifactCheckpoint, RunMode, RunRecord, RunRepository, RunStatus, StorageError,
+    TargetKind, TargetSelection, TaskOutcome, TaskResult, grade_submission, summarize_scores,
 };
 use serde::Serialize;
 use std::collections::HashMap;
-#[cfg(windows)]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use thiserror::Error;
@@ -42,6 +40,8 @@ pub enum RunServiceError {
     UnsupportedTarget,
     #[error("environment does not match the selected pack")]
     EnvironmentMismatch,
+    #[error("run cannot be resumed: {0}")]
+    NotResumable(String),
     #[error("manual runs do not support task {task_id} because it requires an external verifier")]
     UnsupportedGrader { task_id: String },
     #[error("answer was submitted out of order")]
@@ -64,16 +64,16 @@ pub enum RunServiceError {
     Io(#[from] std::io::Error),
     #[error("checkpoint storage failed and artifact cleanup failed: {storage}; {cleanup}")]
     CheckpointCleanup {
-        storage: StorageError,
+        storage: Box<StorageError>,
         cleanup: std::io::Error,
     },
     #[error(
         "checkpoint storage failed, artifact cleanup failed, and interruption status failed: {storage}; {cleanup}; {status}"
     )]
     CheckpointCleanupTerminal {
-        storage: StorageError,
+        storage: Box<StorageError>,
         cleanup: std::io::Error,
-        status: StorageError,
+        status: Box<StorageError>,
     },
     #[error("service state lock is poisoned")]
     Poisoned,
@@ -174,6 +174,79 @@ impl ManualRunService {
             },
         );
         Ok(run)
+    }
+
+    pub fn resume(
+        &self,
+        run_id: Uuid,
+        expected_target: TargetSelection,
+        pack: Arc<LoadedPack>,
+        current_environment: EnvironmentFingerprint,
+    ) -> Result<RunRecord, RunServiceError> {
+        validate_artifact_root(&self.artifact_root)?;
+        for task in &pack.tasks {
+            validate_task_artifact_names(&task.definition.id)?;
+        }
+        if pack
+            .tasks
+            .iter()
+            .any(|task| matches!(task.definition.grader, GraderSpec::ExternalVerifier { .. }))
+        {
+            return Err(RunServiceError::NotResumable(
+                "the sealed client task pack is not supported".into(),
+            ));
+        }
+
+        let mut active = self.active.lock().map_err(|_| RunServiceError::Poisoned)?;
+        if active.contains_key(&run_id) {
+            return Err(RunServiceError::NotResumable(
+                "the run is already active".into(),
+            ));
+        }
+        let artifact_store = ArtifactStore::new(self.artifact_root.clone());
+        let pack_task_ids = pack
+            .tasks
+            .iter()
+            .map(|task| task.definition.id.clone())
+            .collect::<Vec<_>>();
+        let resumed = self
+            .repository
+            .resume_run(run_id, &expected_target, |run, results| {
+                if run.target != expected_target {
+                    return Err(StorageError::InvalidData(
+                        "run target changed while recovery was being validated".into(),
+                    ));
+                }
+                validate_recovery(run, results, &pack, &current_environment, false)?;
+                let checkpoints = results
+                    .iter()
+                    .map(|result| RecoveryArtifactCheckpoint {
+                        task_id: result.task_id.clone(),
+                        raw_artifact: true,
+                    })
+                    .collect::<Vec<_>>();
+                artifact_store
+                    .prepare_recovery_artifacts(
+                        run.id,
+                        run.target.kind,
+                        &pack_task_ids,
+                        &checkpoints,
+                    )
+                    .map_err(|_| {
+                        StorageError::InvalidData(
+                            "recovery artifact ownership is inconsistent".into(),
+                        )
+                    })
+            })
+            .map_err(map_resume_storage_error)?;
+        active.insert(
+            run_id,
+            ActiveManualRun {
+                pack,
+                task_started: Instant::now(),
+            },
+        );
+        Ok(resumed)
     }
 
     pub fn next_step(&self, run_id: Uuid) -> Result<Option<ManualStep>, RunServiceError> {
@@ -331,13 +404,13 @@ impl ManualRunService {
                         .set_run_status(run_id, RunStatus::Interrupted);
                     match status_result {
                         Ok(()) => Err(RunServiceError::CheckpointCleanup {
-                            storage: error,
+                            storage: Box::new(error),
                             cleanup,
                         }),
                         Err(status) => Err(RunServiceError::CheckpointCleanupTerminal {
-                            storage: error,
+                            storage: Box::new(error),
                             cleanup,
-                            status,
+                            status: Box::new(status),
                         }),
                     }
                 }
@@ -515,6 +588,131 @@ impl ManualRunService {
     }
 }
 
+fn map_resume_storage_error(error: StorageError) -> RunServiceError {
+    match error {
+        StorageError::InvalidData(_) => {
+            RunServiceError::NotResumable("stored recovery data did not pass validation".into())
+        }
+        other => RunServiceError::Storage(other),
+    }
+}
+
+pub fn validate_recovery(
+    run: &RunRecord,
+    results: &[TaskResult],
+    pack: &LoadedPack,
+    current_environment: &EnvironmentFingerprint,
+    cli: bool,
+) -> Result<(), StorageError> {
+    validate_recovery_checkpoints(run, results, pack, cli)?;
+    let mut persisted_environment = run.environment.clone();
+    persisted_environment.resumed = false;
+    if current_environment.resumed || persisted_environment != *current_environment {
+        return Err(StorageError::InvalidData(
+            "run or environment recovery identity is inconsistent".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_recovery_checkpoints(
+    run: &RunRecord,
+    results: &[TaskResult],
+    pack: &LoadedPack,
+    cli: bool,
+) -> Result<(), StorageError> {
+    let expected_target = if cli {
+        matches!(
+            run.target.kind,
+            TargetKind::CodexCli | TargetKind::ClaudeCode
+        )
+    } else {
+        matches!(
+            run.target.kind,
+            TargetKind::ChatGptClient | TargetKind::ClaudeClient
+        )
+    };
+    let expected_count = u32::try_from(pack.tasks.len())
+        .map_err(|_| StorageError::InvalidData("task count exceeds supported range".into()))?;
+    if !expected_target
+        || run.mode != RunMode::Quick
+        || !pack.manifest.target_kinds.contains(&run.target.kind)
+        || run.suite_id != pack.manifest.id
+        || run.suite_version != pack.manifest.version
+        || run.total_tasks != expected_count
+        || run.completed_tasks != u32::try_from(results.len()).unwrap_or(u32::MAX)
+        || run.score.is_some()
+        || run.environment.suite_id != pack.manifest.id
+        || run.environment.suite_version != pack.manifest.version
+        || run.environment.suite_content_sha256 != pack.content_sha256
+        || run.environment.scoring_rule_version != "ability-v1"
+    {
+        return Err(StorageError::InvalidData(
+            "run or environment recovery identity is inconsistent".into(),
+        ));
+    }
+
+    let mut checkpoints = HashMap::with_capacity(results.len());
+    for result in results {
+        if result.run_id != run.id
+            || checkpoints
+                .insert(result.task_id.as_str(), result)
+                .is_some()
+            || !valid_recovery_result(result, cli)
+        {
+            return Err(StorageError::InvalidData(
+                "checkpoint evidence is inconsistent".into(),
+            ));
+        }
+    }
+
+    for task in pack.tasks.iter().take(results.len()) {
+        let result = checkpoints
+            .get(task.definition.id.as_str())
+            .ok_or_else(|| {
+                StorageError::InvalidData(
+                    "checkpoint is not an exact prefix of the sealed pack".into(),
+                )
+            })?;
+        if result.category != task.definition.category {
+            return Err(StorageError::InvalidData(
+                "checkpoint evidence is inconsistent".into(),
+            ));
+        }
+        let expected_artifact = if cli {
+            match result.failure_kind {
+                Some(FailureKind::AgentBudgetExceeded) => None,
+                _ => Some(format!("runs/{}/logs/{}.log", run.id, result.task_id)),
+            }
+        } else {
+            Some(format!("runs/{}/{}.txt", run.id, result.task_id))
+        };
+        if result.answer_rel_path != expected_artifact {
+            return Err(StorageError::InvalidData(
+                "checkpoint artifact ownership is inconsistent".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn valid_recovery_result(result: &TaskResult, cli: bool) -> bool {
+    match (cli, result.outcome) {
+        (_, TaskOutcome::Passed) => result.score == Some(100.0) && result.failure_kind.is_none(),
+        (false, TaskOutcome::Failed) => {
+            result.score == Some(0.0) && result.failure_kind == Some(FailureKind::WrongAnswer)
+        }
+        (true, TaskOutcome::Failed) => {
+            result.score == Some(0.0)
+                && matches!(
+                    result.failure_kind,
+                    Some(FailureKind::WrongAnswer | FailureKind::AgentBudgetExceeded)
+                )
+        }
+        (_, TaskOutcome::Invalid | TaskOutcome::Cancelled) => false,
+    }
+}
+
 fn answer_relative_path(run_id: Uuid, task_id: &str) -> Result<String, RunServiceError> {
     if task_id.is_empty()
         || task_id.contains(['/', '\\', ':'])
@@ -528,12 +726,12 @@ fn answer_relative_path(run_id: Uuid, task_id: &str) -> Result<String, RunServic
 }
 
 #[cfg(windows)]
-fn validate_artifact_root(artifact_root: &PathBuf) -> Result<(), RunServiceError> {
-    windows_artifacts::local_drive_components(artifact_root.as_path()).map(|_| ())
+fn validate_artifact_root(artifact_root: &Path) -> Result<(), RunServiceError> {
+    windows_artifacts::local_drive_components(artifact_root).map(|_| ())
 }
 
 #[cfg(not(windows))]
-fn validate_artifact_root(_artifact_root: &PathBuf) -> Result<(), RunServiceError> {
+fn validate_artifact_root(_artifact_root: &Path) -> Result<(), RunServiceError> {
     Err(RunServiceError::UnsupportedPlatform)
 }
 
@@ -1383,10 +1581,11 @@ mod tests {
         assert!(matches!(
             service.submit_answer(run.id, "one", "4"),
             Err(RunServiceError::CheckpointCleanupTerminal {
-                storage: StorageError::InvalidData(_),
+                storage,
                 cleanup: _,
-                status: StorageError::RunNotFound(id),
-            }) if id == run.id
+                status,
+            }) if matches!(storage.as_ref(), StorageError::InvalidData(_))
+                && matches!(status.as_ref(), StorageError::RunNotFound(id) if *id == run.id)
         ));
         assert!(matches!(
             service.next_step(run.id),

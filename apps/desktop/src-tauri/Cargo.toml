@@ -35,4 +35,5 @@ windows-sys = { version = "=0.61.2", features = ["Wdk_Foundation", "Wdk_Storage_
 
 [dev-dependencies]
 async-trait = "0.1"
+rusqlite = { version = "0.40", features = ["bundled"] }
 tempfile = "3"

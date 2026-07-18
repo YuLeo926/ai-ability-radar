@@ -36,10 +36,19 @@ const backend: Backend = {
   startCliRun: async () => {
     throw new Error("unused fake startCliRun");
   },
+  resumeManualRun: async () => {
+    throw new Error("unused fake resumeManualRun");
+  },
+  resumeCliRun: async () => {
+    throw new Error("unused fake resumeCliRun");
+  },
   cancelRun: async () => false,
   listRuns: async () => [],
   getRunDetail: async () => null,
   exportPublicReport: async () => null,
+  deleteRawArtifacts: async () => undefined,
+  deleteRun: async () => false,
+  deleteTargetHistory: async () => 0,
   onRunEvent: async () => () => undefined,
   onRunError: async () => () => undefined,
 };

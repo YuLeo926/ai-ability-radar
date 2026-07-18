@@ -99,15 +99,143 @@ function fakeBackend(overrides: Partial<Backend> = {}): Backend {
     startCliRun: vi.fn(async () => {
       throw new Error("unused fake startCliRun");
     }),
+    resumeManualRun: vi.fn(async () => {
+      throw new Error("unused fake resumeManualRun");
+    }),
+    resumeCliRun: vi.fn(async () => {
+      throw new Error("unused fake resumeCliRun");
+    }),
     cancelRun: vi.fn(async () => false),
     listRuns: vi.fn(async () => []),
     getRunDetail: vi.fn(async () => null),
     exportPublicReport: vi.fn(async () => null),
+    deleteRawArtifacts: vi.fn(async () => undefined),
+    deleteRun: vi.fn(async () => false),
+    deleteTargetHistory: vi.fn(async () => 0),
     onRunEvent: vi.fn(async () => () => undefined),
     onRunError: vi.fn(async () => () => undefined),
     ...overrides,
   };
 }
+
+test("resume preview shows the persisted target snapshot before continuing it exactly", async () => {
+  const user = userEvent.setup();
+  const preview = makeRun("chat_gpt_client");
+  preview.status = "interrupted";
+  preview.target.reasoningEffort = "high";
+  const resumed = makeRun("chat_gpt_client");
+  resumed.completedTasks = 1;
+  resumed.target.reasoningEffort = "high";
+  resumed.environment.resumed = true;
+  const resumeManualRun = vi.fn(async () => resumed);
+  const nextManualStep = vi.fn(async () => makeStep(2));
+  const startManualRun = vi.fn(async () => makeRun());
+  const backend = fakeBackend({
+    getRunDetail: vi.fn(async () => ({ run: preview, taskResults: [] })),
+    resumeManualRun,
+    nextManualStep,
+    startManualRun,
+  });
+
+  renderWizard(backend, `/manual/chat_gpt_client?resume=${RUN_ID}`);
+
+  expect(
+    await screen.findByRole("heading", { name: "确认恢复原体检" }),
+  ).toBeInTheDocument();
+  expect(screen.getByText("GPT-5")).toBeInTheDocument();
+  expect(screen.getByText("高")).toBeInTheDocument();
+  expect(resumeManualRun).not.toHaveBeenCalled();
+  await user.click(
+    screen.getByRole("button", { name: "继续剩余题目" }),
+  );
+  expect(
+    await screen.findByText("只输出第 2 题答案"),
+  ).toBeInTheDocument();
+  expect(resumeManualRun).toHaveBeenCalledTimes(1);
+  expect(resumeManualRun).toHaveBeenCalledWith({
+    runId: RUN_ID,
+    expectedTarget: preview.target,
+  });
+  expect(nextManualStep).toHaveBeenCalledWith(RUN_ID);
+  expect(startManualRun).not.toHaveBeenCalled();
+  expect(
+    screen.queryByLabelText("当前显示的模型"),
+  ).not.toBeInTheDocument();
+});
+
+test("same-family route mismatch is rejected from the preview without a resume call", async () => {
+  const stored = makeRun("claude_client");
+  stored.status = "interrupted";
+  const resumeManualRun = vi.fn(async () => stored);
+  const backend = fakeBackend({
+    getRunDetail: vi.fn(async () => ({ run: stored, taskResults: [] })),
+    resumeManualRun,
+  });
+
+  renderWizard(backend, `/manual/chat_gpt_client?resume=${RUN_ID}`);
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "恢复链接与原体检目标不一致",
+  );
+  expect(resumeManualRun).not.toHaveBeenCalled();
+  expect(screen.queryByRole("button", { name: "继续剩余题目" }))
+    .not.toBeInTheDocument();
+});
+
+test.each([
+  ["model", { reportedModel: "changed-model" }],
+  ["reasoning effort", { reasoningEffort: "low" }],
+])(
+  "manual recovery rejects a returned same-kind run with changed %s",
+  async (_field, targetChange) => {
+    const user = userEvent.setup();
+    const preview = makeRun("chat_gpt_client");
+    preview.status = "interrupted";
+    preview.target.reasoningEffort = "high";
+    const changed = makeRun("chat_gpt_client");
+    changed.environment.resumed = true;
+    changed.target = { ...preview.target, ...targetChange };
+    const backend = fakeBackend({
+      getRunDetail: vi.fn(async () => ({ run: preview, taskResults: [] })),
+      resumeManualRun: vi.fn(async () => changed),
+    });
+
+    renderWizard(backend, `/manual/chat_gpt_client?resume=${RUN_ID}`);
+    await user.click(
+      await screen.findByRole("button", { name: "继续剩余题目" }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "原体检配置或本地检查点已经变化",
+    );
+    expect(backend.nextManualStep).not.toHaveBeenCalled();
+  },
+);
+
+test("resume failure never exposes backend paths and does not create a replacement run", async () => {
+  const preview = makeRun("chat_gpt_client");
+  preview.status = "interrupted";
+  const resumeManualRun = vi.fn(async () => {
+    throw new Error("C:\\Users\\Alice\\.codex\\secret");
+  });
+  const startManualRun = vi.fn(async () => makeRun());
+  const backend = fakeBackend({
+    getRunDetail: vi.fn(async () => ({ run: preview, taskResults: [] })),
+    resumeManualRun,
+    startManualRun,
+  });
+
+  renderWizard(backend, `/manual/chat_gpt_client?resume=${RUN_ID}`);
+  await userEvent.click(
+    await screen.findByRole("button", { name: "继续剩余题目" }),
+  );
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "无法恢复这次体检",
+  );
+  expect(document.body.textContent).not.toContain("Alice");
+  expect(startManualRun).not.toHaveBeenCalled();
+});
 
 function renderWizard(
   backend: Backend,

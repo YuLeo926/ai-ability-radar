@@ -3,9 +3,10 @@ use crate::{
     WorkspaceVerifier,
 };
 use ability_core::{
-    EnvironmentFingerprint, FailureKind, GraderSpec, LoadedPack, LoadedTask, RunMode, RunRecord,
-    RunRepository, RunStatus, StorageError, TargetKind, TargetSelection, TaskOutcome, TaskResult,
-    summarize_scores,
+    ArtifactStore, EnvironmentFingerprint, FailureKind, GraderSpec, LoadedPack, LoadedTask,
+    RecoveryArtifactCheckpoint, RunMode, RunRecord, RunRepository, RunStatus, StorageError,
+    TargetKind, TargetSelection, TaskOutcome, TaskResult, summarize_scores, validate_recovery,
+    validate_recovery_checkpoints,
 };
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -52,6 +53,8 @@ pub enum CliRunError {
     RunNotRunning(RunStatus),
     #[error("automatic CLI runs do not support pre-existing checkpoints")]
     UnexpectedCheckpoint,
+    #[error("run cannot be resumed")]
+    NotResumable,
     #[error("starter directory is missing for {0}")]
     MissingStarter(String),
     #[error("task does not use an external verifier: {0}")]
@@ -86,8 +89,11 @@ pub struct CliRunService {
     repository: Arc<RunRepository>,
     artifact_root: PathBuf,
     #[cfg(test)]
-    after_workspace_copy_hook: Mutex<Option<Arc<dyn Fn(&Path) + Send + Sync>>>,
+    after_workspace_copy_hook: Mutex<Option<WorkspaceCopyHook>>,
 }
+
+#[cfg(test)]
+type WorkspaceCopyHook = Arc<dyn Fn(&Path) + Send + Sync>;
 
 impl CliRunService {
     pub fn new(repository: Arc<RunRepository>, artifact_root: PathBuf) -> Self {
@@ -134,6 +140,59 @@ impl CliRunService {
         Ok(run)
     }
 
+    pub fn resume(
+        &self,
+        run_id: Uuid,
+        expected_target: TargetSelection,
+        pack: &LoadedPack,
+        current_environment: EnvironmentFingerprint,
+    ) -> Result<RunRecord, CliRunError> {
+        validate_artifact_root(&self.artifact_root)?;
+        let artifact_store = ArtifactStore::new(self.artifact_root.clone());
+        let pack_task_ids = pack
+            .tasks
+            .iter()
+            .map(|task| task.definition.id.clone())
+            .collect::<Vec<_>>();
+        self.repository
+            .resume_run(run_id, &expected_target, |run, results| {
+                if run.target != expected_target {
+                    return Err(StorageError::InvalidData(
+                        "run target changed while recovery was being validated".into(),
+                    ));
+                }
+                validate_pack(pack, run.target.kind).map_err(|_| {
+                    StorageError::InvalidData("sealed CLI pack is not resumable".into())
+                })?;
+                validate_recovery(run, results, pack, &current_environment, true)?;
+                let checkpoints = results
+                    .iter()
+                    .map(|result| RecoveryArtifactCheckpoint {
+                        task_id: result.task_id.clone(),
+                        raw_artifact: result.answer_rel_path.is_some(),
+                    })
+                    .collect::<Vec<_>>();
+                artifact_store
+                    .prepare_recovery_artifacts(
+                        run.id,
+                        run.target.kind,
+                        &pack_task_ids,
+                        &checkpoints,
+                    )
+                    .map_err(|_| {
+                        StorageError::InvalidData(
+                            "recovery artifact ownership is inconsistent".into(),
+                        )
+                    })
+            })
+            .map_err(|error| match error {
+                StorageError::InvalidData(_) | StorageError::RunNotFound(_) => {
+                    CliRunError::NotResumable
+                }
+                other => CliRunError::Storage(other),
+            })
+    }
+
     pub async fn execute(
         &self,
         run_id: Uuid,
@@ -173,8 +232,9 @@ impl CliRunService {
             return Err(CliRunError::RunNotRunning(run.status));
         }
 
-        let total_tasks = match self.bind_execution(&run, &pack, adapter.as_ref()) {
-            Ok(total_tasks) => total_tasks,
+        let (total_tasks, completed_ids) = match self.bind_execution(&run, &pack, adapter.as_ref())
+        {
+            Ok(bound) => bound,
             Err(error) => {
                 return Err(self.interrupt_after_error(
                     run_id,
@@ -186,6 +246,8 @@ impl CliRunService {
             }
         };
 
+        let mut completed_tasks =
+            u32::try_from(completed_ids.len()).map_err(|_| CliRunError::CountOverflow)?;
         if cancellation.is_cancelled() {
             self.repository
                 .finish_without_score(run_id, RunStatus::Cancelled)?;
@@ -194,14 +256,16 @@ impl CliRunService {
                 run_id,
                 RunEventKind::RunFinished,
                 None,
-                0,
+                completed_tasks,
                 total_tasks,
             );
             return Ok(());
         }
 
-        let mut completed_tasks = 0_u32;
         for task in &pack.tasks {
+            if completed_ids.contains(&task.definition.id) {
+                continue;
+            }
             if cancellation.is_cancelled() {
                 self.repository
                     .finish_without_score(run_id, RunStatus::Cancelled)?;
@@ -455,7 +519,7 @@ impl CliRunService {
         run: &RunRecord,
         pack: &LoadedPack,
         adapter: &dyn AgentAdapter,
-    ) -> Result<u32, CliRunError> {
+    ) -> Result<(u32, BTreeSet<String>), CliRunError> {
         if !is_cli_target(run.target.kind) {
             return Err(CliRunError::WrongTarget);
         }
@@ -467,7 +531,6 @@ impl CliRunService {
             || run.environment.suite_id != pack.manifest.id
             || run.environment.suite_version != pack.manifest.version
             || run.environment.suite_content_sha256 != pack.content_sha256
-            || run.environment.resumed
         {
             return Err(CliRunError::PackMismatch);
         }
@@ -475,11 +538,18 @@ impl CliRunService {
         if total_tasks != run.total_tasks {
             return Err(CliRunError::PackMismatch);
         }
-        if run.completed_tasks != 0 || !self.repository.get_task_results(run.id)?.is_empty() {
+        let results = self.repository.get_task_results(run.id)?;
+        if run.environment.resumed {
+            validate_recovery_checkpoints(run, &results, pack, true)
+                .map_err(|_| CliRunError::NotResumable)?;
+        } else if run.completed_tasks != 0 || !results.is_empty() {
             return Err(CliRunError::UnexpectedCheckpoint);
         }
         validate_artifact_root(&self.artifact_root)?;
-        Ok(total_tasks)
+        Ok((
+            total_tasks,
+            results.into_iter().map(|result| result.task_id).collect(),
+        ))
     }
 
     fn create_workspace(

@@ -135,6 +135,15 @@ export interface SubmitManualAnswerInput {
   answer: string;
 }
 
+export interface ResumeRunInput {
+  runId: string;
+  expectedTarget: {
+    kind: TargetKind;
+    reportedModel: string;
+    reasoningEffort: string | null;
+  };
+}
+
 export interface RunEvent {
   runId: string;
   kind: "task_started" | "task_finished" | "run_finished";
@@ -156,10 +165,18 @@ export interface Backend {
   nextManualStep(runId: string): Promise<ManualStep | null>;
   submitManualAnswer(input: SubmitManualAnswerInput): Promise<TaskResult>;
   startCliRun(input: StartRunInput): Promise<RunRecord>;
+  resumeManualRun(input: ResumeRunInput): Promise<RunRecord>;
+  resumeCliRun(input: ResumeRunInput): Promise<RunRecord>;
   cancelRun(runId: string): Promise<boolean>;
   listRuns(): Promise<RunRecord[]>;
   getRunDetail(runId: string): Promise<RunDetail | null>;
   exportPublicReport(runId: string): Promise<string | null>;
+  deleteRawArtifacts(runId: string): Promise<void>;
+  deleteRun(runId: string): Promise<boolean>;
+  deleteTargetHistory(
+    target: TargetKind,
+    expectedRunIds: string[],
+  ): Promise<number>;
   onRunEvent(listener: (event: RunEvent) => void): Promise<Unlisten>;
   onRunError(listener: (event: RunErrorEvent) => void): Promise<Unlisten>;
 }

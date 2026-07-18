@@ -1,10 +1,17 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import {
+  Link,
+  useNavigate,
+  useParams,
+  useSearchParams,
+} from "react-router-dom";
 import { useBackend } from "../api/BackendContext";
+import { isSafeRunRecord } from "../api/runtimeValidation";
 import type {
   ManualStep,
   RunRecord,
   TargetKind,
+  TargetSelection,
 } from "../api/backend";
 import "./ManualRunPage.css";
 
@@ -21,6 +28,10 @@ type CopyStatus = "idle" | "copied" | "manual";
 type WizardState =
   | { kind: "setup"; error: string }
   | { kind: "starting" }
+  | { kind: "resume-loading" }
+  | { kind: "resume-review"; run: RunRecord }
+  | { kind: "resuming"; run: RunRecord }
+  | { kind: "resume-error"; message: string }
   | { kind: "loading-first"; run: RunRecord }
   | { kind: "first-step-error"; run: RunRecord; error: string }
   | {
@@ -52,6 +63,21 @@ function isClientTarget(value: string): value is ClientTargetKind {
 
 function errorMessage(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason);
+}
+
+function sameTarget(left: TargetSelection, right: TargetSelection): boolean {
+  return (
+    left.kind === right.kind &&
+    left.reportedModel === right.reportedModel &&
+    (left.reasoningEffort ?? null) === (right.reasoningEffort ?? null)
+  );
+}
+
+function reasoningEffortLabel(value?: string | null): string {
+  if (value === "low") return "低";
+  if (value === "medium") return "中";
+  if (value === "high") return "高";
+  return "未显示 / 不适用";
 }
 
 function validateModel(value: string): string | null {
@@ -243,6 +269,76 @@ function PendingStepPage({
   );
 }
 
+function RecoveryPage({ failed }: { failed: boolean }) {
+  return (
+    <main
+      aria-busy={!failed}
+      className="page run-page manual-transition-page"
+    >
+      <p className="eyebrow">客户端 · 恢复未完成体检</p>
+      <h1>{failed ? "无法恢复这次体检" : "正在恢复这次体检"}</h1>
+      {failed ? (
+        <>
+          <p className="form-error" role="alert">
+            无法恢复这次体检。记录可能已经完成、被取消或与当前环境不一致。
+          </p>
+          <Link to="/history">返回历史记录</Link>
+        </>
+      ) : (
+        <p aria-live="polite" role="status">
+          正在核对本地检查点，只会继续尚未完成的题目…
+        </p>
+      )}
+    </main>
+  );
+}
+
+function ResumeReviewPage({
+  run,
+  onResume,
+}: {
+  run: RunRecord;
+  onResume(): void;
+}) {
+  return (
+    <main className="page run-page manual-transition-page">
+      <p className="eyebrow">客户端 · 恢复未完成体检</p>
+      <h1>确认恢复原体检</h1>
+      <p>恢复会继续下面这份本地记录，不会按当前网址创建或改写目标。</p>
+      <dl className="run-metadata">
+        <div>
+          <dt>原目标</dt>
+          <dd>{clientLabels[run.target.kind as ClientTargetKind]}</dd>
+        </div>
+        <div>
+          <dt>原模型</dt>
+          <dd>{run.target.reportedModel}</dd>
+        </div>
+        <div>
+          <dt>原推理档位</dt>
+          <dd>{reasoningEffortLabel(run.target.reasoningEffort)}</dd>
+        </div>
+      </dl>
+      <button onClick={onResume} type="button">
+        继续剩余题目
+      </button>
+    </main>
+  );
+}
+
+function ResumeErrorPage({ message }: { message: string }) {
+  return (
+    <main className="page run-page manual-transition-page">
+      <p className="eyebrow">客户端 · 恢复未完成体检</p>
+      <h1>无法恢复这次体检</h1>
+      <p className="form-error" role="alert">
+        {message}
+      </p>
+      <Link to="/history">返回历史记录</Link>
+    </main>
+  );
+}
+
 function TaskPage({
   answer,
   busy,
@@ -356,22 +452,29 @@ function TaskPage({
 
 function ManualWizard({
   kind,
+  resumeRunId,
 }: {
   kind: ClientTargetKind;
+  resumeRunId?: string;
 }) {
   const backend = useBackend();
   const navigate = useNavigate();
   const mounted = useRef(true);
   const pending = useRef(false);
+  const resumeStarted = useRef(false);
   const [model, setModel] = useState("");
   const [modelTouched, setModelTouched] = useState(false);
   const [reasoningEffort, setReasoningEffort] =
     useState<ReasoningEffort>("");
   const [freshChat, setFreshChat] = useState(false);
-  const [state, setState] = useState<WizardState>({
-    kind: "setup",
-    error: "",
-  });
+  const [state, setState] = useState<WizardState>(
+    resumeRunId
+      ? { kind: "resume-loading" }
+      : {
+          kind: "setup",
+          error: "",
+        },
+  );
 
   useEffect(() => {
     mounted.current = true;
@@ -380,6 +483,14 @@ function ManualWizard({
       pending.current = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!resumeRunId || resumeStarted.current) {
+      return;
+    }
+    resumeStarted.current = true;
+    void loadResumePreview();
+  }, [resumeRunId]);
 
   function beginOperation(): boolean {
     if (pending.current) {
@@ -431,7 +542,107 @@ function ManualWizard({
       setState({
         kind: "first-step-error",
         run,
-        error: errorMessage(reason),
+        error: run.environment.resumed
+          ? "无法继续读取剩余题目，请稍后重试。"
+          : errorMessage(reason),
+      });
+    }
+  }
+
+  async function loadResumePreview() {
+    if (!resumeRunId || !beginOperation()) {
+      return;
+    }
+    setState({ kind: "resume-loading" });
+    try {
+      const detail = await Promise.resolve().then(() =>
+        backend.getRunDetail(resumeRunId),
+      );
+      if (!mounted.current) {
+        return;
+      }
+      if (
+        !detail ||
+        !isSafeRunRecord(detail.run) ||
+        detail.run.id !== resumeRunId ||
+        detail.run.status !== "interrupted"
+      ) {
+        pending.current = false;
+        setState({
+          kind: "resume-error",
+          message: "无法恢复这次体检。本地记录可能已经结束或无法安全读取。",
+        });
+        return;
+      }
+      if (detail.run.target.kind !== kind) {
+        pending.current = false;
+        setState({
+          kind: "resume-error",
+          message: "恢复链接与原体检目标不一致。",
+        });
+        return;
+      }
+      pending.current = false;
+      setState({ kind: "resume-review", run: detail.run });
+    } catch {
+      if (!mounted.current) {
+        return;
+      }
+      pending.current = false;
+      setState({
+        kind: "resume-error",
+        message: "无法恢复这次体检。本地记录可能已经结束或无法安全读取。",
+      });
+    }
+  }
+
+  async function resume() {
+    if (
+      !resumeRunId ||
+      state.kind !== "resume-review" ||
+      !beginOperation()
+    ) {
+      return;
+    }
+    const reviewed = state.run;
+    setState({ kind: "resuming", run: reviewed });
+    try {
+      const recovered = await Promise.resolve().then(() =>
+        backend.resumeManualRun({
+          runId: resumeRunId,
+          expectedTarget: {
+            ...reviewed.target,
+            reasoningEffort: reviewed.target.reasoningEffort ?? null,
+          },
+        }),
+      );
+      if (!mounted.current) {
+        return;
+      }
+      if (
+        !isSafeRunRecord(recovered) ||
+        recovered.id !== resumeRunId ||
+        recovered.target.kind !== kind ||
+        !sameTarget(recovered.target, reviewed.target) ||
+        recovered.status !== "running" ||
+        !recovered.environment.resumed
+      ) {
+        pending.current = false;
+        setState({
+          kind: "resume-error",
+          message: "无法恢复这次体检。原体检配置或本地检查点已经变化。",
+        });
+        return;
+      }
+      await readFirstStep(recovered);
+    } catch {
+      if (!mounted.current) {
+        return;
+      }
+      pending.current = false;
+      setState({
+        kind: "resume-error",
+        message: "无法恢复这次体检。原体检配置或本地检查点已经变化。",
       });
     }
   }
@@ -608,6 +819,18 @@ function ManualWizard({
     );
   }
 
+  if (state.kind === "resume-loading" || state.kind === "resuming") {
+    return <RecoveryPage failed={false} />;
+  }
+
+  if (state.kind === "resume-review") {
+    return <ResumeReviewPage onResume={() => void resume()} run={state.run} />;
+  }
+
+  if (state.kind === "resume-error") {
+    return <ResumeErrorPage message={state.message} />;
+  }
+
   if (state.kind === "loading-first") {
     return <PendingStepPage first run={state.run} />;
   }
@@ -660,6 +883,8 @@ function ManualWizard({
 
 export function ManualRunPage() {
   const { target = "" } = useParams();
+  const [searchParams] = useSearchParams();
+  const resumeRunId = searchParams.get("resume") || undefined;
 
   if (!isClientTarget(target)) {
     return (
@@ -672,5 +897,11 @@ export function ManualRunPage() {
     );
   }
 
-  return <ManualWizard key={target} kind={target} />;
+  return (
+    <ManualWizard
+      key={`${target}:${resumeRunId ?? "new"}`}
+      kind={target}
+      resumeRunId={resumeRunId}
+    />
+  );
 }

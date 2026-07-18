@@ -1450,3 +1450,434 @@ async fn initial_run_decode_failure_interrupts_the_existing_row_and_emits_final_
         vec![(RunEventKind::RunFinished, 0, 1)]
     );
 }
+
+fn durable_cli_checkpoint(run_id: Uuid, task_id: &str) -> TaskResult {
+    TaskResult {
+        run_id,
+        task_id: task_id.into(),
+        category: ability_core::Category::CliCoding,
+        outcome: TaskOutcome::Passed,
+        score: Some(100.0),
+        failure_kind: None,
+        duration_ms: 10,
+        answer_rel_path: Some(format!("runs/{run_id}/logs/{task_id}.log")),
+        detail: "hidden_tests:pass".into(),
+    }
+}
+
+#[test]
+fn cli_resume_rejects_every_target_snapshot_mismatch_before_mutation() {
+    let mismatches: [fn(&mut TargetSelection); 3] = [
+        |value| value.kind = TargetKind::ClaudeCode,
+        |value| value.reported_model = "changed-model".into(),
+        |value| value.reasoning_effort = Some("high".into()),
+    ];
+
+    for mutate in mismatches {
+        let fixture = Fixture::new(1);
+        let run = fixture.prepare();
+        fixture
+            .repository
+            .finish_without_score(run.id, RunStatus::Interrupted)
+            .unwrap();
+        let mut expected_target = run.target.clone();
+        mutate(&mut expected_target);
+
+        assert!(matches!(
+            fixture.service.resume(
+                run.id,
+                expected_target,
+                &fixture.pack,
+                environment(&fixture.pack),
+            ),
+            Err(CliRunError::NotResumable)
+        ));
+        assert_eq!(
+            fixture.repository.get_run(run.id).unwrap().unwrap().status,
+            RunStatus::Interrupted
+        );
+        assert!(!fixture.artifact_root.exists());
+    }
+}
+
+#[tokio::test]
+async fn cli_resume_removes_uncheckpointed_workspace_and_log_before_fresh_execution() {
+    let fixture = Fixture::new(1);
+    let run = fixture.prepare();
+    let run_root = fixture.artifact_root.join("runs").join(run.id.to_string());
+    let workspace = run_root.join("workspaces/task-1");
+    let log = run_root.join("logs/task-1.log");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(log.parent().unwrap()).unwrap();
+    fs::write(workspace.join("stale.txt"), "interrupted workspace").unwrap();
+    fs::write(&log, "published before checkpoint").unwrap();
+    fixture
+        .repository
+        .finish_without_score(run.id, RunStatus::Interrupted)
+        .unwrap();
+
+    fixture
+        .service
+        .resume(
+            run.id,
+            run.target.clone(),
+            &fixture.pack,
+            environment(&fixture.pack),
+        )
+        .unwrap();
+
+    assert!(!workspace.exists());
+    assert!(!log.exists());
+    let adapter = Arc::new(FakeAdapter::new(
+        TargetKind::CodexCli,
+        [AdapterStep::Complete { duration_ms: 5 }],
+    ));
+    let verifier = Arc::new(FakeVerifier::new([VerifierStep::Grade(passed_grade(5))]));
+    let (sender, _receiver) = mpsc::unbounded_channel();
+    fixture
+        .service
+        .execute(
+            run.id,
+            fixture.pack.clone(),
+            adapter.clone(),
+            verifier,
+            CancellationToken::new(),
+            sender,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fixture.repository.get_run(run.id).unwrap().unwrap().status,
+        RunStatus::Completed
+    );
+}
+
+#[test]
+fn cli_resume_rejects_impossible_checkpoint_artifact_and_score_shapes() {
+    for checkpoint in [
+        TaskResult {
+            run_id: Uuid::nil(),
+            task_id: "task-1".into(),
+            category: ability_core::Category::CliCoding,
+            outcome: TaskOutcome::Passed,
+            score: Some(100.0),
+            failure_kind: None,
+            duration_ms: 10,
+            answer_rel_path: None,
+            detail: "impossible missing log".into(),
+        },
+        TaskResult {
+            run_id: Uuid::nil(),
+            task_id: "task-1".into(),
+            category: ability_core::Category::CliCoding,
+            outcome: TaskOutcome::Failed,
+            score: Some(0.0),
+            failure_kind: Some(FailureKind::AgentBudgetExceeded),
+            duration_ms: 10,
+            answer_rel_path: Some("placeholder".into()),
+            detail: "impossible budget log".into(),
+        },
+        TaskResult {
+            run_id: Uuid::nil(),
+            task_id: "task-1".into(),
+            category: ability_core::Category::CliCoding,
+            outcome: TaskOutcome::Failed,
+            score: Some(50.0),
+            failure_kind: Some(FailureKind::WrongAnswer),
+            duration_ms: 10,
+            answer_rel_path: Some("placeholder".into()),
+            detail: "impossible partial verifier score".into(),
+        },
+    ] {
+        let fixture = Fixture::new(1);
+        let run = fixture.prepare();
+        let mut checkpoint = checkpoint;
+        checkpoint.run_id = run.id;
+        if checkpoint.answer_rel_path.is_some() {
+            checkpoint.answer_rel_path = Some(format!("runs/{}/logs/task-1.log", run.id));
+        }
+        fixture.repository.save_task_result(&checkpoint).unwrap();
+        fixture
+            .repository
+            .finish_without_score(run.id, RunStatus::Interrupted)
+            .unwrap();
+
+        assert!(
+            fixture
+                .service
+                .resume(
+                    run.id,
+                    run.target.clone(),
+                    &fixture.pack,
+                    environment(&fixture.pack),
+                )
+                .is_err(),
+            "impossible checkpoint shape must fail closed: {checkpoint:?}"
+        );
+        assert_eq!(
+            fixture.repository.get_run(run.id).unwrap().unwrap().status,
+            RunStatus::Interrupted
+        );
+    }
+}
+
+#[tokio::test]
+async fn resumed_cli_skips_exactly_validated_checkpoints_and_starts_progress_from_durable_count() {
+    let fixture = Fixture::new(2);
+    let run = fixture.prepare();
+    fixture
+        .repository
+        .save_task_result(&durable_cli_checkpoint(run.id, "task-1"))
+        .unwrap();
+    fixture
+        .repository
+        .finish_without_score(run.id, RunStatus::Interrupted)
+        .unwrap();
+
+    let resumed = fixture
+        .service
+        .resume(
+            run.id,
+            run.target.clone(),
+            &fixture.pack,
+            environment(&fixture.pack),
+        )
+        .unwrap();
+    assert!(resumed.environment.resumed);
+    assert_eq!(resumed.completed_tasks, 1);
+
+    let adapter = Arc::new(FakeAdapter::new(
+        TargetKind::CodexCli,
+        [AdapterStep::Complete { duration_ms: 5 }],
+    ));
+    let verifier = Arc::new(FakeVerifier::new([VerifierStep::Grade(passed_grade(5))]));
+    let (sender, receiver) = mpsc::unbounded_channel();
+    fixture
+        .service
+        .execute(
+            run.id,
+            fixture.pack.clone(),
+            adapter.clone(),
+            verifier.clone(),
+            CancellationToken::new(),
+            sender,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(verifier.calls.load(Ordering::SeqCst), 1);
+    assert!(
+        !fixture
+            .artifact_root
+            .join("runs")
+            .join(run.id.to_string())
+            .join("workspaces/task-1")
+            .exists()
+    );
+    assert!(
+        fixture
+            .artifact_root
+            .join("runs")
+            .join(run.id.to_string())
+            .join("workspaces/task-2")
+            .is_dir()
+    );
+    assert_eq!(
+        collect_events(receiver)
+            .into_iter()
+            .map(|event| (event.kind, event.task_id, event.completed_tasks))
+            .collect::<Vec<_>>(),
+        vec![
+            (RunEventKind::TaskStarted, Some("task-2".into()), 1),
+            (RunEventKind::TaskFinished, Some("task-2".into()), 2),
+            (RunEventKind::RunFinished, None, 2),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn cli_can_resume_a_second_interruption_without_replaying_its_checkpoint() {
+    let fixture = Fixture::new(2);
+    let run = fixture.prepare();
+    fixture
+        .repository
+        .save_task_result(&durable_cli_checkpoint(run.id, "task-1"))
+        .unwrap();
+    fixture
+        .repository
+        .finish_without_score(run.id, RunStatus::Interrupted)
+        .unwrap();
+
+    fixture
+        .service
+        .resume(
+            run.id,
+            run.target.clone(),
+            &fixture.pack,
+            environment(&fixture.pack),
+        )
+        .unwrap();
+    fixture
+        .repository
+        .finish_without_score(run.id, RunStatus::Interrupted)
+        .unwrap();
+    let resumed_again = fixture
+        .service
+        .resume(
+            run.id,
+            run.target.clone(),
+            &fixture.pack,
+            environment(&fixture.pack),
+        )
+        .unwrap();
+
+    assert!(resumed_again.environment.resumed);
+    assert_eq!(resumed_again.completed_tasks, 1);
+    assert_eq!(
+        fixture.repository.get_task_results(run.id).unwrap(),
+        vec![durable_cli_checkpoint(run.id, "task-1")]
+    );
+
+    let adapter = Arc::new(FakeAdapter::new(
+        TargetKind::CodexCli,
+        [AdapterStep::Complete { duration_ms: 5 }],
+    ));
+    let verifier = Arc::new(FakeVerifier::new([VerifierStep::Grade(passed_grade(5))]));
+    let (sender, receiver) = mpsc::unbounded_channel();
+    fixture
+        .service
+        .execute(
+            run.id,
+            fixture.pack.clone(),
+            adapter.clone(),
+            verifier.clone(),
+            CancellationToken::new(),
+            sender,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(verifier.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        collect_events(receiver)
+            .into_iter()
+            .map(|event| (event.kind, event.task_id, event.completed_tasks))
+            .collect::<Vec<_>>(),
+        vec![
+            (RunEventKind::TaskStarted, Some("task-2".into()), 1),
+            (RunEventKind::TaskFinished, Some("task-2".into()), 2),
+            (RunEventKind::RunFinished, None, 2),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn fully_checkpointed_cli_resume_completes_without_adapter_verifier_or_workspace_calls() {
+    let fixture = Fixture::new(2);
+    let run = fixture.prepare();
+    for task_id in ["task-1", "task-2"] {
+        fixture
+            .repository
+            .save_task_result(&durable_cli_checkpoint(run.id, task_id))
+            .unwrap();
+    }
+    fixture
+        .repository
+        .finish_without_score(run.id, RunStatus::Interrupted)
+        .unwrap();
+    fixture
+        .service
+        .resume(
+            run.id,
+            run.target.clone(),
+            &fixture.pack,
+            environment(&fixture.pack),
+        )
+        .unwrap();
+    let adapter = Arc::new(FakeAdapter::new(TargetKind::CodexCli, []));
+    let verifier = Arc::new(FakeVerifier::new([]));
+    let (sender, receiver) = mpsc::unbounded_channel();
+
+    fixture
+        .service
+        .execute(
+            run.id,
+            fixture.pack.clone(),
+            adapter.clone(),
+            verifier.clone(),
+            CancellationToken::new(),
+            sender,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(adapter.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(verifier.calls.load(Ordering::SeqCst), 0);
+    assert!(!fixture.artifact_root.exists());
+    assert_eq!(
+        fixture.repository.get_run(run.id).unwrap().unwrap().status,
+        RunStatus::Completed
+    );
+    assert_eq!(
+        collect_events(receiver)
+            .into_iter()
+            .map(|event| (event.kind, event.completed_tasks))
+            .collect::<Vec<_>>(),
+        vec![(RunEventKind::RunFinished, 2)]
+    );
+}
+
+#[tokio::test]
+async fn cancelled_resumed_cli_reports_durable_progress_without_consuming_remaining_capacity() {
+    let fixture = Fixture::new(2);
+    let run = fixture.prepare();
+    fixture
+        .repository
+        .save_task_result(&durable_cli_checkpoint(run.id, "task-1"))
+        .unwrap();
+    fixture
+        .repository
+        .finish_without_score(run.id, RunStatus::Interrupted)
+        .unwrap();
+    fixture
+        .service
+        .resume(
+            run.id,
+            run.target.clone(),
+            &fixture.pack,
+            environment(&fixture.pack),
+        )
+        .unwrap();
+    let adapter = Arc::new(FakeAdapter::new(TargetKind::CodexCli, []));
+    let verifier = Arc::new(FakeVerifier::new([]));
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let (sender, receiver) = mpsc::unbounded_channel();
+
+    fixture
+        .service
+        .execute(
+            run.id,
+            fixture.pack.clone(),
+            adapter.clone(),
+            verifier.clone(),
+            cancellation,
+            sender,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(adapter.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(verifier.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        collect_events(receiver)
+            .into_iter()
+            .map(|event| (event.kind, event.completed_tasks))
+            .collect::<Vec<_>>(),
+        vec![(RunEventKind::RunFinished, 1)]
+    );
+}

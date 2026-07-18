@@ -16,7 +16,7 @@ beforeEach(() => {
   bridge.listen.mockReset();
 });
 
-test("uses exactly the nine reviewed commands and camelCase payloads", async () => {
+test("uses exactly the fourteen reviewed commands and narrow camelCase payloads", async () => {
   bridge.invoke.mockResolvedValue(undefined);
   const manualInput: StartRunInput = {
     target: {
@@ -45,10 +45,32 @@ test("uses exactly the nine reviewed commands and camelCase payloads", async () 
   await tauriBackend.nextManualStep("run-manual");
   await tauriBackend.submitManualAnswer(answer);
   await tauriBackend.startCliRun(cliInput);
+  await tauriBackend.resumeManualRun({
+    runId: "run-manual",
+    expectedTarget: {
+      kind: "chat_gpt_client",
+      reportedModel: "GPT-5",
+      reasoningEffort: "high",
+    },
+  });
+  await tauriBackend.resumeCliRun({
+    runId: "run-cli",
+    expectedTarget: {
+      kind: "codex_cli",
+      reportedModel: "gpt-5.1-codex",
+      reasoningEffort: null,
+    },
+  });
   await tauriBackend.cancelRun("run-cli");
   await tauriBackend.listRuns();
   await tauriBackend.getRunDetail("run-result");
   await tauriBackend.exportPublicReport("run-result");
+  await tauriBackend.deleteRawArtifacts("run-result");
+  await tauriBackend.deleteRun("run-result");
+  await tauriBackend.deleteTargetHistory("codex_cli", [
+    "run-cli-1",
+    "run-cli-2",
+  ]);
 
   expect(bridge.invoke.mock.calls).toEqual([
     ["get_bootstrap"],
@@ -56,13 +78,50 @@ test("uses exactly the nine reviewed commands and camelCase payloads", async () 
     ["next_manual_step", { runId: "run-manual" }],
     ["submit_manual_answer", { input: answer }],
     ["start_cli_run", { input: cliInput }],
+    [
+      "resume_manual_run",
+      {
+        input: {
+          runId: "run-manual",
+          expectedTarget: {
+            kind: "chat_gpt_client",
+            reportedModel: "GPT-5",
+            reasoningEffort: "high",
+          },
+        },
+      },
+    ],
+    [
+      "resume_cli_run",
+      {
+        input: {
+          runId: "run-cli",
+          expectedTarget: {
+            kind: "codex_cli",
+            reportedModel: "gpt-5.1-codex",
+            reasoningEffort: null,
+          },
+        },
+      },
+    ],
     ["cancel_run", { runId: "run-cli" }],
     ["list_runs"],
     ["get_run_detail", { runId: "run-result" }],
     ["export_public_report", { input: { runId: "run-result" } }],
+    ["delete_raw_artifacts", { input: { runId: "run-result" } }],
+    ["delete_run", { input: { runId: "run-result" } }],
+    [
+      "delete_target_history",
+      {
+        input: {
+          target: "codex_cli",
+          expectedRunIds: ["run-cli-1", "run-cli-2"],
+        },
+      },
+    ],
   ]);
   expect(JSON.stringify(bridge.invoke.mock.calls)).not.toMatch(
-    /destination|filePath|outputPath/i,
+    /destination|filePath|outputPath|artifactPath|program/i,
   );
 });
 

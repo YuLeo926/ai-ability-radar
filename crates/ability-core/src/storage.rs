@@ -1,7 +1,7 @@
-use crate::{RunRecord, RunStatus, ScoreSummary, TaskResult};
+use crate::{RunRecord, RunStatus, ScoreSummary, TargetKind, TargetSelection, TaskResult};
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::path::{Component, Path};
 use thiserror::Error;
 use uuid::Uuid;
@@ -299,10 +299,227 @@ impl RunRepository {
             )
             .map_err(StorageError::from)
     }
+
+    pub fn resume_run<F>(
+        &self,
+        run_id: Uuid,
+        expected_target: &TargetSelection,
+        validate: F,
+    ) -> Result<RunRecord, StorageError>
+    where
+        F: FnOnce(&RunRecord, &[TaskResult]) -> Result<(), StorageError>,
+    {
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut run = transaction
+            .query_row(
+                &format!("{RUN_SELECT_SQL} WHERE id=?1"),
+                [run_id.to_string()],
+                row_to_run,
+            )
+            .optional()?
+            .ok_or(StorageError::RunNotFound(run_id))?;
+        if run.status != RunStatus::Interrupted {
+            return Err(StorageError::InvalidData(
+                "run is not an interrupted resumable run".into(),
+            ));
+        }
+        if run.target != *expected_target {
+            return Err(StorageError::InvalidData(
+                "run target does not match the reviewed recovery target".into(),
+            ));
+        }
+        let results = task_results_in_transaction(&transaction, run_id)?;
+        validate(&run, &results)?;
+
+        run.status = RunStatus::Running;
+        run.finished_at = None;
+        run.score = None;
+        run.environment.resumed = true;
+        let changed = transaction.execute(
+            "UPDATE runs
+             SET status_json=?2,finished_at=NULL,score_json=NULL,environment_json=?3
+             WHERE id=?1 AND status_json=?4",
+            params![
+                run_id.to_string(),
+                serde_json::to_string(&RunStatus::Running)?,
+                serde_json::to_string(&run.environment)?,
+                serde_json::to_string(&RunStatus::Interrupted)?,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::InvalidData(
+                "run changed while recovery was being validated".into(),
+            ));
+        }
+        transaction.commit()?;
+        Ok(run)
+    }
+
+    pub fn clear_artifact_references(&self, run_id: Uuid) -> Result<usize, StorageError> {
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let status = run_status_in_transaction(&transaction, run_id)?
+            .ok_or(StorageError::RunNotFound(run_id))?;
+        reject_active_delete(status)?;
+        let changed = transaction.execute(
+            "UPDATE task_results SET answer_rel_path=NULL
+             WHERE run_id=?1 AND answer_rel_path IS NOT NULL",
+            [run_id.to_string()],
+        )?;
+        transaction.commit()?;
+        Ok(changed)
+    }
+
+    pub fn delete_run(&self, run_id: Uuid) -> Result<bool, StorageError> {
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(status) = run_status_in_transaction(&transaction, run_id)? else {
+            transaction.commit()?;
+            return Ok(false);
+        };
+        reject_active_delete(status)?;
+        let changed = transaction.execute("DELETE FROM runs WHERE id=?1", [run_id.to_string()])?;
+        clean_orphan_identities(&transaction)?;
+        transaction.commit()?;
+        checkpoint_after_delete(&connection)?;
+        Ok(changed == 1)
+    }
+
+    pub fn delete_target_history(
+        &self,
+        target: TargetKind,
+        expected_run_ids: &[Uuid],
+    ) -> Result<u32, StorageError> {
+        let mut expected = expected_run_ids.to_vec();
+        expected.sort_unstable();
+        if expected.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(StorageError::InvalidData(
+                "reviewed run snapshot contains duplicates".into(),
+            ));
+        }
+
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut statement =
+            transaction.prepare("SELECT id,target_json,status_json FROM runs ORDER BY id ASC")?;
+        let rows = statement.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let target_json: String = row.get(1)?;
+            let status_json: String = row.get(2)?;
+            Ok((
+                Uuid::parse_str(&id).map_err(to_sql_error)?,
+                serde_json::from_str::<TargetSelection>(&target_json).map_err(to_sql_error)?,
+                serde_json::from_str::<RunStatus>(&status_json).map_err(to_sql_error)?,
+            ))
+        })?;
+        let records = rows.collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let current = records
+            .iter()
+            .filter(|(_, selection, _)| selection.kind == target)
+            .map(|(id, _, _)| *id)
+            .collect::<Vec<_>>();
+        if current != expected {
+            return Err(StorageError::InvalidData(
+                "target history changed after confirmation".into(),
+            ));
+        }
+        if records.iter().any(|(id, _, status)| {
+            expected.binary_search(id).is_ok() && *status == RunStatus::Running
+        }) {
+            return Err(StorageError::InvalidData(
+                "active runs cannot be deleted".into(),
+            ));
+        }
+        for run_id in &expected {
+            transaction.execute("DELETE FROM runs WHERE id=?1", [run_id.to_string()])?;
+        }
+        clean_orphan_identities(&transaction)?;
+        transaction.commit()?;
+        checkpoint_after_delete(&connection)?;
+        u32::try_from(expected.len())
+            .map_err(|_| StorageError::InvalidData("delete count exceeds supported range".into()))
+    }
 }
 
 const RUN_SELECT_SQL: &str = "SELECT id,target_json,mode_json,suite_id,suite_version,status_json,
     started_at,finished_at,total_tasks,completed_tasks,environment_json,score_json FROM runs";
+
+fn task_results_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    run_id: Uuid,
+) -> Result<Vec<TaskResult>, StorageError> {
+    let mut statement = transaction.prepare(
+        "SELECT run_id,task_id,category_json,outcome_json,score,failure_kind_json,
+         duration_ms,answer_rel_path,detail
+         FROM task_results WHERE run_id=?1 ORDER BY task_id ASC",
+    )?;
+    let rows = statement.query_map([run_id.to_string()], row_to_task_result)?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(StorageError::from)
+}
+
+fn run_status_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    run_id: Uuid,
+) -> Result<Option<RunStatus>, StorageError> {
+    let status: Option<String> = transaction
+        .query_row(
+            "SELECT status_json FROM runs WHERE id=?1",
+            [run_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    status
+        .map(|value| serde_json::from_str(&value).map_err(StorageError::from))
+        .transpose()
+}
+
+fn reject_active_delete(status: RunStatus) -> Result<(), StorageError> {
+    if status == RunStatus::Running {
+        Err(StorageError::InvalidData(
+            "active runs cannot be deleted".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn clean_orphan_identities(transaction: &rusqlite::Transaction<'_>) -> Result<(), StorageError> {
+    transaction.execute(
+        "DELETE FROM targets
+         WHERE NOT EXISTS (
+           SELECT 1 FROM runs WHERE runs.target_json=targets.target_json
+         )",
+        [],
+    )?;
+    transaction.execute(
+        "DELETE FROM suite_versions
+         WHERE NOT EXISTS (
+           SELECT 1 FROM runs
+           WHERE runs.suite_id=suite_versions.suite_id
+             AND runs.suite_version=suite_versions.suite_version
+         )",
+        [],
+    )?;
+    Ok(())
+}
+
+fn checkpoint_after_delete(connection: &Connection) -> Result<(), StorageError> {
+    match connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
+        Ok(()) => Ok(()),
+        Err(rusqlite::Error::SqliteFailure(code, _))
+            if matches!(
+                code.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(StorageError::Database(error)),
+    }
+}
 
 fn row_to_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunRecord> {
     let id: String = row.get(0)?;
@@ -397,12 +614,12 @@ fn validate_task_result(result: &TaskResult) -> Result<(), StorageError> {
     if let Some(score) = result.score {
         validate_score(score, "task score")?;
     }
-    if let Some(path) = &result.answer_rel_path {
-        if !is_safe_relative_path(path) {
-            return Err(StorageError::InvalidData(
-                "answer path must be relative".into(),
-            ));
-        }
+    if let Some(path) = &result.answer_rel_path
+        && !is_safe_relative_path(path)
+    {
+        return Err(StorageError::InvalidData(
+            "answer path must be relative".into(),
+        ));
     }
     Ok(())
 }

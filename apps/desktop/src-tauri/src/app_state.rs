@@ -7,7 +7,7 @@ use ability_core::{
     LoadedPack, ManualRunService, PackLoader, PackRegistry, RunRepository, TargetKind,
 };
 use parking_lot::Mutex;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -91,6 +91,50 @@ impl Drop for CancellationRegistration {
     }
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct RunOperationRegistry {
+    inner: Arc<Mutex<BTreeSet<Uuid>>>,
+}
+
+impl RunOperationRegistry {
+    pub(crate) fn claim(
+        &self,
+        run_ids: impl IntoIterator<Item = Uuid>,
+    ) -> Result<RunOperationClaim, String> {
+        let mut run_ids = run_ids.into_iter().collect::<Vec<_>>();
+        run_ids.sort_unstable();
+        run_ids.dedup();
+
+        let mut active = self.inner.lock();
+        if run_ids.iter().any(|run_id| active.contains(run_id)) {
+            return Err("run already has an active local-data operation".into());
+        }
+        active.extend(run_ids.iter().copied());
+        Ok(RunOperationClaim {
+            registry: self.clone(),
+            run_ids,
+        })
+    }
+
+    fn release(&self, run_ids: &[Uuid]) {
+        let mut active = self.inner.lock();
+        for run_id in run_ids {
+            active.remove(run_id);
+        }
+    }
+}
+
+pub(crate) struct RunOperationClaim {
+    registry: RunOperationRegistry,
+    run_ids: Vec<Uuid>,
+}
+
+impl Drop for RunOperationClaim {
+    fn drop(&mut self) {
+        self.registry.release(&self.run_ids);
+    }
+}
+
 pub struct AppState {
     pub(crate) repository: Arc<RunRepository>,
     pub(crate) manual_runs: Arc<ManualRunService>,
@@ -101,6 +145,8 @@ pub struct AppState {
     pub(crate) verifier: Arc<dyn WorkspaceVerifier>,
     pub(crate) runner: Arc<dyn ProcessRunner>,
     pub(crate) cancellations: CancellationRegistry,
+    pub(crate) run_operations: RunOperationRegistry,
+    pub(crate) artifact_root: PathBuf,
 }
 
 impl AppState {
@@ -153,7 +199,10 @@ impl AppState {
                 repository.clone(),
                 artifact_root.clone(),
             )),
-            cli_runs: Arc::new(CliRunService::new(repository.clone(), artifact_root)),
+            cli_runs: Arc::new(CliRunService::new(
+                repository.clone(),
+                artifact_root.clone(),
+            )),
             repository,
             client_pack,
             cli_pack,
@@ -161,6 +210,8 @@ impl AppState {
             verifier,
             runner,
             cancellations: CancellationRegistry::default(),
+            run_operations: RunOperationRegistry::default(),
+            artifact_root,
         })
     }
 
@@ -569,6 +620,28 @@ mod tests {
             state.repository.get_run(run.id).unwrap().unwrap().status,
             RunStatus::Interrupted
         );
+    }
+
+    #[test]
+    fn run_operation_claims_are_exclusive_and_batch_claims_are_atomic() {
+        let registry = RunOperationRegistry::default();
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        let third = Uuid::new_v4();
+
+        let first_claim = registry.claim([first]).unwrap();
+        assert!(registry.claim([first]).is_err());
+        assert!(
+            registry.claim([second, first, third]).is_err(),
+            "a conflicting batch may not partially claim its free IDs"
+        );
+        let free_batch = registry.claim([second, third]).unwrap();
+        assert!(registry.claim([second]).is_err());
+
+        drop(first_claim);
+        assert!(registry.claim([first]).is_ok());
+        drop(free_batch);
+        assert!(registry.claim([second, third]).is_ok());
     }
 
     fn copy_bundled_packs(resource_dir: &Path) {

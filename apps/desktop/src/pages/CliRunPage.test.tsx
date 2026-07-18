@@ -116,15 +116,142 @@ function fakeBackend(overrides: Partial<Backend> = {}): Backend {
     startCliRun: vi.fn(async (input) =>
       makeRun(input.target.kind as "codex_cli" | "claude_code"),
     ),
+    resumeManualRun: vi.fn(async () => {
+      throw new Error("unused fake resumeManualRun");
+    }),
+    resumeCliRun: vi.fn(async () => makeRun()),
     cancelRun: vi.fn(async () => false),
     listRuns: vi.fn(async () => []),
     getRunDetail: vi.fn(async () => detail(makeRun())),
     exportPublicReport: vi.fn(async () => null),
+    deleteRawArtifacts: vi.fn(async () => undefined),
+    deleteRun: vi.fn(async () => false),
+    deleteTargetHistory: vi.fn(async () => 0),
     onRunEvent: vi.fn(async () => () => undefined),
     onRunError: vi.fn(async () => () => undefined),
     ...overrides,
   };
 }
+
+test("resume route keeps preflight and cost acknowledgement before continuing the persisted CLI run", async () => {
+  const user = userEvent.setup();
+  const preview = makeRun("codex_cli", { status: "interrupted" });
+  preview.target.reportedModel = "gpt-5.1-codex";
+  preview.target.reasoningEffort = "high";
+  const resumed = makeRun("codex_cli", {
+    completedTasks: 2,
+    environment: { ...makeRun().environment, resumed: true },
+  });
+  resumed.target = { ...preview.target };
+  const resumeCliRun = vi.fn(async () => resumed);
+  const startCliRun = vi.fn(async () => makeRun());
+  const getRunDetail = vi
+    .fn()
+    .mockResolvedValueOnce(detail(preview))
+    .mockResolvedValue(detail(resumed));
+  const backend = fakeBackend({
+    getRunDetail,
+    resumeCliRun,
+    startCliRun,
+  });
+  renderWizard(backend, `/cli/codex_cli?resume=${RUN_ID}`);
+
+  await screen.findByRole("checkbox");
+  expect(
+    screen.getByRole("heading", { name: "Codex CLI 快速体检" }),
+  ).toBeInTheDocument();
+  const continueButton = screen.getByRole("button", {
+    name: /继续剩余任务/,
+  });
+  expect(screen.getByText("gpt-5.1-codex")).toBeInTheDocument();
+  expect(screen.getByText("高")).toBeInTheDocument();
+  expect(continueButton).toBeDisabled();
+  expect(resumeCliRun).not.toHaveBeenCalled();
+
+  await user.click(screen.getByRole("checkbox"));
+  expect(continueButton).toBeEnabled();
+  await user.dblClick(continueButton);
+
+  expect(resumeCliRun).toHaveBeenCalledTimes(1);
+  expect(resumeCliRun).toHaveBeenCalledWith({
+    runId: RUN_ID,
+    expectedTarget: preview.target,
+  });
+  expect(startCliRun).not.toHaveBeenCalled();
+  expect(await screen.findByText(/2 \/ 4/)).toBeInTheDocument();
+});
+
+test("same-family CLI route mismatch is rejected before any resume call", async () => {
+  const stored = makeRun("claude_code", { status: "interrupted" });
+  const resumeCliRun = vi.fn(async () => stored);
+  const backend = fakeBackend({
+    getRunDetail: vi.fn(async () => detail(stored)),
+    resumeCliRun,
+  });
+
+  renderWizard(backend, `/cli/codex_cli?resume=${RUN_ID}`);
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "恢复链接与原体检目标不一致",
+  );
+  expect(resumeCliRun).not.toHaveBeenCalled();
+  expect(screen.queryByRole("button", { name: /继续剩余任务/ }))
+    .not.toBeInTheDocument();
+});
+
+test.each([
+  ["model", { reportedModel: "changed-model" }],
+  ["reasoning effort", { reasoningEffort: "low" }],
+])(
+  "CLI recovery rejects a returned same-kind run with changed %s",
+  async (_field, targetChange) => {
+    const user = userEvent.setup();
+    const preview = makeRun("codex_cli", { status: "interrupted" });
+    preview.target.reportedModel = "gpt-5.1-codex";
+    preview.target.reasoningEffort = "high";
+    const changed = makeRun("codex_cli");
+    changed.environment.resumed = true;
+    changed.target = { ...preview.target, ...targetChange };
+    const backend = fakeBackend({
+      getRunDetail: vi.fn(async () => detail(preview)),
+      resumeCliRun: vi.fn(async () => changed),
+    });
+
+    renderWizard(backend, `/cli/codex_cli?resume=${RUN_ID}`);
+    await screen.findByRole("checkbox");
+    await user.click(screen.getByRole("checkbox"));
+    await user.click(
+      screen.getByRole("button", { name: /继续剩余任务/ }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "无法恢复这次 CLI 体检",
+    );
+    expect(backend.getRunDetail).toHaveBeenCalledTimes(1);
+  },
+);
+
+test("CLI resume failure stays on the review step and never renders backend details", async () => {
+  const user = userEvent.setup();
+  const preview = makeRun("codex_cli", { status: "interrupted" });
+  const resumeCliRun = vi.fn(async () => {
+    throw new Error("C:\\Users\\Alice\\.claude\\credentials.json");
+  });
+  const backend = fakeBackend({
+    getRunDetail: vi.fn(async () => detail(preview)),
+    resumeCliRun,
+  });
+  renderWizard(backend, `/cli/codex_cli?resume=${RUN_ID}`);
+  await screen.findByRole("checkbox");
+  await user.click(screen.getByRole("checkbox"));
+  await user.click(
+    screen.getByRole("button", { name: /继续剩余任务/ }),
+  );
+
+  expect(await screen.findByRole("alert")).toBeInTheDocument();
+  expect(document.body.textContent).not.toContain("Alice");
+  expect(document.body.textContent).not.toContain("credentials.json");
+});
 
 function renderWizard(
   backend: Backend,

@@ -164,14 +164,125 @@ function makeBackend(
     startCliRun: async () => {
       throw new Error("unused fake startCliRun");
     },
+    resumeManualRun: async () => {
+      throw new Error("unused fake resumeManualRun");
+    },
+    resumeCliRun: async () => {
+      throw new Error("unused fake resumeCliRun");
+    },
     cancelRun: async () => false,
     listRuns: async () => [],
     getRunDetail,
     exportPublicReport,
+    deleteRawArtifacts: async () => undefined,
+    deleteRun: async () => false,
+    deleteTargetHistory: async () => 0,
     onRunEvent: async () => () => undefined,
     onRunError: async () => () => undefined,
   };
 }
+
+describe("ResultPage local data controls", () => {
+  test("raw-only deletion has a separate confirmation, cancel calls nothing, and success refreshes evidence", async () => {
+    const user = userEvent.setup();
+    const initial = makeDetail();
+    const refreshed = makeDetail(
+      {},
+      initial.taskResults.map((result) => ({
+        ...result,
+        answerRelPath: null,
+      })),
+    );
+    const getRunDetail = vi
+      .fn<Backend["getRunDetail"]>()
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(refreshed);
+    const pending = deferred<void>();
+    const deleteRawArtifacts = vi.fn(() => pending.promise);
+    const backend = {
+      ...makeBackend(getRunDetail),
+      deleteRawArtifacts,
+    };
+    renderResult(backend);
+
+    await user.click(
+      await screen.findByText("数据管理"),
+    );
+    const rawButton = screen.getByRole("button", {
+      name: /只删除原始回答和 CLI 日志/,
+    });
+    await user.click(rawButton);
+    await user.click(screen.getByRole("button", { name: "取消" }));
+    expect(deleteRawArtifacts).not.toHaveBeenCalled();
+
+    await user.click(rawButton);
+    const confirm = screen.getByRole("button", {
+      name: /确认只删除原始数据/,
+    });
+    await user.dblClick(confirm);
+    expect(deleteRawArtifacts).toHaveBeenCalledTimes(1);
+    expect(deleteRawArtifacts).toHaveBeenCalledWith(runId);
+    pending.resolve();
+    expect(
+      await screen.findByRole("status", {
+        name: /原始数据已删除，分数和客观证据已保留/,
+      }),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(getRunDetail).toHaveBeenCalledTimes(2));
+  });
+
+  test("whole-run deletion is distinct, cancel is inert, and success navigates to history", async () => {
+    const user = userEvent.setup();
+    const deleteRun = vi.fn(async () => true);
+    const backend = {
+      ...makeBackend(async () => makeDetail()),
+      deleteRun,
+    };
+    renderResult(backend);
+    await user.click(await screen.findByText("数据管理"));
+    const deleteButton = screen.getByRole("button", {
+      name: /删除本次记录和原始数据/,
+    });
+    await user.click(deleteButton);
+    await user.click(screen.getByRole("button", { name: "取消" }));
+    expect(deleteRun).not.toHaveBeenCalled();
+
+    await user.click(deleteButton);
+    await user.click(
+      screen.getByRole("button", { name: /确认删除本次记录/ }),
+    );
+    expect(deleteRun).toHaveBeenCalledWith(runId);
+    expect(
+      await screen.findByRole("heading", { name: "历史页" }),
+    ).toBeInTheDocument();
+  });
+
+  test("failed deletion keeps the result and never exposes or claims backend details", async () => {
+    const user = userEvent.setup();
+    const deleteRun = vi.fn(async () => {
+      throw new Error("C:\\Users\\Alice\\ability-radar.db");
+    });
+    const backend = {
+      ...makeBackend(async () => makeDetail()),
+      deleteRun,
+    };
+    renderResult(backend);
+    await user.click(await screen.findByText("数据管理"));
+    await user.click(
+      screen.getByRole("button", { name: /删除本次记录和原始数据/ }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: /确认删除本次记录/ }),
+    );
+
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("Alice");
+    expect(document.body.textContent).not.toMatch(/本次记录已删除/);
+    expect(
+      screen.getByRole("heading", { name: "本次客观结果" }),
+    ).toBeInTheDocument();
+  });
+});
 
 function renderResult(
   backend: Backend,

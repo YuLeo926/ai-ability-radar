@@ -64,14 +64,115 @@ function makeBackend(listRuns: Backend["listRuns"]): Backend {
     startCliRun: async () => {
       throw new Error("unused fake startCliRun");
     },
+    resumeManualRun: async () => {
+      throw new Error("unused fake resumeManualRun");
+    },
+    resumeCliRun: async () => {
+      throw new Error("unused fake resumeCliRun");
+    },
     cancelRun: async () => false,
     listRuns,
     getRunDetail: async () => null,
     exportPublicReport: async () => null,
+    deleteRawArtifacts: async () => undefined,
+    deleteRun: async () => false,
+    deleteTargetHistory: async () => 0,
     onRunEvent: async () => () => undefined,
     onRunError: async () => () => undefined,
   };
 }
+
+test.each([
+  ["chat_gpt_client", `/manual/chat_gpt_client?resume=private-run-1`],
+  ["claude_client", `/manual/claude_client?resume=private-run-1`],
+  ["codex_cli", `/cli/codex_cli?resume=private-run-1`],
+  ["claude_code", `/cli/claude_code?resume=private-run-1`],
+] as const)(
+  "interrupted %s history exposes a resume route without treating it as a result",
+  async (kind, expectedHref) => {
+    renderHistory(
+      makeBackend(async () => [
+        makeRun({
+          target: { ...makeRun().target, kind },
+          status: "interrupted",
+          completedTasks: 1,
+          score: null,
+        }),
+      ]),
+    );
+
+    const link = await screen.findByRole("link", { name: /继续/ });
+    expect(link).toHaveAttribute("href", expectedHref);
+  },
+);
+
+test("target history deletion is two-step, cancel makes zero calls, and confirmation binds exact ids", async () => {
+  const user = userEvent.setup();
+  const first = makeRun({ id: "run-one" });
+  const second = makeRun({ id: "run-two" });
+  const listRuns = vi
+    .fn<Backend["listRuns"]>()
+    .mockResolvedValueOnce([first, second])
+    .mockResolvedValueOnce([]);
+  const pending = deferred<number>();
+  const deleteTargetHistory = vi.fn(() => pending.promise);
+  const backend = {
+    ...makeBackend(listRuns),
+    deleteTargetHistory,
+  };
+  renderHistory(backend);
+
+  const open = await screen.findByRole("button", {
+    name: /删除该测试对象全部历史/,
+  });
+  await user.click(open);
+  expect(screen.getByRole("group", { name: /确认删除/ })).toHaveTextContent(
+    "2",
+  );
+  await user.click(screen.getByRole("button", { name: "取消" }));
+  expect(deleteTargetHistory).not.toHaveBeenCalled();
+
+  await user.click(open);
+  const confirm = screen.getByRole("button", { name: /确认删除 2 条记录/ });
+  await user.dblClick(confirm);
+  expect(deleteTargetHistory).toHaveBeenCalledTimes(1);
+  expect(deleteTargetHistory).toHaveBeenCalledWith("chat_gpt_client", [
+    "run-one",
+    "run-two",
+  ]);
+  pending.resolve(2);
+  expect(
+    await screen.findByRole("heading", { name: /还没有体检记录/ }),
+  ).toBeInTheDocument();
+  expect(listRuns).toHaveBeenCalledTimes(2);
+});
+
+test("failed stale target confirmation keeps history visible and never claims deletion", async () => {
+  const user = userEvent.setup();
+  const deleteTargetHistory = vi.fn(async () => {
+    throw new Error("C:\\Users\\Alice\\private.db");
+  });
+  const backend = {
+    ...makeBackend(async () => [makeRun({ id: "still-here" })]),
+    deleteTargetHistory,
+  };
+  renderHistory(backend);
+  await user.click(
+    await screen.findByRole("button", {
+      name: /删除该测试对象全部历史/,
+    }),
+  );
+  await user.click(
+    screen.getByRole("button", { name: /确认删除 1 条记录/ }),
+  );
+
+  expect(await screen.findByRole("alert")).toBeInTheDocument();
+  expect(document.body.textContent).not.toContain("Alice");
+  expect(
+    screen.getByRole("link", { name: /查看本次结果/ }),
+  ).toBeInTheDocument();
+  expect(document.body.textContent).not.toMatch(/已删除/);
+});
 
 function renderHistory(backend: Backend) {
   return render(

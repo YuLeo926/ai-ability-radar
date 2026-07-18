@@ -52,6 +52,42 @@ pub struct ExportReportInput {
     pub run_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RunIdInput {
+    pub run_id: String,
+}
+
+fn deserialize_required_nullable_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResumeTargetSelectionInput {
+    pub kind: TargetKind,
+    pub reported_model: String,
+    #[serde(deserialize_with = "deserialize_required_nullable_string")]
+    pub reasoning_effort: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResumeRunInput {
+    pub run_id: String,
+    pub expected_target: ResumeTargetSelectionInput,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeleteTargetHistoryInput {
+    pub target: TargetKind,
+    pub expected_run_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunDetailDto {
@@ -203,5 +239,99 @@ mod tests {
         ] {
             assert!(serde_json::from_value::<ExportReportInput>(forbidden).is_err());
         }
+    }
+
+    #[test]
+    fn resume_input_binds_the_exact_target_and_rejects_unknown_nested_fields() {
+        let valid: ResumeRunInput = serde_json::from_value(json!({
+            "runId": "39d9f772-2e12-4b2d-af13-94c32d36f2d3",
+            "expectedTarget": {
+                "kind": "codex_cli",
+                "reportedModel": "gpt-5.1-codex",
+                "reasoningEffort": "high"
+            }
+        }))
+        .unwrap();
+        assert_eq!(valid.expected_target.kind, TargetKind::CodexCli);
+        assert_eq!(valid.expected_target.reported_model, "gpt-5.1-codex");
+        assert_eq!(
+            valid.expected_target.reasoning_effort.as_deref(),
+            Some("high")
+        );
+
+        for forbidden in [
+            json!({
+                "runId": valid.run_id,
+                "expectedTarget": {
+                    "kind": "codex_cli",
+                    "reportedModel": "gpt-5.1-codex",
+                    "reasoningEffort": "high"
+                },
+                "path": "C:/Users/Alice"
+            }),
+            json!({
+                "runId": valid.run_id,
+                "expectedTarget": {
+                    "kind": "codex_cli",
+                    "reportedModel": "gpt-5.1-codex",
+                    "reasoningEffort": "high",
+                    "program": "cmd.exe"
+                }
+            }),
+            json!({
+                "runId": valid.run_id,
+                "expectedTarget": {
+                    "kind": "codex_cli",
+                    "reportedModel": "gpt-5.1-codex",
+                    "reasoningEffort": "high"
+                },
+                "force": true
+            }),
+            json!({
+                "runId": valid.run_id,
+                "expectedTarget": {
+                    "kind": "codex_cli",
+                    "reportedModel": "gpt-5.1-codex"
+                }
+            }),
+        ] {
+            assert!(serde_json::from_value::<ResumeRunInput>(forbidden).is_err());
+        }
+    }
+
+    #[test]
+    fn single_run_delete_inputs_accept_only_a_run_id() {
+        let valid: RunIdInput = serde_json::from_value(json!({
+            "runId": "39d9f772-2e12-4b2d-af13-94c32d36f2d3"
+        }))
+        .unwrap();
+        assert_eq!(valid.run_id, "39d9f772-2e12-4b2d-af13-94c32d36f2d3");
+        for forbidden in [
+            json!({"runId": valid.run_id, "path": "C:/Users/Alice"}),
+            json!({"runId": valid.run_id, "force": true}),
+            json!({"runId": valid.run_id, "program": "cmd.exe"}),
+        ] {
+            assert!(serde_json::from_value::<RunIdInput>(forbidden).is_err());
+        }
+    }
+
+    #[test]
+    fn target_history_delete_input_binds_target_and_exact_reviewed_ids() {
+        let valid: DeleteTargetHistoryInput = serde_json::from_value(json!({
+            "target": "codex_cli",
+            "expectedRunIds": [
+                "39d9f772-2e12-4b2d-af13-94c32d36f2d3",
+                "f1e93ab2-b1ec-4204-a973-b4cdf4ddf81b"
+            ]
+        }))
+        .unwrap();
+        assert_eq!(valid.target, TargetKind::CodexCli);
+        assert_eq!(valid.expected_run_ids.len(), 2);
+        assert!(serde_json::from_value::<DeleteTargetHistoryInput>(json!({
+            "target": "codex_cli",
+            "expectedRunIds": [],
+            "path": "C:/Users/Alice"
+        }))
+        .is_err());
     }
 }

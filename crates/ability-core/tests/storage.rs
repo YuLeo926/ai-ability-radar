@@ -288,3 +288,177 @@ fn finish_without_score_rejects_invalid_status_missing_and_non_running_runs() {
         RunStatus::Completed
     );
 }
+
+#[test]
+fn raw_reference_cleanup_is_score_preserving_idempotent_and_rejects_active_runs() {
+    let directory = tempdir().unwrap();
+    let repository = RunRepository::open(&directory.path().join("ability.db")).unwrap();
+    let mut run = sample_run();
+    run.status = RunStatus::Running;
+    repository.insert_run(&run).unwrap();
+    repository
+        .save_task_result(&passing_result(run.id, "instruction-1"))
+        .unwrap();
+
+    assert!(matches!(
+        repository.clear_artifact_references(run.id),
+        Err(StorageError::InvalidData(message)) if message.contains("active")
+    ));
+    assert!(
+        repository.get_task_results(run.id).unwrap()[0]
+            .answer_rel_path
+            .is_some()
+    );
+
+    repository
+        .finish_without_score(run.id, RunStatus::Interrupted)
+        .unwrap();
+    assert_eq!(repository.clear_artifact_references(run.id).unwrap(), 1);
+    assert_eq!(repository.clear_artifact_references(run.id).unwrap(), 0);
+    let retained = repository.get_task_results(run.id).unwrap();
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].score, Some(100.0));
+    assert_eq!(retained[0].answer_rel_path, None);
+    assert!(repository.get_run(run.id).unwrap().is_some());
+}
+
+#[test]
+fn delete_one_is_transactional_idempotent_and_cleans_orphan_identity_rows() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("ability.db");
+    let repository = RunRepository::open(&database).unwrap();
+    let mut run = sample_run();
+    run.status = RunStatus::Completed;
+    repository.insert_run(&run).unwrap();
+    repository
+        .save_task_result(&passing_result(run.id, "instruction-1"))
+        .unwrap();
+
+    assert!(repository.delete_run(run.id).unwrap());
+    assert!(!repository.delete_run(run.id).unwrap());
+    assert!(repository.get_run(run.id).unwrap().is_none());
+    assert!(repository.get_task_results(run.id).unwrap().is_empty());
+
+    let connection = rusqlite::Connection::open(database).unwrap();
+    let target_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM targets", [], |row| row.get(0))
+        .unwrap();
+    let suite_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM suite_versions", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!((target_count, suite_count), (0, 0));
+}
+
+#[test]
+fn destructive_repository_operations_reject_running_runs_without_partial_changes() {
+    let directory = tempdir().unwrap();
+    let repository = RunRepository::open(&directory.path().join("ability.db")).unwrap();
+    let mut run = sample_run();
+    run.status = RunStatus::Running;
+    repository.insert_run(&run).unwrap();
+    repository
+        .save_task_result(&passing_result(run.id, "instruction-1"))
+        .unwrap();
+
+    assert!(matches!(
+        repository.delete_run(run.id),
+        Err(StorageError::InvalidData(message)) if message.contains("active")
+    ));
+    assert!(matches!(
+        repository.delete_target_history(TargetKind::ChatGptClient, &[run.id]),
+        Err(StorageError::InvalidData(message)) if message.contains("active")
+    ));
+    assert!(repository.get_run(run.id).unwrap().is_some());
+    assert_eq!(repository.get_task_results(run.id).unwrap().len(), 1);
+}
+
+#[test]
+fn target_history_deletion_binds_the_exact_reviewed_run_snapshot() {
+    let directory = tempdir().unwrap();
+    let repository = RunRepository::open(&directory.path().join("ability.db")).unwrap();
+    let mut reviewed = sample_run();
+    reviewed.status = RunStatus::Interrupted;
+    repository.insert_run(&reviewed).unwrap();
+    let reviewed_ids = vec![reviewed.id];
+
+    let mut newly_created = sample_run();
+    newly_created.status = RunStatus::Interrupted;
+    repository.insert_run(&newly_created).unwrap();
+
+    assert!(matches!(
+        repository.delete_target_history(TargetKind::ChatGptClient, &reviewed_ids),
+        Err(StorageError::InvalidData(message)) if message.contains("changed")
+    ));
+    assert!(repository.get_run(reviewed.id).unwrap().is_some());
+    assert!(repository.get_run(newly_created.id).unwrap().is_some());
+
+    let mut exact = vec![reviewed.id, newly_created.id];
+    exact.sort_unstable();
+    assert_eq!(
+        repository
+            .delete_target_history(TargetKind::ChatGptClient, &exact)
+            .unwrap(),
+        2
+    );
+    assert!(repository.list_runs().unwrap().is_empty());
+    assert_eq!(
+        repository
+            .delete_target_history(TargetKind::ChatGptClient, &[])
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn injected_target_delete_failure_rolls_back_every_database_row() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("ability.db");
+    let repository = RunRepository::open(&database).unwrap();
+    let mut first = sample_run();
+    first.status = RunStatus::Interrupted;
+    let mut second = sample_run();
+    second.status = RunStatus::Interrupted;
+    repository.insert_run(&first).unwrap();
+    repository.insert_run(&second).unwrap();
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    connection
+        .execute_batch(&format!(
+            "CREATE TRIGGER fail_target_delete BEFORE DELETE ON runs
+             WHEN OLD.id='{}'
+             BEGIN SELECT RAISE(ABORT, 'injected delete failure'); END;",
+            second.id
+        ))
+        .unwrap();
+    drop(connection);
+    let mut ids = vec![first.id, second.id];
+    ids.sort_unstable();
+
+    assert!(
+        repository
+            .delete_target_history(TargetKind::ChatGptClient, &ids)
+            .is_err()
+    );
+    assert!(repository.get_run(first.id).unwrap().is_some());
+    assert!(repository.get_run(second.id).unwrap().is_some());
+}
+
+#[test]
+fn repository_keeps_sqlite_secure_delete_enabled() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("ability.db");
+    let repository = RunRepository::open(&database).unwrap();
+    let sentinel = "SECURE_DELETE_SENTINEL_7f1d2f977fbc4c63".repeat(8);
+    let mut run = sample_run();
+    run.status = RunStatus::Interrupted;
+    run.target.reported_model = sentinel.clone();
+    repository.insert_run(&run).unwrap();
+    assert!(repository.delete_run(run.id).unwrap());
+    drop(repository);
+
+    let bytes = std::fs::read(database).unwrap();
+    assert!(
+        !bytes
+            .windows(sentinel.len())
+            .any(|window| window == sentinel.as_bytes())
+    );
+}

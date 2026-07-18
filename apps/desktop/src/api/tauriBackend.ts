@@ -20,12 +20,24 @@ export const tauriBackend: Backend = {
   submitManualAnswer: (input) =>
     invoke<TaskResult>("submit_manual_answer", { input }),
   startCliRun: (input) => invoke<RunRecord>("start_cli_run", { input }),
+  resumeManualRun: (input) =>
+    invoke<RunRecord>("resume_manual_run", { input }),
+  resumeCliRun: (input) =>
+    invoke<RunRecord>("resume_cli_run", { input }),
   cancelRun: (runId) => invoke<boolean>("cancel_run", { runId }),
   listRuns: () => invoke<RunRecord[]>("list_runs"),
   getRunDetail: (runId) =>
     invoke<RunDetail | null>("get_run_detail", { runId }),
   exportPublicReport: (runId) =>
     invoke<string | null>("export_public_report", { input: { runId } }),
+  deleteRawArtifacts: (runId) =>
+    invoke<void>("delete_raw_artifacts", { input: { runId } }),
+  deleteRun: (runId) =>
+    invoke<boolean>("delete_run", { input: { runId } }),
+  deleteTargetHistory: (target, expectedRunIds) =>
+    invoke<number>("delete_target_history", {
+      input: { target, expectedRunIds },
+    }),
   onRunEvent: async (listener) =>
     listen<RunEvent>("run://event", ({ payload }) => listener(payload)),
   onRunError: async (listener) =>

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { useBackend } from "../api/BackendContext";
 import {
   isSafeRunDetail,
@@ -534,7 +534,177 @@ function ReportExportControls({ detail }: { detail: RunDetail }) {
   );
 }
 
-function ResultReady({ detail }: { detail: RunDetail }) {
+function DataManagementControls({
+  run,
+  onRawDeleted,
+}: {
+  run: RunRecord;
+  onRawDeleted(): void;
+}) {
+  const backend = useBackend();
+  const navigate = useNavigate();
+  const mounted = useRef(true);
+  const operationPending = useRef(false);
+  const [choice, setChoice] = useState<"raw" | "run" | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      operationPending.current = false;
+    };
+  }, []);
+
+  function closeConfirmation() {
+    if (operationPending.current) {
+      return;
+    }
+    setChoice(null);
+    setError("");
+  }
+
+  async function confirmDeletion() {
+    if (!choice || operationPending.current) {
+      return;
+    }
+    const requestedChoice = choice;
+    operationPending.current = true;
+    setBusy(true);
+    setError("");
+    try {
+      if (requestedChoice === "raw") {
+        await backend.deleteRawArtifacts(run.id);
+        if (!mounted.current) {
+          return;
+        }
+        setChoice(null);
+        onRawDeleted();
+        return;
+      }
+
+      const deleted = await backend.deleteRun(run.id);
+      if (!mounted.current) {
+        return;
+      }
+      if (!deleted) {
+        setError(
+          "未能确认删除本次记录，当前结果仍然保留。请重新读取后再试。",
+        );
+        return;
+      }
+      navigate("/history", { replace: true });
+    } catch {
+      if (mounted.current) {
+        setError(
+          requestedChoice === "raw"
+            ? "无法删除原始数据，当前记录仍然保留。请稍后重试。"
+            : "无法删除本次记录，当前结果仍然保留。请稍后重试。",
+        );
+      }
+    } finally {
+      operationPending.current = false;
+      if (mounted.current) {
+        setBusy(false);
+      }
+    }
+  }
+
+  return (
+    <details className="technical-details data-management">
+      <summary>数据管理</summary>
+      <p>
+        删除只作用于应用管理的本地数据。系统备份、外部同步副本和取证痕迹不在应用可验证范围内。
+      </p>
+
+      <div className="data-management-actions">
+        <button
+          className="evidence-button danger-outline"
+          disabled={busy || choice !== null}
+          onClick={() => {
+            setError("");
+            setChoice("raw");
+          }}
+          type="button"
+        >
+          只删除原始回答和 CLI 日志，保留分数
+        </button>
+          <button
+            className="evidence-button danger"
+          disabled={busy || choice !== null}
+          onClick={() => {
+            setError("");
+            setChoice("run");
+            }}
+            type="button"
+          >
+            从应用中删除本次记录和原始数据
+          </button>
+      </div>
+
+      {choice ? (
+        <section
+          aria-label={
+            choice === "raw"
+              ? "确认只删除原始数据"
+              : "确认删除本次记录"
+          }
+          className="inline-confirmation"
+          role="group"
+        >
+          <h3>
+            {choice === "raw"
+              ? "只删除原始回答和 CLI 日志？"
+              : "删除本次记录和原始数据？"}
+          </h3>
+          <p>
+            {choice === "raw"
+              ? "分数、逐题客观证据和运行条件会继续保留；原始回答、CLI 日志及工作区将被删除。"
+              : "本次分数、逐题证据、运行记录以及应用管理的原始数据都会被删除。"}
+          </p>
+          {error ? (
+            <p className="form-error" role="alert">
+              {error}
+            </p>
+          ) : null}
+          <div className="inline-confirmation-actions">
+            <button
+              className="evidence-button secondary"
+              disabled={busy}
+              onClick={closeConfirmation}
+              type="button"
+            >
+              取消
+            </button>
+            <button
+              className="evidence-button danger"
+              disabled={busy}
+              onClick={() => void confirmDeletion()}
+              type="button"
+            >
+              {busy
+                ? "正在删除…"
+                : choice === "raw"
+                  ? "确认只删除原始数据"
+                  : "确认删除本次记录"}
+            </button>
+          </div>
+        </section>
+      ) : null}
+    </details>
+  );
+}
+
+function ResultReady({
+  dataStatus,
+  detail,
+  onRawDeleted,
+}: {
+  dataStatus: string;
+  detail: RunDetail;
+  onRawDeleted(): void;
+}) {
   const { run, taskResults } = detail;
   const finalScore = run.status === "completed" ? run.score : null;
   const noScore = statusPresentation(run.status);
@@ -561,6 +731,12 @@ function ResultReady({ detail }: { detail: RunDetail }) {
           将在真实试运行校准后提供配对变化结论。
         </p>
       </aside>
+
+      {dataStatus ? (
+        <p aria-label={dataStatus} className="data-status" role="status">
+          {dataStatus}
+        </p>
+      ) : null}
 
       {finalScore ? (
         <>
@@ -731,6 +907,11 @@ function ResultReady({ detail }: { detail: RunDetail }) {
         <ReportExportControls detail={detail} />
       ) : null}
 
+      <DataManagementControls
+        onRawDeleted={onRawDeleted}
+        run={run}
+      />
+
       <nav aria-label="结果操作" className="evidence-actions">
         <Link className="evidence-button" to="/">
           开始新的体检
@@ -747,6 +928,10 @@ export function ResultPage() {
   const { runId = "" } = useParams();
   const backend = useBackend();
   const [attempt, setAttempt] = useState(0);
+  const [dataStatus, setDataStatus] = useState<{
+    message: string;
+    runId: string;
+  } | null>(null);
   const [state, setState] = useState<ResultState>({
     kind: "loading",
     requestedRunId: runId,
@@ -827,5 +1012,19 @@ export function ResultPage() {
     );
   }
 
-  return <ResultReady detail={visibleState.detail} />;
+  return (
+    <ResultReady
+      dataStatus={
+        dataStatus?.runId === runId ? dataStatus.message : ""
+      }
+      detail={visibleState.detail}
+      onRawDeleted={() => {
+        setDataStatus({
+          message: "原始数据已删除，分数和客观证据已保留。",
+          runId,
+        });
+        setAttempt((value) => value + 1);
+      }}
+    />
+  );
 }

@@ -4,14 +4,21 @@ import {
   useRef,
   useState,
 } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import {
+  Link,
+  useNavigate,
+  useParams,
+  useSearchParams,
+} from "react-router-dom";
 import { useBackend } from "../api/BackendContext";
+import { isSafeRunRecord } from "../api/runtimeValidation";
 import type {
   Bootstrap,
   RunEvent,
   RunRecord,
   TargetAvailability,
   TargetKind,
+  TargetSelection,
   Unlisten,
 } from "../api/backend";
 import "./CliRunPage.css";
@@ -25,6 +32,10 @@ type BootstrapState =
 type Connectivity = "connecting" | "live" | "fallback";
 type SyncState = "ready" | "missing" | "failed";
 type StopState = "idle" | "not-found" | "waiting";
+type ResumePreviewState =
+  | { kind: "loading" }
+  | { kind: "ready"; run: RunRecord }
+  | { kind: "error"; message: string };
 
 const POLL_INTERVAL_MS = 2_000;
 const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/;
@@ -58,6 +69,21 @@ function isTerminal(status: RunRecord["status"]): boolean {
     status === "cancelled" ||
     status === "interrupted"
   );
+}
+
+function sameTarget(left: TargetSelection, right: TargetSelection): boolean {
+  return (
+    left.kind === right.kind &&
+    left.reportedModel === right.reportedModel &&
+    (left.reasoningEffort ?? null) === (right.reasoningEffort ?? null)
+  );
+}
+
+function reasoningEffortLabel(value?: string | null): string {
+  if (value === "low") return "低";
+  if (value === "medium") return "中";
+  if (value === "high") return "高";
+  return "CLI 默认";
 }
 
 function releaseUnlisten(unlisten: Unlisten): void {
@@ -115,7 +141,13 @@ function UnsupportedCliPage() {
   );
 }
 
-function CliWizard({ kind }: { kind: CliTargetKind }) {
+function CliWizard({
+  kind,
+  resumeRunId,
+}: {
+  kind: CliTargetKind;
+  resumeRunId?: string;
+}) {
   const backend = useBackend();
   const navigate = useNavigate();
   const label = cliLabels[kind];
@@ -153,6 +185,10 @@ function CliWizard({ kind }: { kind: CliTargetKind }) {
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState("");
   const [stopState, setStopState] = useState<StopState>("idle");
+  const [resumePreview, setResumePreview] =
+    useState<ResumePreviewState | null>(
+      resumeRunId ? { kind: "loading" } : null,
+    );
 
   const clearPollTimer = useCallback(() => {
     if (pollTimer.current !== null) {
@@ -317,6 +353,53 @@ function CliWizard({ kind }: { kind: CliTargetKind }) {
   }, [backend, bootstrapAttempt]);
 
   useEffect(() => {
+    if (!resumeRunId) {
+      setResumePreview(null);
+      return;
+    }
+    let disposed = false;
+    setResumePreview({ kind: "loading" });
+    void Promise.resolve()
+      .then(() => backend.getRunDetail(resumeRunId))
+      .then((detail) => {
+        if (disposed || !mounted.current) {
+          return;
+        }
+        if (
+          !detail ||
+          !isSafeRunRecord(detail.run) ||
+          detail.run.id !== resumeRunId ||
+          detail.run.status !== "interrupted"
+        ) {
+          setResumePreview({
+            kind: "error",
+            message: "无法恢复这次 CLI 体检。本地记录无法安全读取。",
+          });
+          return;
+        }
+        if (detail.run.target.kind !== kind) {
+          setResumePreview({
+            kind: "error",
+            message: "恢复链接与原体检目标不一致。",
+          });
+          return;
+        }
+        setResumePreview({ kind: "ready", run: detail.run });
+      })
+      .catch(() => {
+        if (!disposed && mounted.current) {
+          setResumePreview({
+            kind: "error",
+            message: "无法恢复这次 CLI 体检。本地记录无法安全读取。",
+          });
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [backend, kind, resumeRunId]);
+
+  useEffect(() => {
     let disposed = false;
     let attached = 0;
     const unlisteners: Unlisten[] = [];
@@ -408,12 +491,16 @@ function CliWizard({ kind }: { kind: CliTargetKind }) {
       availability &&
       !blocker &&
       acceptedCost &&
-      !modelError &&
+      (resumeRunId
+        ? resumePreview?.kind === "ready"
+        : !modelError) &&
       !starting,
   );
 
   async function start() {
-    setModelTouched(true);
+    if (!resumeRunId) {
+      setModelTouched(true);
+    }
     if (
       startPending.current ||
       !startAllowed ||
@@ -427,18 +514,42 @@ function CliWizard({ kind }: { kind: CliTargetKind }) {
     setSetupError("");
 
     try {
+      const reviewed =
+        resumeRunId && resumePreview?.kind === "ready"
+          ? resumePreview.run
+          : null;
       const created = await Promise.resolve().then(() =>
-        backend.startCliRun({
-          target: {
-            kind,
-            reportedModel: model.trim() || "default",
-            reasoningEffort: reasoningEffort || null,
-          },
-          mode: "quick",
-        }),
+        reviewed
+          ? backend.resumeCliRun({
+              runId: reviewed.id,
+              expectedTarget: {
+                ...reviewed.target,
+                reasoningEffort: reviewed.target.reasoningEffort ?? null,
+              },
+            })
+          : backend.startCliRun({
+              target: {
+                kind,
+                reportedModel: model.trim() || "default",
+                reasoningEffort: reasoningEffort || null,
+              },
+              mode: "quick",
+            }),
       );
       if (!mounted.current) {
         return;
+      }
+      if (
+        !isSafeRunRecord(created) ||
+        created.target.kind !== kind ||
+        created.status !== "running" ||
+        (resumeRunId &&
+          (!reviewed ||
+            created.id !== resumeRunId ||
+            !sameTarget(created.target, reviewed.target) ||
+            !created.environment.resumed))
+      ) {
+        throw new Error("unsafe run record");
       }
       activeRunId.current = created.id;
       navigated.current = false;
@@ -459,7 +570,9 @@ function CliWizard({ kind }: { kind: CliTargetKind }) {
     } catch {
       if (mounted.current) {
         setSetupError(
-          "无法启动 CLI 体检，请检查安装和登录状态后重试。",
+          resumeRunId
+            ? "无法恢复这次 CLI 体检，请返回历史记录后重试。"
+            : "无法启动 CLI 体检，请检查安装和登录状态后重试。",
         );
       }
     } finally {
@@ -553,6 +666,20 @@ function CliWizard({ kind }: { kind: CliTargetKind }) {
     );
   }
 
+  if (!run && resumePreview?.kind === "error") {
+    return (
+      <main className="page run-page cli-run-page cli-loading-page">
+        <p className="eyebrow">CLI · 恢复未完成体检</p>
+        <h1>{label} 快速体检</h1>
+        <section className="cli-alert-card" role="alert">
+          <h2>无法恢复这次 CLI 体检</h2>
+          <p>{resumePreview.message}</p>
+          <Link to="/history">返回历史记录</Link>
+        </section>
+      </main>
+    );
+  }
+
   if (!run) {
     const pack = bootstrapState.value.cliPack;
     return (
@@ -622,62 +749,108 @@ function CliWizard({ kind }: { kind: CliTargetKind }) {
             </p>
           </aside>
 
-          <div className="cli-fields">
-            <div className="field">
-              <label htmlFor="cli-model">固定模型（可选）</label>
-              <input
-                aria-describedby={
-                  modelTouched && modelError
-                    ? "cli-model-hint cli-model-error"
-                    : "cli-model-hint"
-                }
-                aria-invalid={
-                  modelTouched && modelError ? "true" : undefined
-                }
-                autoComplete="off"
-                id="cli-model"
-                onChange={(event) => {
-                  setModelTouched(true);
-                  setModel(event.target.value);
-                }}
-                placeholder={
-                  kind === "codex_cli" ? "例如 gpt-5.4" : "例如 sonnet"
-                }
-                value={model}
-              />
-              <small className="hint" id="cli-model-hint">
-                留空会使用 CLI 默认路由，并在记录中明确标为 default。
-              </small>
-            </div>
-            {modelTouched && modelError ? (
-              <p
-                aria-label={modelError}
-                className="form-error"
-                id="cli-model-error"
-                role="alert"
-              >
-                请输入 1–120 个字符；首字符须为英文字母或数字，其余只能使用英文字母、数字和
-                . _ : / -
-              </p>
-            ) : null}
+          {resumeRunId && resumePreview?.kind === "ready" ? (
+            <section
+              aria-labelledby="cli-resume-title"
+              className="resume-configuration"
+            >
+              <h2 id="cli-resume-title">确认恢复原体检</h2>
+              <p>只继续原记录尚未完成的任务，并精确沿用以下配置。</p>
+              <dl className="cli-environment-list">
+                <div>
+                  <dt>原目标</dt>
+                  <dd>
+                    {cliLabels[
+                      resumePreview.run.target.kind as CliTargetKind
+                    ]}
+                  </dd>
+                </div>
+                <div>
+                  <dt>原模型</dt>
+                  <dd>{resumePreview.run.target.reportedModel}</dd>
+                </div>
+                <div>
+                  <dt>原推理档位</dt>
+                  <dd>
+                    {reasoningEffortLabel(
+                      resumePreview.run.target.reasoningEffort,
+                    )}
+                  </dd>
+                </div>
+              </dl>
+            </section>
+          ) : resumeRunId ? (
+            <p aria-live="polite" role="status">
+              正在读取原体检配置……
+            </p>
+          ) : null}
 
-            <div className="field">
-              <label htmlFor="cli-reasoning">推理档位（可选）</label>
-              <select
-                id="cli-reasoning"
-                onChange={(event) =>
-                  setReasoningEffort(
-                    event.target.value as ReasoningEffort,
-                  )
-                }
-                value={reasoningEffort}
-              >
-                <option value="">CLI 默认</option>
-                <option value="low">低</option>
-                <option value="medium">中</option>
-                <option value="high">高</option>
-              </select>
-            </div>
+          <div className="cli-fields">
+            {resumeRunId ? (
+              <p className="resume-configuration">
+                将沿用原运行的模型、推理档位与题包，只执行尚未完成的任务。
+              </p>
+            ) : (
+              <>
+                <div className="field">
+                  <label htmlFor="cli-model">固定模型（可选）</label>
+                  <input
+                    aria-describedby={
+                      modelTouched && modelError
+                        ? "cli-model-hint cli-model-error"
+                        : "cli-model-hint"
+                    }
+                    aria-invalid={
+                      modelTouched && modelError ? "true" : undefined
+                    }
+                    autoComplete="off"
+                    id="cli-model"
+                    onChange={(event) => {
+                      setModelTouched(true);
+                      setModel(event.target.value);
+                    }}
+                    placeholder={
+                      kind === "codex_cli"
+                        ? "例如 gpt-5.4"
+                        : "例如 sonnet"
+                    }
+                    value={model}
+                  />
+                  <small className="hint" id="cli-model-hint">
+                    留空会使用 CLI 默认路由，并在记录中明确标为 default。
+                  </small>
+                </div>
+                {modelTouched && modelError ? (
+                  <p
+                    aria-label={modelError}
+                    className="form-error"
+                    id="cli-model-error"
+                    role="alert"
+                  >
+                    请输入 1–120 个字符；首字符须为英文字母或数字，其余只能使用英文字母、数字和
+                    . _ : / -
+                  </p>
+                ) : null}
+
+                <div className="field">
+                  <label htmlFor="cli-reasoning">推理档位（可选）</label>
+                  <select
+                    id="cli-reasoning"
+                    onChange={(event) =>
+                      setReasoningEffort(
+                        event.target.value as ReasoningEffort,
+                      )
+                    }
+                    value={reasoningEffort}
+                  >
+                    <option value="">CLI 默认</option>
+                    <option value="low">低</option>
+                    <option value="medium">中</option>
+                    <option value="high">高</option>
+                  </select>
+                </div>
+              </>
+            )}
 
             <label className="check-row">
               <input
@@ -707,7 +880,9 @@ function CliWizard({ kind }: { kind: CliTargetKind }) {
           ) : null}
           {starting ? (
             <p aria-live="polite" role="status">
-              正在启动本地 CLI 体检…
+              {resumeRunId
+                ? "正在恢复本地 CLI 体检…"
+                : "正在启动本地 CLI 体检…"}
             </p>
           ) : null}
           <button
@@ -715,7 +890,13 @@ function CliWizard({ kind }: { kind: CliTargetKind }) {
             onClick={() => void start()}
             type="button"
           >
-            {starting ? "正在启动…" : `开始 ${pack.taskCount} 个任务`}
+            {starting
+              ? resumeRunId
+                ? "正在恢复…"
+                : "正在启动…"
+              : resumeRunId
+                ? "继续剩余任务"
+                : `开始 ${pack.taskCount} 个任务`}
           </button>
         </section>
       </main>
@@ -861,10 +1042,18 @@ function CliWizard({ kind }: { kind: CliTargetKind }) {
 
 export function CliRunPage() {
   const { target = "" } = useParams();
+  const [searchParams] = useSearchParams();
+  const resumeRunId = searchParams.get("resume") || undefined;
 
   if (!isCliTarget(target)) {
     return <UnsupportedCliPage />;
   }
 
-  return <CliWizard key={target} kind={target} />;
+  return (
+    <CliWizard
+      key={`${target}:${resumeRunId ?? "new"}`}
+      kind={target}
+      resumeRunId={resumeRunId}
+    />
+  );
 }

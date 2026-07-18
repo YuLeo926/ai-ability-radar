@@ -46,6 +46,7 @@ dependencies = [
  "async-trait",
  "os_info",
  "parking_lot",
+ "rusqlite",
  "serde",
  "serde_json",
  "tauri",

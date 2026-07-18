@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useBackend } from "../api/BackendContext";
 import { isSafeRunRecordList } from "../api/runtimeValidation";
@@ -172,16 +172,89 @@ function optionalFact(value: string | null | undefined): string {
   return value ?? "未记录";
 }
 
+function resumePath(run: RunRecord): string {
+  const route =
+    run.target.kind === "chat_gpt_client" ||
+    run.target.kind === "claude_client"
+      ? "manual"
+      : "cli";
+  return `/${route}/${run.target.kind}?resume=${encodeURIComponent(run.id)}`;
+}
+
 function HistorySeries({
   group,
   index,
+  onDeleted,
+  targetRunIds,
 }: {
   group: HistoryGroup;
   index: number;
+  onDeleted(): void;
+  targetRunIds: string[];
 }) {
+  const backend = useBackend();
   const representative = group.records[0];
   const titleId = `history-series-${index}`;
   const defaultRouting = representative.target.reportedModel === "default";
+  const mounted = useRef(true);
+  const deleting = useRef(false);
+  const currentSnapshot = useRef(targetRunIds.join("\0"));
+  const [confirmation, setConfirmation] = useState<string[] | null>(null);
+  const [deleteError, setDeleteError] = useState("");
+  const [deletePending, setDeletePending] = useState(false);
+  currentSnapshot.current = targetRunIds.join("\0");
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      deleting.current = false;
+    };
+  }, []);
+
+  async function deleteTargetRecords() {
+    if (!confirmation || deleting.current) {
+      return;
+    }
+    const expectedRunIds = [...confirmation];
+    const snapshot = expectedRunIds.join("\0");
+    deleting.current = true;
+    setDeletePending(true);
+    setDeleteError("");
+    try {
+      const deleted = await backend.deleteTargetHistory(
+        representative.target.kind,
+        expectedRunIds,
+      );
+      if (
+        !mounted.current ||
+        currentSnapshot.current !== snapshot
+      ) {
+        return;
+      }
+      if (deleted !== expectedRunIds.length) {
+        setDeleteError(
+          "未能确认删除全部历史，本页仍保留当前记录。请重新读取后再试。",
+        );
+        return;
+      }
+      onDeleted();
+    } catch {
+      if (
+        mounted.current &&
+        currentSnapshot.current === snapshot
+      ) {
+        setDeleteError(
+          "无法删除该测试对象的历史，本页仍保留当前记录。请重新读取后再试。",
+        );
+      }
+    } finally {
+      deleting.current = false;
+      if (mounted.current) {
+        setDeletePending(false);
+      }
+    }
+  }
 
   return (
     <section
@@ -288,11 +361,71 @@ function HistorySeries({
                 {displayedDate.label}
               </time>
               <strong>{statusLabel(run)}</strong>
+              {run.status === "interrupted" ? (
+                <Link to={resumePath(run)}>继续未完成体检</Link>
+              ) : null}
               <Link to={`/results/${run.id}`}>查看本次结果</Link>
             </li>
           );
         })}
       </ol>
+
+      <div className="history-data-controls">
+        <button
+          className="evidence-button danger-outline"
+          disabled={deletePending || confirmation !== null}
+          onClick={() => {
+            setDeleteError("");
+            setConfirmation([...targetRunIds]);
+          }}
+          type="button"
+        >
+          删除该测试对象全部历史
+        </button>
+        {confirmation ? (
+          <section
+            aria-label={`确认删除 ${targetLabels[representative.target.kind]} 全部历史`}
+            className="inline-confirmation"
+            role="group"
+          >
+            <h3>
+              删除 {targetLabels[representative.target.kind]} 的全部本地历史？
+            </h3>
+            <p>
+              将删除当前读取到的 {confirmation.length} 条记录及其原始数据。
+              这不会影响其他测试对象，也不会承诺清除系统备份、同步副本或取证痕迹。
+            </p>
+            {deleteError ? (
+              <p className="form-error" role="alert">
+                {deleteError}
+              </p>
+            ) : null}
+            <div className="inline-confirmation-actions">
+              <button
+                className="evidence-button secondary"
+                disabled={deletePending}
+                onClick={() => {
+                  setConfirmation(null);
+                  setDeleteError("");
+                }}
+                type="button"
+              >
+                取消
+              </button>
+              <button
+                className="evidence-button danger"
+                disabled={deletePending}
+                onClick={() => void deleteTargetRecords()}
+                type="button"
+              >
+                {deletePending
+                  ? "正在删除…"
+                  : `确认删除 ${confirmation.length} 条记录`}
+              </button>
+            </div>
+          </section>
+        ) : null}
+      </div>
     </section>
   );
 }
@@ -327,6 +460,23 @@ export function HistoryPage() {
     () => (state.kind === "ready" ? groupRuns(state.runs) : []),
     [state],
   );
+  const targetRunIds = useMemo(() => {
+    const byTarget = new Map<TargetKind, Set<string>>();
+    if (state.kind !== "ready") {
+      return new Map<TargetKind, string[]>();
+    }
+    for (const run of state.runs) {
+      const ids = byTarget.get(run.target.kind) ?? new Set<string>();
+      ids.add(run.id);
+      byTarget.set(run.target.kind, ids);
+    }
+    return new Map(
+      [...byTarget.entries()].map(([target, ids]) => [
+        target,
+        [...ids].sort(compareCodeUnits),
+      ]),
+    );
+  }, [state]);
 
   if (state.kind === "loading") {
     return (
@@ -388,7 +538,15 @@ export function HistoryPage() {
 
       <div className="history-series-list">
         {groups.map((group, index) => (
-          <HistorySeries group={group} index={index} key={group.key} />
+          <HistorySeries
+            group={group}
+            index={index}
+            key={group.key}
+            onDeleted={() => setAttempt((value) => value + 1)}
+            targetRunIds={
+              targetRunIds.get(group.records[0].target.kind) ?? []
+            }
+          />
         ))}
       </div>
     </main>

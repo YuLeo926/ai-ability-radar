@@ -1,0 +1,889 @@
+use crate::TargetKind;
+use std::path::PathBuf;
+use thiserror::Error;
+use uuid::Uuid;
+
+#[derive(Debug, Error)]
+pub enum ArtifactStoreError {
+    #[error("artifact layout is unsafe")]
+    UnsafeLayout,
+    #[error("artifact tree contains an unexpected entry")]
+    UnexpectedEntry,
+    #[error("artifact deletion is supported only by the Windows desktop build")]
+    UnsupportedPlatform,
+    #[error("artifact deletion failed")]
+    Io(#[source] std::io::Error),
+}
+
+pub struct ArtifactStore {
+    root: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryArtifactCheckpoint {
+    pub task_id: String,
+    pub raw_artifact: bool,
+}
+
+impl ArtifactStore {
+    pub fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+
+    #[cfg(windows)]
+    pub fn delete_run_artifacts(
+        &self,
+        run_id: Uuid,
+        target: TargetKind,
+    ) -> Result<bool, ArtifactStoreError> {
+        windows::delete_run(&self.root, run_id, target)
+    }
+
+    #[cfg(windows)]
+    pub fn prepare_recovery_artifacts(
+        &self,
+        run_id: Uuid,
+        target: TargetKind,
+        pack_task_ids: &[String],
+        checkpoints: &[RecoveryArtifactCheckpoint],
+    ) -> Result<(), ArtifactStoreError> {
+        windows::prepare_recovery(&self.root, run_id, target, pack_task_ids, checkpoints)
+    }
+
+    #[cfg(not(windows))]
+    pub fn delete_run_artifacts(
+        &self,
+        _run_id: Uuid,
+        _target: TargetKind,
+    ) -> Result<bool, ArtifactStoreError> {
+        Err(ArtifactStoreError::UnsupportedPlatform)
+    }
+
+    #[cfg(not(windows))]
+    pub fn prepare_recovery_artifacts(
+        &self,
+        _run_id: Uuid,
+        _target: TargetKind,
+        _pack_task_ids: &[String],
+        _checkpoints: &[RecoveryArtifactCheckpoint],
+    ) -> Result<(), ArtifactStoreError> {
+        Err(ArtifactStoreError::UnsupportedPlatform)
+    }
+}
+
+#[cfg(windows)]
+mod windows {
+    use super::{ArtifactStoreError, RecoveryArtifactCheckpoint};
+    use crate::TargetKind;
+    use std::collections::{HashMap, HashSet};
+    use std::ffi::{OsStr, OsString};
+    use std::fs::File;
+    use std::io;
+    use std::mem::{offset_of, size_of, zeroed};
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, RawHandle};
+    use std::path::{Component, Path, PathBuf, Prefix};
+    use std::ptr::{null, null_mut};
+    use uuid::Uuid;
+    use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FILE_DIRECTORY_FILE, FILE_DISPOSITION_INFORMATION, FILE_NON_DIRECTORY_FILE, FILE_OPEN,
+        FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT, FileDispositionInformation,
+        NtCreateFile, NtSetInformationFile,
+    };
+    use windows_sys::Win32::Foundation::{
+        ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE, OBJ_CASE_INSENSITIVE, RtlNtStatusToDosError,
+        STATUS_SUCCESS, UNICODE_STRING,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, CreateFileW, DELETE, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_BOTH_DIR_INFO, FILE_LIST_DIRECTORY,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
+        FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo, GetFileInformationByHandle,
+        GetFileInformationByHandleEx, OPEN_EXISTING, SYNCHRONIZE,
+    };
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+    const DIRECTORY_ACCESS: u32 =
+        FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE;
+    const DELETABLE_DIRECTORY_ACCESS: u32 = DIRECTORY_ACCESS | DELETE;
+    const DELETABLE_FILE_ACCESS: u32 = FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE;
+    const SAFE_SHARING: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
+
+    #[derive(Clone, Copy)]
+    enum TreePolicy {
+        ManualRoot,
+        CliRoot,
+        Logs,
+        Workspaces,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum HandleKind {
+        File,
+        Directory,
+    }
+
+    enum OpenedChild {
+        File(File),
+        Directory(File),
+    }
+
+    impl OpenedChild {
+        fn kind(&self) -> HandleKind {
+            match self {
+                Self::File(_) => HandleKind::File,
+                Self::Directory(_) => HandleKind::Directory,
+            }
+        }
+    }
+
+    pub fn delete_run(
+        root: &Path,
+        run_id: Uuid,
+        target: TargetKind,
+    ) -> Result<bool, ArtifactStoreError> {
+        delete_run_inner(root, run_id, root_policy(target)?, || {})
+    }
+
+    fn delete_run_inner<F>(
+        root: &Path,
+        run_id: Uuid,
+        policy: TreePolicy,
+        after_preflight: F,
+    ) -> Result<bool, ArtifactStoreError>
+    where
+        F: FnOnce(),
+    {
+        let (drive, components) = local_drive_components(root)?;
+        let Some(root_handle) = open_existing_chain(drive, &components)? else {
+            return Ok(false);
+        };
+        let Some(runs_handle) =
+            open_optional_directory(&root_handle, OsStr::new("runs"), DIRECTORY_ACCESS)?
+        else {
+            return Ok(false);
+        };
+        let run_name = run_id.to_string();
+        let Some(run_handle) = open_optional_directory(
+            &runs_handle,
+            OsStr::new(&run_name),
+            DELETABLE_DIRECTORY_ACCESS,
+        )?
+        else {
+            return Ok(false);
+        };
+        preflight_tree(&run_handle, policy)?;
+        after_preflight();
+        delete_tree(&run_handle, policy)?;
+        delete_handle(&run_handle).map_err(map_io)?;
+        drop(run_handle);
+        drop(runs_handle);
+        drop(root_handle);
+        Ok(true)
+    }
+
+    pub fn prepare_recovery(
+        root: &Path,
+        run_id: Uuid,
+        target: TargetKind,
+        pack_task_ids: &[String],
+        checkpoints: &[RecoveryArtifactCheckpoint],
+    ) -> Result<(), ArtifactStoreError> {
+        let mut pack_ids = HashSet::with_capacity(pack_task_ids.len());
+        for task_id in pack_task_ids {
+            validate_name(OsStr::new(task_id))?;
+            if !pack_ids.insert(task_id.as_str()) {
+                return Err(ArtifactStoreError::UnexpectedEntry);
+            }
+        }
+
+        let mut completed = HashMap::with_capacity(checkpoints.len());
+        for checkpoint in checkpoints {
+            validate_name(OsStr::new(&checkpoint.task_id))?;
+            if !pack_ids.contains(checkpoint.task_id.as_str())
+                || completed
+                    .insert(checkpoint.task_id.as_str(), checkpoint.raw_artifact)
+                    .is_some()
+            {
+                return Err(ArtifactStoreError::UnexpectedEntry);
+            }
+        }
+
+        let (drive, components) = local_drive_components(root)?;
+        let Some(root_handle) = open_existing_chain(drive, &components)? else {
+            return Ok(());
+        };
+        let Some(runs_handle) =
+            open_optional_directory(&root_handle, OsStr::new("runs"), DIRECTORY_ACCESS)?
+        else {
+            return Ok(());
+        };
+        let run_name = run_id.to_string();
+        let Some(run_handle) =
+            open_optional_directory(&runs_handle, OsStr::new(&run_name), DIRECTORY_ACCESS)?
+        else {
+            return Ok(());
+        };
+        match root_policy(target)? {
+            TreePolicy::ManualRoot => reconcile_manual(&run_handle, &pack_ids, &completed),
+            TreePolicy::CliRoot => reconcile_cli(&run_handle, &pack_ids, &completed),
+            TreePolicy::Logs | TreePolicy::Workspaces => unreachable!("target root policy"),
+        }
+    }
+
+    #[cfg(test)]
+    fn delete_run_with_after_preflight_hook<F>(
+        root: &Path,
+        run_id: Uuid,
+        target: TargetKind,
+        hook: F,
+    ) -> Result<bool, ArtifactStoreError>
+    where
+        F: FnOnce(),
+    {
+        delete_run_inner(root, run_id, root_policy(target)?, hook)
+    }
+
+    fn preflight_tree(directory: &File, policy: TreePolicy) -> Result<(), ArtifactStoreError> {
+        for name in list_directory(directory).map_err(map_io)? {
+            validate_name(&name)?;
+            let child = open_child(directory, &name, false)?;
+            let child_policy = classify(policy, &name, child.kind())?;
+            if let OpenedChild::Directory(child) = child {
+                preflight_tree(&child, child_policy)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn delete_tree(directory: &File, policy: TreePolicy) -> Result<(), ArtifactStoreError> {
+        for name in list_directory(directory).map_err(map_io)? {
+            validate_name(&name)?;
+            let child = open_child(directory, &name, true)?;
+            let child_policy = classify(policy, &name, child.kind())?;
+            match child {
+                OpenedChild::Directory(child) => {
+                    delete_tree(&child, child_policy)?;
+                    delete_handle(&child).map_err(map_io)?;
+                }
+                OpenedChild::File(child) => delete_handle(&child).map_err(map_io)?,
+            }
+        }
+        Ok(())
+    }
+
+    fn classify(
+        policy: TreePolicy,
+        name: &OsStr,
+        kind: HandleKind,
+    ) -> Result<TreePolicy, ArtifactStoreError> {
+        let name = name.to_str().ok_or(ArtifactStoreError::UnexpectedEntry)?;
+        match policy {
+            TreePolicy::ManualRoot
+                if kind == HandleKind::File
+                    && (name.ends_with(".txt") || name.ends_with(".tmp")) =>
+            {
+                Ok(TreePolicy::ManualRoot)
+            }
+            TreePolicy::CliRoot if kind == HandleKind::Directory && name == "logs" => {
+                Ok(TreePolicy::Logs)
+            }
+            TreePolicy::CliRoot if kind == HandleKind::Directory && name == "workspaces" => {
+                Ok(TreePolicy::Workspaces)
+            }
+            TreePolicy::Logs if kind == HandleKind::File && name.ends_with(".log") => {
+                Ok(TreePolicy::Logs)
+            }
+            TreePolicy::Workspaces => Ok(TreePolicy::Workspaces),
+            _ => Err(ArtifactStoreError::UnexpectedEntry),
+        }
+    }
+
+    fn root_policy(target: TargetKind) -> Result<TreePolicy, ArtifactStoreError> {
+        Ok(match target {
+            TargetKind::ChatGptClient | TargetKind::ClaudeClient => TreePolicy::ManualRoot,
+            TargetKind::CodexCli | TargetKind::ClaudeCode => TreePolicy::CliRoot,
+        })
+    }
+
+    fn reconcile_manual(
+        directory: &File,
+        pack_ids: &HashSet<&str>,
+        completed: &HashMap<&str, bool>,
+    ) -> Result<(), ArtifactStoreError> {
+        for name in list_directory(directory).map_err(map_io)? {
+            validate_name(&name)?;
+            let value = name.to_str().ok_or(ArtifactStoreError::UnexpectedEntry)?;
+            let (task_id, preserve) = if let Some(task_id) = value.strip_suffix(".txt") {
+                if !pack_ids.contains(task_id) {
+                    return Err(ArtifactStoreError::UnexpectedEntry);
+                }
+                (task_id, completed.contains_key(task_id))
+            } else {
+                let Some(temporary) = value
+                    .strip_prefix('.')
+                    .and_then(|value| value.strip_suffix(".tmp"))
+                else {
+                    return Err(ArtifactStoreError::UnexpectedEntry);
+                };
+                let Some((task_id, nonce)) = temporary.rsplit_once('.') else {
+                    return Err(ArtifactStoreError::UnexpectedEntry);
+                };
+                if !pack_ids.contains(task_id) || Uuid::parse_str(nonce).is_err() {
+                    return Err(ArtifactStoreError::UnexpectedEntry);
+                }
+                (task_id, false)
+            };
+            let _ = task_id;
+            match open_child(directory, &name, !preserve)? {
+                OpenedChild::File(child) if !preserve => delete_handle(&child).map_err(map_io)?,
+                OpenedChild::File(_) => {}
+                OpenedChild::Directory(_) => return Err(ArtifactStoreError::UnexpectedEntry),
+            }
+        }
+        Ok(())
+    }
+
+    fn reconcile_cli(
+        directory: &File,
+        pack_ids: &HashSet<&str>,
+        completed: &HashMap<&str, bool>,
+    ) -> Result<(), ArtifactStoreError> {
+        for name in list_directory(directory).map_err(map_io)? {
+            validate_name(&name)?;
+            let value = name.to_str().ok_or(ArtifactStoreError::UnexpectedEntry)?;
+            match (value, open_child(directory, &name, false)?) {
+                ("logs", OpenedChild::Directory(logs)) => {
+                    reconcile_logs(&logs, pack_ids, completed)?;
+                }
+                ("workspaces", OpenedChild::Directory(workspaces)) => {
+                    reconcile_workspaces(&workspaces, pack_ids, completed)?;
+                }
+                _ => return Err(ArtifactStoreError::UnexpectedEntry),
+            }
+        }
+        Ok(())
+    }
+
+    fn reconcile_logs(
+        directory: &File,
+        pack_ids: &HashSet<&str>,
+        completed: &HashMap<&str, bool>,
+    ) -> Result<(), ArtifactStoreError> {
+        for name in list_directory(directory).map_err(map_io)? {
+            validate_name(&name)?;
+            let value = name.to_str().ok_or(ArtifactStoreError::UnexpectedEntry)?;
+            let Some(task_id) = value.strip_suffix(".log") else {
+                return Err(ArtifactStoreError::UnexpectedEntry);
+            };
+            if !pack_ids.contains(task_id) {
+                return Err(ArtifactStoreError::UnexpectedEntry);
+            }
+            match completed.get(task_id) {
+                Some(true) => match open_child(directory, &name, false)? {
+                    OpenedChild::File(_) => {}
+                    OpenedChild::Directory(_) => {
+                        return Err(ArtifactStoreError::UnexpectedEntry);
+                    }
+                },
+                Some(false) => return Err(ArtifactStoreError::UnexpectedEntry),
+                None => match open_child(directory, &name, true)? {
+                    OpenedChild::File(child) => delete_handle(&child).map_err(map_io)?,
+                    OpenedChild::Directory(_) => {
+                        return Err(ArtifactStoreError::UnexpectedEntry);
+                    }
+                },
+            }
+        }
+        Ok(())
+    }
+
+    fn reconcile_workspaces(
+        directory: &File,
+        pack_ids: &HashSet<&str>,
+        completed: &HashMap<&str, bool>,
+    ) -> Result<(), ArtifactStoreError> {
+        for name in list_directory(directory).map_err(map_io)? {
+            validate_name(&name)?;
+            let task_id = name.to_str().ok_or(ArtifactStoreError::UnexpectedEntry)?;
+            if !pack_ids.contains(task_id) {
+                return Err(ArtifactStoreError::UnexpectedEntry);
+            }
+            let deleting = !completed.contains_key(task_id);
+            if let OpenedChild::Directory(child) = open_child(directory, &name, deleting)? {
+                if deleting {
+                    delete_tree(&child, TreePolicy::Workspaces)?;
+                    delete_handle(&child).map_err(map_io)?;
+                } else {
+                    preflight_tree(&child, TreePolicy::Workspaces)?;
+                }
+            } else {
+                return Err(ArtifactStoreError::UnexpectedEntry);
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_name(name: &OsStr) -> Result<(), ArtifactStoreError> {
+        let value = name.to_str().ok_or(ArtifactStoreError::UnexpectedEntry)?;
+        if value.is_empty()
+            || matches!(value, "." | "..")
+            || value.contains(['/', '\\', ':'])
+            || value.chars().any(char::is_control)
+        {
+            return Err(ArtifactStoreError::UnexpectedEntry);
+        }
+        native_component_length(name).map_err(map_io)?;
+        Ok(())
+    }
+
+    fn local_drive_components(path: &Path) -> Result<(u8, Vec<OsString>), ArtifactStoreError> {
+        if has_dot_component(path) {
+            return Err(ArtifactStoreError::UnsafeLayout);
+        }
+        let mut parts = path.components();
+        let drive = match parts.next() {
+            Some(Component::Prefix(prefix)) => match prefix.kind() {
+                Prefix::Disk(letter) => letter,
+                _ => return Err(ArtifactStoreError::UnsafeLayout),
+            },
+            _ => return Err(ArtifactStoreError::UnsafeLayout),
+        };
+        if !matches!(parts.next(), Some(Component::RootDir)) {
+            return Err(ArtifactStoreError::UnsafeLayout);
+        }
+        let mut components = Vec::new();
+        for part in parts {
+            let Component::Normal(value) = part else {
+                return Err(ArtifactStoreError::UnsafeLayout);
+            };
+            if value.is_empty() || value.to_string_lossy().contains(':') {
+                return Err(ArtifactStoreError::UnsafeLayout);
+            }
+            native_component_length(value).map_err(map_io)?;
+            components.push(value.to_os_string());
+        }
+        if components.is_empty() {
+            return Err(ArtifactStoreError::UnsafeLayout);
+        }
+        Ok((drive, components))
+    }
+
+    fn has_dot_component(path: &Path) -> bool {
+        let units = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        let mut start = 0;
+        for end in 0..=units.len() {
+            if end != units.len() && !matches!(units[end], 47 | 92) {
+                continue;
+            }
+            let part = &units[start..end];
+            if part == [46] || part == [46, 46] {
+                return true;
+            }
+            start = end + 1;
+        }
+        false
+    }
+
+    fn open_existing_chain(
+        drive: u8,
+        components: &[OsString],
+    ) -> Result<Option<File>, ArtifactStoreError> {
+        let mut current = open_drive_root(drive).map_err(map_io)?;
+        for component in components {
+            let Some(next) = open_optional_directory(&current, component, DIRECTORY_ACCESS)? else {
+                return Ok(None);
+            };
+            current = next;
+        }
+        Ok(Some(current))
+    }
+
+    fn open_drive_root(drive: u8) -> io::Result<File> {
+        let root = PathBuf::from(format!("{}:\\", char::from(drive)));
+        let wide = wide(root.as_os_str());
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                DIRECTORY_ACCESS,
+                SAFE_SHARING,
+                null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        let file = unsafe { File::from_raw_handle(handle as RawHandle) };
+        reject_reparse_handle(&file)?;
+        Ok(file)
+    }
+
+    fn open_optional_directory(
+        parent: &File,
+        name: &OsStr,
+        access: u32,
+    ) -> Result<Option<File>, ArtifactStoreError> {
+        match open_relative(
+            parent,
+            name,
+            access,
+            FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+            SAFE_SHARING,
+        ) {
+            Ok(file) => {
+                reject_reparse_handle(&file).map_err(map_io)?;
+                Ok(Some(file))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(map_io(error)),
+        }
+    }
+
+    fn open_child(
+        parent: &File,
+        name: &OsStr,
+        deletable: bool,
+    ) -> Result<OpenedChild, ArtifactStoreError> {
+        let directory_access = if deletable {
+            DELETABLE_DIRECTORY_ACCESS
+        } else {
+            DIRECTORY_ACCESS
+        };
+        match open_relative(
+            parent,
+            name,
+            directory_access,
+            FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+            SAFE_SHARING,
+        ) {
+            Ok(file) => {
+                if handle_kind(&file).map_err(map_io)? != HandleKind::Directory {
+                    return Err(ArtifactStoreError::UnexpectedEntry);
+                }
+                Ok(OpenedChild::Directory(file))
+            }
+            Err(_) => {
+                let access = if deletable {
+                    DELETABLE_FILE_ACCESS
+                } else {
+                    FILE_READ_ATTRIBUTES | SYNCHRONIZE
+                };
+                let file = open_relative(
+                    parent,
+                    name,
+                    access,
+                    FILE_NON_DIRECTORY_FILE
+                        | FILE_OPEN_REPARSE_POINT
+                        | FILE_SYNCHRONOUS_IO_NONALERT,
+                    SAFE_SHARING,
+                )
+                .map_err(map_io)?;
+                if handle_kind(&file).map_err(map_io)? != HandleKind::File {
+                    return Err(ArtifactStoreError::UnexpectedEntry);
+                }
+                Ok(OpenedChild::File(file))
+            }
+        }
+    }
+
+    fn list_directory(directory: &File) -> io::Result<Vec<OsString>> {
+        const BUFFER_BYTES: usize = 64 * 1024;
+        let mut names = Vec::new();
+        let mut restart = true;
+        loop {
+            let mut buffer = vec![0_u64; BUFFER_BYTES / size_of::<u64>()];
+            let class = if restart {
+                FileIdBothDirectoryRestartInfo
+            } else {
+                FileIdBothDirectoryInfo
+            };
+            let success = unsafe {
+                GetFileInformationByHandleEx(
+                    directory.as_raw_handle() as _,
+                    class,
+                    buffer.as_mut_ptr().cast(),
+                    BUFFER_BYTES as u32,
+                )
+            };
+            if success == 0 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(ERROR_NO_MORE_FILES as i32) {
+                    break;
+                }
+                return Err(error);
+            }
+            restart = false;
+
+            let bytes =
+                unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), BUFFER_BYTES) };
+            let mut offset = 0_usize;
+            loop {
+                let header_end = offset
+                    .checked_add(offset_of!(FILE_ID_BOTH_DIR_INFO, FileName))
+                    .ok_or_else(invalid_directory_information)?;
+                if header_end > bytes.len() {
+                    return Err(invalid_directory_information());
+                }
+                let information = unsafe {
+                    std::ptr::read_unaligned(
+                        bytes.as_ptr().add(offset).cast::<FILE_ID_BOTH_DIR_INFO>(),
+                    )
+                };
+                let name_bytes = usize::try_from(information.FileNameLength)
+                    .map_err(|_| invalid_directory_information())?;
+                if name_bytes == 0 || name_bytes % size_of::<u16>() != 0 {
+                    return Err(invalid_directory_information());
+                }
+                let name_end = header_end
+                    .checked_add(name_bytes)
+                    .ok_or_else(invalid_directory_information)?;
+                if name_end > bytes.len() {
+                    return Err(invalid_directory_information());
+                }
+                let units = unsafe {
+                    std::slice::from_raw_parts(
+                        bytes.as_ptr().add(header_end).cast::<u16>(),
+                        name_bytes / size_of::<u16>(),
+                    )
+                };
+                let name = OsString::from_wide(units);
+                if !matches!(name.to_str(), Some(".") | Some("..")) {
+                    names.push(name);
+                }
+
+                if information.NextEntryOffset == 0 {
+                    break;
+                }
+                let next = usize::try_from(information.NextEntryOffset)
+                    .map_err(|_| invalid_directory_information())?;
+                if next < offset_of!(FILE_ID_BOTH_DIR_INFO, FileName) {
+                    return Err(invalid_directory_information());
+                }
+                offset = offset
+                    .checked_add(next)
+                    .ok_or_else(invalid_directory_information)?;
+                if offset >= bytes.len() {
+                    return Err(invalid_directory_information());
+                }
+            }
+        }
+        Ok(names)
+    }
+
+    fn invalid_directory_information() -> io::Error {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid directory information returned by Windows",
+        )
+    }
+
+    fn open_relative(
+        parent: &File,
+        name: &OsStr,
+        access: u32,
+        options: u32,
+        sharing: u32,
+    ) -> io::Result<File> {
+        let length = native_component_length(name)?;
+        let mut storage = wide(name);
+        let mut unicode = UNICODE_STRING {
+            Length: length,
+            MaximumLength: length,
+            Buffer: storage.as_mut_ptr(),
+        };
+        let attributes = OBJECT_ATTRIBUTES {
+            Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+            RootDirectory: parent.as_raw_handle() as _,
+            ObjectName: &mut unicode,
+            Attributes: OBJ_CASE_INSENSITIVE,
+            SecurityDescriptor: null(),
+            SecurityQualityOfService: null(),
+        };
+        let mut handle = INVALID_HANDLE_VALUE;
+        let mut status = unsafe { zeroed::<IO_STATUS_BLOCK>() };
+        let result = unsafe {
+            NtCreateFile(
+                &mut handle,
+                access,
+                &attributes,
+                &mut status,
+                null(),
+                FILE_ATTRIBUTE_NORMAL,
+                sharing,
+                FILE_OPEN,
+                options,
+                null(),
+                0,
+            )
+        };
+        if result != STATUS_SUCCESS {
+            return Err(nt_error(result));
+        }
+        Ok(unsafe { File::from_raw_handle(handle as RawHandle) })
+    }
+
+    fn handle_kind(file: &File) -> io::Result<HandleKind> {
+        let mut information = unsafe { zeroed::<BY_HANDLE_FILE_INFORMATION>() };
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut information) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "reparse point"));
+        }
+        Ok(
+            if information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+                HandleKind::Directory
+            } else {
+                HandleKind::File
+            },
+        )
+    }
+
+    fn reject_reparse_handle(file: &File) -> io::Result<()> {
+        handle_kind(file).map(|_| ())
+    }
+
+    fn delete_handle(file: &File) -> io::Result<()> {
+        let information = FILE_DISPOSITION_INFORMATION { DeleteFile: true };
+        let mut status = unsafe { zeroed::<IO_STATUS_BLOCK>() };
+        let result = unsafe {
+            NtSetInformationFile(
+                file.as_raw_handle() as _,
+                &mut status,
+                (&information as *const FILE_DISPOSITION_INFORMATION).cast(),
+                size_of::<FILE_DISPOSITION_INFORMATION>() as u32,
+                FileDispositionInformation,
+            )
+        };
+        if result == STATUS_SUCCESS {
+            Ok(())
+        } else {
+            Err(nt_error(result))
+        }
+    }
+
+    fn native_component_length(value: &OsStr) -> io::Result<u16> {
+        let units = value.encode_wide().count();
+        if units == 0 || units > 255 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid component length",
+            ));
+        }
+        u16::try_from(units * size_of::<u16>())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "component overflow"))
+    }
+
+    fn wide(value: &OsStr) -> Vec<u16> {
+        value.encode_wide().chain(Some(0)).collect()
+    }
+
+    fn nt_error(status: i32) -> io::Error {
+        io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(status) } as i32)
+    }
+
+    fn map_io(error: io::Error) -> ArtifactStoreError {
+        if error.kind() == io::ErrorKind::InvalidInput {
+            ArtifactStoreError::UnsafeLayout
+        } else {
+            ArtifactStoreError::Io(error)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::fs;
+        use std::process::Command;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tempfile::tempdir;
+
+        #[test]
+        fn retained_run_handle_blocks_a_preflight_to_delete_junction_swap() {
+            let directory = tempdir().unwrap();
+            let root = directory.path().join("artifacts");
+            let run_id = Uuid::new_v4();
+            let run = root.join("runs").join(run_id.to_string());
+            fs::create_dir_all(&run).unwrap();
+            fs::write(run.join("answer.txt"), "raw").unwrap();
+            let detached = directory.path().join("detached");
+            let outside = tempdir().unwrap();
+            let outside_path = outside.path().to_path_buf();
+            let swapped = Arc::new(AtomicBool::new(false));
+            let observed = swapped.clone();
+
+            delete_run_with_after_preflight_hook(
+                &root,
+                run_id,
+                TargetKind::ChatGptClient,
+                move || {
+                    if fs::rename(&run, &detached).is_ok() {
+                        let status = Command::new("cmd")
+                            .args([
+                                "/C",
+                                "mklink",
+                                "/J",
+                                run.to_str().unwrap(),
+                                outside_path.to_str().unwrap(),
+                            ])
+                            .status()
+                            .unwrap();
+                        assert!(status.success());
+                        observed.store(true, Ordering::SeqCst);
+                    }
+                },
+            )
+            .unwrap();
+
+            assert!(!swapped.load(Ordering::SeqCst));
+            assert!(!outside.path().join("answer.txt").exists());
+        }
+
+        #[test]
+        fn every_descendant_is_reopened_relative_and_revalidated_after_preflight() {
+            let directory = tempdir().unwrap();
+            let root = directory.path().join("artifacts");
+            let run_id = Uuid::new_v4();
+            let run = root.join("runs").join(run_id.to_string());
+            let task = run.join("workspaces").join("task-one");
+            fs::create_dir_all(&task).unwrap();
+            fs::write(task.join("owned.txt"), "owned").unwrap();
+            let detached = directory.path().join("detached-task");
+            let outside = tempdir().unwrap();
+            fs::write(outside.path().join("outside.txt"), "outside-owned").unwrap();
+            let outside_path = outside.path().to_path_buf();
+
+            let result = delete_run_with_after_preflight_hook(
+                &root,
+                run_id,
+                TargetKind::CodexCli,
+                move || {
+                    fs::rename(&task, &detached).unwrap();
+                    let status = Command::new("cmd")
+                        .args([
+                            "/C",
+                            "mklink",
+                            "/J",
+                            task.to_str().unwrap(),
+                            outside_path.to_str().unwrap(),
+                        ])
+                        .status()
+                        .unwrap();
+                    assert!(status.success());
+                },
+            );
+
+            assert!(matches!(result, Err(ArtifactStoreError::UnsafeLayout)));
+            assert_eq!(
+                fs::read_to_string(outside.path().join("outside.txt")).unwrap(),
+                "outside-owned"
+            );
+        }
+    }
+}

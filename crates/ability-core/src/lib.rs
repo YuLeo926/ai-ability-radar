@@ -1,3 +1,4 @@
+mod artifact_store;
 mod domain;
 mod grading;
 mod orchestration;
@@ -5,6 +6,7 @@ mod packs;
 mod report;
 mod storage;
 
+pub use artifact_store::*;
 pub use domain::*;
 pub use grading::*;
 pub use orchestration::*;
