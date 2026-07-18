@@ -16,7 +16,7 @@ beforeEach(() => {
   bridge.listen.mockReset();
 });
 
-test("uses exactly the eight reviewed commands and camelCase payloads", async () => {
+test("uses exactly the nine reviewed commands and camelCase payloads", async () => {
   bridge.invoke.mockResolvedValue(undefined);
   const manualInput: StartRunInput = {
     target: {
@@ -48,6 +48,7 @@ test("uses exactly the eight reviewed commands and camelCase payloads", async ()
   await tauriBackend.cancelRun("run-cli");
   await tauriBackend.listRuns();
   await tauriBackend.getRunDetail("run-result");
+  await tauriBackend.exportPublicReport("run-result");
 
   expect(bridge.invoke.mock.calls).toEqual([
     ["get_bootstrap"],
@@ -58,7 +59,11 @@ test("uses exactly the eight reviewed commands and camelCase payloads", async ()
     ["cancel_run", { runId: "run-cli" }],
     ["list_runs"],
     ["get_run_detail", { runId: "run-result" }],
+    ["export_public_report", { input: { runId: "run-result" } }],
   ]);
+  expect(JSON.stringify(bridge.invoke.mock.calls)).not.toMatch(
+    /destination|filePath|outputPath/i,
+  );
 });
 
 test("listens only to reviewed events, forwards payloads, and returns unlisten", async () => {

@@ -39,6 +39,7 @@ const backend: Backend = {
   cancelRun: async () => false,
   listRuns: async () => [],
   getRunDetail: async () => null,
+  exportPublicReport: async () => null,
   onRunEvent: async () => () => undefined,
   onRunError: async () => () => undefined,
 };

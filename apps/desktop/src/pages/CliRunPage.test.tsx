@@ -119,6 +119,7 @@ function fakeBackend(overrides: Partial<Backend> = {}): Backend {
     cancelRun: vi.fn(async () => false),
     listRuns: vi.fn(async () => []),
     getRunDetail: vi.fn(async () => detail(makeRun())),
+    exportPublicReport: vi.fn(async () => null),
     onRunEvent: vi.fn(async () => () => undefined),
     onRunError: vi.fn(async () => () => undefined),
     ...overrides,

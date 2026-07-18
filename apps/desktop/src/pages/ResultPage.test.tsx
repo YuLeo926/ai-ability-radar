@@ -148,6 +148,7 @@ function makeDetail(
 
 function makeBackend(
   getRunDetail: Backend["getRunDetail"],
+  exportPublicReport: Backend["exportPublicReport"] = async () => null,
 ): Backend {
   return {
     getBootstrap: async () => {
@@ -166,6 +167,7 @@ function makeBackend(
     cancelRun: async () => false,
     listRuns: async () => [],
     getRunDetail,
+    exportPublicReport,
     onRunEvent: async () => () => undefined,
     onRunError: async () => () => undefined,
   };
@@ -767,4 +769,224 @@ describe("ResultPage objective semantics", () => {
       screen.getByRole("heading", { name: "开始页" }),
     ).toBeInTheDocument();
   });
+
+  test("opens an accessible review dialog containing only the exact public allowlist", async () => {
+    const user = userEvent.setup();
+    const exportReport = vi.fn<Backend["exportPublicReport"]>(async () => null);
+    renderResult(makeBackend(async () => makeDetail(), exportReport));
+
+    const opener = await screen.findByRole("button", {
+      name: "检查并导出可分享报告",
+    });
+    await user.click(opener);
+
+    const dialog = screen.getByRole("dialog", { name: "导出前检查" });
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(dialog).toContainElement(document.activeElement as HTMLElement);
+    expect(within(dialog).getByText("报告格式版本 1")).toBeInTheDocument();
+    expect(
+      within(dialog).getByText(/匿名报告编号和生成时间将在确认并选择位置后创建/),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByText("ChatGPT 客户端")).toBeInTheDocument();
+    expect(within(dialog).getByText("GPT-X")).toBeInTheDocument();
+    expect(within(dialog).getByText("high")).toBeInTheDocument();
+    expect(within(dialog).getByText("Windows")).toBeInTheDocument();
+    expect(within(dialog).getByText("0.2.0")).toBeInTheDocument();
+    expect(
+      within(dialog).getByText("embedded-verifier 1.0.0"),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByText("client-quick · 1.0.0")).toBeInTheDocument();
+    expect(within(dialog).getByText("e".repeat(64))).toBeInTheDocument();
+    expect(within(dialog).getByText("ability-v1")).toBeInTheDocument();
+    expect(within(dialog).getByText("completed")).toBeInTheDocument();
+    expect(within(dialog).getByText("66.7")).toBeInTheDocument();
+    expect(within(dialog).getByText("5 / 6 / 8")).toBeInTheDocument();
+    expect(within(dialog).getByText(/passed 5.*failed 2.*invalid 1/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/network 2.*wrong_answer 1/)).toBeInTheDocument();
+    expect(within(dialog).getByText("10.0 秒")).toBeInTheDocument();
+    expect(within(dialog).getByText("not_evaluated")).toBeInTheDocument();
+    expect(within(dialog).getByText(/v0.2 不生成降智结论/)).toBeInTheDocument();
+    for (const excluded of [
+      "原始回答",
+      "题目提示词",
+      "CLI 日志",
+      "逐题详情文本",
+      "用户名",
+      "主机名",
+      "操作系统构建号",
+      "绝对路径",
+      "本地 run ID",
+      "本地 task ID",
+      "相对 artifact / answer path",
+      "凭据",
+      "保存位置",
+    ]) {
+      expect(within(dialog).getByText(excluded)).toBeInTheDocument();
+    }
+    expect(dialog).not.toHaveTextContent(runId);
+    expect(dialog).not.toHaveTextContent("private-task");
+    expect(dialog).not.toHaveTextContent("answers/private");
+    expect(dialog).not.toHaveTextContent("Windows 11");
+    expect(exportReport).not.toHaveBeenCalled();
+  });
+
+  test("gates export behind review confirmation and restores focus on cancel and Escape", async () => {
+    const user = userEvent.setup();
+    const exportReport = vi.fn<Backend["exportPublicReport"]>(async () => null);
+    renderResult(makeBackend(async () => makeDetail(), exportReport));
+
+    const opener = await screen.findByRole("button", {
+      name: "检查并导出可分享报告",
+    });
+    await user.click(opener);
+    const confirm = screen.getByRole("button", {
+      name: "选择位置并导出",
+    });
+    expect(confirm).toBeDisabled();
+
+    await user.click(
+      screen.getByRole("checkbox", { name: "我已检查以上公开字段" }),
+    );
+    expect(confirm).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "取消" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(exportReport).not.toHaveBeenCalled();
+    expect(opener).toHaveFocus();
+
+    await user.click(opener);
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(exportReport).not.toHaveBeenCalled();
+    expect(opener).toHaveFocus();
+  });
+
+  test("prevents duplicate export while busy and announces the anonymous report id", async () => {
+    const user = userEvent.setup();
+    const exported = deferred<string | null>();
+    const exportReport = vi.fn<Backend["exportPublicReport"]>(
+      () => exported.promise,
+    );
+    renderResult(makeBackend(async () => makeDetail(), exportReport));
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "检查并导出可分享报告",
+      }),
+    );
+    await user.click(
+      screen.getByRole("checkbox", { name: "我已检查以上公开字段" }),
+    );
+    const confirm = screen.getByRole("button", {
+      name: "选择位置并导出",
+    });
+    await user.click(confirm);
+    await user.click(confirm);
+
+    expect(exportReport).toHaveBeenCalledTimes(1);
+    expect(exportReport).toHaveBeenCalledWith(runId);
+    expect(confirm).toBeDisabled();
+    expect(confirm).toHaveAttribute("aria-busy", "true");
+
+    exported.resolve("019f-report-anonymous");
+    expect(
+      await screen.findByRole("status", { name: "报告导出状态" }),
+    ).toHaveTextContent("019f-report-anonymous");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  test("treats native picker cancellation as normal and never exposes backend errors", async () => {
+    const user = userEvent.setup();
+    const exportReport = vi
+      .fn<Backend["exportPublicReport"]>()
+      .mockResolvedValueOnce(null)
+      .mockRejectedValueOnce(
+        new Error(
+          String.raw`C:\Users\Alice\report.html sk-ant-private-token`,
+        ),
+      );
+    renderResult(makeBackend(async () => makeDetail(), exportReport));
+
+    const opener = await screen.findByRole("button", {
+      name: "检查并导出可分享报告",
+    });
+    await user.click(opener);
+    await user.click(
+      screen.getByRole("checkbox", { name: "我已检查以上公开字段" }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "选择位置并导出" }),
+    );
+
+    expect(
+      await screen.findByRole("status", { name: "报告导出状态" }),
+    ).toHaveTextContent("已取消保存，未生成报告");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    await user.click(opener);
+    await user.click(
+      screen.getByRole("checkbox", { name: "我已检查以上公开字段" }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "选择位置并导出" }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "无法导出报告，请检查公开字段后重试",
+    );
+    expect(document.body).not.toHaveTextContent("Alice");
+    expect(document.body).not.toHaveTextContent("sk-ant-private-token");
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "选择位置并导出" }),
+    ).toBeEnabled();
+  });
+
+  test("surfaces only an allowlisted public field label for scanner failures", async () => {
+    const user = userEvent.setup();
+    const exportReport = vi.fn<Backend["exportPublicReport"]>(async () => {
+      throw "无法导出：公开字段 reportedModel 可能包含敏感信息。";
+    });
+    renderResult(makeBackend(async () => makeDetail(), exportReport));
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "检查并导出可分享报告",
+      }),
+    );
+    await user.click(
+      screen.getByRole("checkbox", { name: "我已检查以上公开字段" }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "选择位置并导出" }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "公开字段“用户填写模型”可能包含敏感信息",
+    );
+    expect(screen.getByRole("alert")).not.toHaveTextContent("reportedModel");
+  });
+
+  test.each(["created", "running", "cancelled", "interrupted"] as const)(
+    "does not offer export for a %s run",
+    async (status) => {
+      renderResult(
+        makeBackend(async () =>
+          makeDetail(
+            {
+              status,
+              score: null,
+              completedTasks: 0,
+            },
+            [],
+          ),
+        ),
+      );
+
+      await screen.findByRole("heading", { level: 1 });
+      expect(
+        screen.queryByRole("button", {
+          name: "检查并导出可分享报告",
+        }),
+      ).not.toBeInTheDocument();
+    },
+  );
 });

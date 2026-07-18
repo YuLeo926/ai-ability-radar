@@ -24,6 +24,8 @@ export const tauriBackend: Backend = {
   listRuns: () => invoke<RunRecord[]>("list_runs"),
   getRunDetail: (runId) =>
     invoke<RunDetail | null>("get_run_detail", { runId }),
+  exportPublicReport: (runId) =>
+    invoke<string | null>("export_public_report", { input: { runId } }),
   onRunEvent: async (listener) =>
     listen<RunEvent>("run://event", ({ payload }) => listener(payload)),
   onRunError: async (listener) =>

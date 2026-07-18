@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useBackend } from "../api/BackendContext";
 import {
@@ -29,6 +29,44 @@ const categoryLabels: Record<Category, string> = {
   logic: "逻辑推理",
   code_review: "代码审查",
   cli_coding: "CLI 编码",
+};
+
+const categoryOrder: Category[] = [
+  "instruction_following",
+  "logic",
+  "code_review",
+  "cli_coding",
+];
+
+const outcomeOrder = ["passed", "failed", "invalid", "cancelled"] as const;
+const failureOrder: FailureKind[] = [
+  "cli_missing",
+  "runtime_missing",
+  "auth_expired",
+  "quota_exhausted",
+  "network",
+  "user_cancelled",
+  "app_interrupted",
+  "infrastructure_timeout",
+  "agent_budget_exceeded",
+  "verifier_error",
+  "wrong_answer",
+];
+
+const publicMethodology =
+  "v0.2 不生成降智结论；仅展示本题包的客观结果，不是 IQ，也不代表模型退化。";
+
+const publicFieldLabels: Record<string, string> = {
+  reportedModel: "用户填写模型",
+  reasoningEffort: "推理档位",
+  osFamily: "操作系统系列",
+  appVersion: "应用版本",
+  cliVersion: "CLI 版本",
+  verifierRuntimeVersion: "Node / 验证器运行时",
+  suiteId: "题包编号",
+  suiteVersion: "题包版本",
+  suiteContentSha256: "题包内容哈希",
+  scoringRuleVersion: "评分规则版本",
 };
 
 type ResultState =
@@ -124,6 +162,376 @@ function modelLabel(run: RunRecord): string {
 
 function technicalValue(value: string | null | undefined): string {
   return value && value.length > 0 ? value : "未记录";
+}
+
+function countBy<T extends string>(
+  values: T[],
+  order: readonly T[],
+): string {
+  const counts = new Map<T, number>();
+  for (const value of values) {
+    counts.set(value, (counts.get(value) ?? 0) + 1);
+  }
+  return order.map((value) => `${value} ${counts.get(value) ?? 0}`).join(" · ");
+}
+
+function totalDurationLabel(taskResults: TaskResult[]): string {
+  const totalMs = taskResults.reduce(
+    (sum, result) => sum + BigInt(result.durationMs),
+    0n,
+  );
+  const seconds = totalMs / 1_000n;
+  const tenths = (totalMs % 1_000n) / 100n;
+  return `${seconds}.${tenths} 秒`;
+}
+
+function safeExportError(error: unknown): string {
+  const message =
+    typeof error === "string"
+      ? error
+      : error instanceof Error
+        ? error.message
+        : "";
+  for (const [field, label] of Object.entries(publicFieldLabels)) {
+    if (message.includes(`公开字段 ${field} `)) {
+      return `无法导出：公开字段“${label}”可能包含敏感信息。`;
+    }
+  }
+  return "无法导出报告，请检查公开字段后重试。";
+}
+
+function ReportExportControls({ detail }: { detail: RunDetail }) {
+  const backend = useBackend();
+  const { run, taskResults } = detail;
+  const [open, setOpen] = useState(false);
+  const [confirmed, setConfirmed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
+  const openerRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const titleRef = useRef<HTMLHeadingElement>(null);
+
+  useEffect(() => {
+    if (open) titleRef.current?.focus();
+  }, [open]);
+
+  const restoreOpener = () => {
+    openerRef.current?.focus();
+  };
+
+  const closeDialog = () => {
+    if (busy) return;
+    setOpen(false);
+    setConfirmed(false);
+    setError(null);
+    restoreOpener();
+  };
+
+  const openDialog = () => {
+    setConfirmed(false);
+    setError(null);
+    setStatus(null);
+    setOpen(true);
+  };
+
+  const handleDialogKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape" && !busy) {
+      event.preventDefault();
+      closeDialog();
+      return;
+    }
+    if (event.key !== "Tab") return;
+
+    const focusable = Array.from(
+      dialogRef.current?.querySelectorAll<HTMLElement>(
+        'button:not(:disabled), input:not(:disabled), [href], [tabindex]:not([tabindex="-1"])',
+      ) ?? [],
+    );
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (
+      event.shiftKey &&
+      (document.activeElement === first || document.activeElement === titleRef.current)
+    ) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
+  const exportReport = async () => {
+    if (!confirmed || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const reportId = await backend.exportPublicReport(run.id);
+      setOpen(false);
+      setConfirmed(false);
+      setStatus(
+        reportId === null
+          ? "已取消保存，未生成报告。"
+          : `报告已导出。匿名报告编号：${reportId}`,
+      );
+      restoreOpener();
+    } catch (cause) {
+      setError(safeExportError(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const score = run.score;
+  const scoreCategories = categoryOrder
+    .filter((category) => score?.categoryScores[category] !== undefined)
+    .map(
+      (category) =>
+        `${category} ${score?.categoryScores[category]?.toFixed(1)}`,
+    )
+    .join(" · ");
+  const outcomeCounts = countBy(
+    taskResults.map((result) => result.outcome),
+    outcomeOrder,
+  );
+  const failures = taskResults
+    .map((result) => result.failureKind)
+    .filter((failure): failure is FailureKind => failure != null);
+  const failureCounts =
+    failures.length === 0
+      ? "无"
+      : countBy(failures, failureOrder.filter((kind) => failures.includes(kind)));
+
+  return (
+    <section aria-labelledby="report-export-title" className="report-export">
+      <div>
+        <p className="section-kicker">完全离线 · 不会自动上传</p>
+        <h2 id="report-export-title">导出可分享报告</h2>
+        <p>
+          先核对严格白名单，再由系统窗口选择一个新的本地 HTML 文件。
+          v0.2 不会上传报告，也不会发布到 GitHub。
+        </p>
+      </div>
+      <button
+        className="evidence-button"
+        onClick={openDialog}
+        ref={openerRef}
+        type="button"
+      >
+        检查并导出可分享报告
+      </button>
+      {status ? (
+        <p aria-label="报告导出状态" className="export-status" role="status">
+          {status}
+        </p>
+      ) : null}
+
+      {open ? (
+        <div className="report-review-backdrop">
+          <div
+            aria-labelledby="report-review-title"
+            aria-modal="true"
+            className="report-review-dialog"
+            onKeyDown={handleDialogKeyDown}
+            ref={dialogRef}
+            role="dialog"
+          >
+            <header>
+              <p className="section-kicker">发布前隐私检查</p>
+              <h2 id="report-review-title" ref={titleRef} tabIndex={-1}>
+                导出前检查
+              </h2>
+              <p>
+                下面是报告会公开的全部字段。匿名报告编号和生成时间将在确认并选择位置后创建。
+              </p>
+            </header>
+
+            <div className="report-review-columns">
+              <div className="report-allowlist">
+                <section aria-labelledby="public-meta-title">
+                  <h3 id="public-meta-title">报告元数据</h3>
+                  <dl>
+                    <div>
+                      <dt>格式</dt>
+                      <dd>报告格式版本 1</dd>
+                    </div>
+                    <div>
+                      <dt>新身份</dt>
+                      <dd>新的匿名报告编号 · 生成时间</dd>
+                    </div>
+                  </dl>
+                </section>
+
+                <section aria-labelledby="public-target-title">
+                  <h3 id="public-target-title">测试目标</h3>
+                  <dl>
+                    <div>
+                      <dt>对象</dt>
+                      <dd>{targetLabels[run.target.kind]}</dd>
+                    </div>
+                    <div>
+                      <dt>用户填写模型</dt>
+                      <dd>{run.target.reportedModel.trim()}</dd>
+                    </div>
+                    <div>
+                      <dt>推理档位</dt>
+                      <dd>{technicalValue(run.target.reasoningEffort?.trim())}</dd>
+                    </div>
+                  </dl>
+                </section>
+
+                <section aria-labelledby="public-repro-title">
+                  <h3 id="public-repro-title">复现信息</h3>
+                  <dl>
+                    <div>
+                      <dt>操作系统系列</dt>
+                      <dd>{run.environment.osFamily}</dd>
+                    </div>
+                    <div>
+                      <dt>应用版本</dt>
+                      <dd>{run.environment.appVersion}</dd>
+                    </div>
+                    <div>
+                      <dt>CLI 版本</dt>
+                      <dd>{technicalValue(run.environment.cliVersion)}</dd>
+                    </div>
+                    <div>
+                      <dt>Node / 验证器运行时</dt>
+                      <dd>
+                        {technicalValue(
+                          run.environment.verifierRuntimeVersion,
+                        )}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>题包</dt>
+                      <dd>{run.suiteId} · {run.suiteVersion}</dd>
+                    </div>
+                    <div>
+                      <dt>题包内容哈希</dt>
+                      <dd>{run.environment.suiteContentSha256}</dd>
+                    </div>
+                    <div>
+                      <dt>评分规则</dt>
+                      <dd>{run.environment.scoringRuleVersion}</dd>
+                    </div>
+                    <div>
+                      <dt>恢复状态</dt>
+                      <dd>{run.environment.resumed ? "是（恢复运行）" : "否（完整运行）"}</dd>
+                    </div>
+                  </dl>
+                </section>
+
+                <section aria-labelledby="public-result-title">
+                  <h3 id="public-result-title">客观结果</h3>
+                  <dl>
+                    <div>
+                      <dt>运行状态</dt>
+                      <dd>{run.status}</dd>
+                    </div>
+                    <div>
+                      <dt>题包客观分</dt>
+                      <dd>{score ? score.abilityScore.toFixed(1) : "无有效分"}</dd>
+                    </div>
+                    <div>
+                      <dt>分类分数</dt>
+                      <dd>{scoreCategories || "无可计分分类"}</dd>
+                    </div>
+                    <div>
+                      <dt>通过 / 有效 / 总数</dt>
+                      <dd>
+                        {score?.passedTasks ?? 0} / {score?.validTasks ?? 0} /{" "}
+                        {run.totalTasks}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>结果计数</dt>
+                      <dd>{outcomeCounts}</dd>
+                    </div>
+                    <div>
+                      <dt>失败分类计数</dt>
+                      <dd>{failureCounts}</dd>
+                    </div>
+                    <div>
+                      <dt>总耗时</dt>
+                      <dd>{totalDurationLabel(taskResults)}</dd>
+                    </div>
+                  </dl>
+                </section>
+
+                <section aria-labelledby="public-method-title">
+                  <h3 id="public-method-title">方法与解释边界</h3>
+                  <dl>
+                    <div>
+                      <dt>解释状态</dt>
+                      <dd>not_evaluated</dd>
+                    </div>
+                  </dl>
+                  <p>{publicMethodology}</p>
+                </section>
+              </div>
+
+              <aside aria-labelledby="excluded-fields-title" className="excluded-fields">
+                <h3 id="excluded-fields-title">明确排除，不会写入报告</h3>
+                <ul>
+                  <li>原始回答</li>
+                  <li>题目提示词</li>
+                  <li>CLI 日志</li>
+                  <li>逐题详情文本</li>
+                  <li>用户名</li>
+                  <li>主机名</li>
+                  <li>操作系统构建号</li>
+                  <li>绝对路径</li>
+                  <li>本地 run ID</li>
+                  <li>本地 task ID</li>
+                  <li>相对 artifact / answer path</li>
+                  <li>凭据</li>
+                  <li>保存位置</li>
+                </ul>
+              </aside>
+            </div>
+
+            {error ? (
+              <p className="export-error" role="alert">
+                {error}
+              </p>
+            ) : null}
+
+            <label className="report-confirmation">
+              <input
+                checked={confirmed}
+                disabled={busy}
+                onChange={(event) => setConfirmed(event.target.checked)}
+                type="checkbox"
+              />
+              <span>我已检查以上公开字段</span>
+            </label>
+            <div className="report-dialog-actions">
+              <button
+                className="evidence-button secondary"
+                disabled={busy}
+                onClick={closeDialog}
+                type="button"
+              >
+                取消
+              </button>
+              <button
+                aria-busy={busy}
+                className="evidence-button"
+                disabled={!confirmed || busy}
+                onClick={() => void exportReport()}
+                type="button"
+              >
+                {busy ? "正在打开系统保存窗口…" : "选择位置并导出"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
 }
 
 function ResultReady({ detail }: { detail: RunDetail }) {
@@ -318,6 +726,10 @@ function ResultReady({ detail }: { detail: RunDetail }) {
           </div>
         </dl>
       </details>
+
+      {run.status === "completed" ? (
+        <ReportExportControls detail={detail} />
+      ) : null}
 
       <nav aria-label="结果操作" className="evidence-actions">
         <Link className="evidence-button" to="/">

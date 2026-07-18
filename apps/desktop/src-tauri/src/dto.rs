@@ -46,6 +46,12 @@ pub struct SubmitAnswerInput {
     pub answer: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExportReportInput {
+    pub run_id: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunDetailDto {
@@ -175,5 +181,27 @@ mod tests {
             "artifactPath": "C:/Users/example/secrets.txt"
         }));
         assert!(unknown.is_err());
+    }
+
+    #[test]
+    fn export_report_input_accepts_only_a_run_id_and_never_a_destination() {
+        let valid: ExportReportInput = serde_json::from_value(json!({
+            "runId": "39d9f772-2e12-4b2d-af13-94c32d36f2d3"
+        }))
+        .unwrap();
+        assert_eq!(valid.run_id, "39d9f772-2e12-4b2d-af13-94c32d36f2d3");
+
+        for forbidden in [
+            json!({
+                "runId": "39d9f772-2e12-4b2d-af13-94c32d36f2d3",
+                "destination": "C:/Users/Alice/report.html"
+            }),
+            json!({
+                "runId": "39d9f772-2e12-4b2d-af13-94c32d36f2d3",
+                "filePath": "/home/alice/report.html"
+            }),
+        ] {
+            assert!(serde_json::from_value::<ExportReportInput>(forbidden).is_err());
+        }
     }
 }

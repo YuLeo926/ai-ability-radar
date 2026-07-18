@@ -67,6 +67,7 @@ function makeBackend(listRuns: Backend["listRuns"]): Backend {
     cancelRun: async () => false,
     listRuns,
     getRunDetail: async () => null,
+    exportPublicReport: async () => null,
     onRunEvent: async () => () => undefined,
     onRunError: async () => () => undefined,
   };

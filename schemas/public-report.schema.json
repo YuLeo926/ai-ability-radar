@@ -1,0 +1,266 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AI Ability Radar public report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "reportId",
+    "generatedAt",
+    "target",
+    "environment",
+    "result",
+    "methodology"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "reportId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "reportedModel", "reasoningEffort"],
+      "properties": {
+        "kind": {
+          "enum": [
+            "chat_gpt_client",
+            "claude_client",
+            "codex_cli",
+            "claude_code"
+          ]
+        },
+        "reportedModel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "reasoningEffort": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 64
+        }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "osFamily",
+        "appVersion",
+        "cliVersion",
+        "verifierRuntimeVersion",
+        "suiteId",
+        "suiteVersion",
+        "suiteContentSha256",
+        "scoringRuleVersion",
+        "resumed"
+      ],
+      "properties": {
+        "osFamily": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "appVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "cliVersion": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "verifierRuntimeVersion": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "suiteId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "suiteVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "suiteContentSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "scoringRuleVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "resumed": {
+          "type": "boolean"
+        }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runStatus",
+        "abilityScore",
+        "passedTasks",
+        "validTasks",
+        "totalTasks",
+        "categoryScores",
+        "outcomeCounts",
+        "failureCounts",
+        "totalDurationMs"
+      ],
+      "properties": {
+        "runStatus": {
+          "const": "completed"
+        },
+        "abilityScore": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 100
+        },
+        "passedTasks": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "validTasks": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "totalTasks": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "categoryScores": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "instruction_following": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "logic": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "code_review": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "cli_coding": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            }
+          }
+        },
+        "outcomeCounts": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "passed": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "failed": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "invalid": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "cancelled": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "failureCounts": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cli_missing": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "runtime_missing": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "auth_expired": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "quota_exhausted": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "network": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "user_cancelled": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "app_interrupted": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "infrastructure_timeout": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "agent_budget_exceeded": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "verifier_error": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "wrong_answer": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "totalDurationMs": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "methodology": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["interpretationStatus", "statement"],
+      "properties": {
+        "interpretationStatus": {
+          "const": "not_evaluated"
+        },
+        "statement": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        }
+      }
+    }
+  }
+}

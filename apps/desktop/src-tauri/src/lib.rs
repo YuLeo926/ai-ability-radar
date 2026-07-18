@@ -4,8 +4,8 @@ mod dto;
 
 use app_state::AppState;
 use commands::{
-    cancel_run, get_bootstrap, get_run_detail, list_runs, next_manual_step, start_cli_run,
-    start_manual_run, submit_manual_answer,
+    cancel_run, export_public_report, get_bootstrap, get_run_detail, list_runs, next_manual_step,
+    start_cli_run, start_manual_run, submit_manual_answer,
 };
 use tauri::Manager;
 
@@ -20,6 +20,7 @@ macro_rules! command_inventory {
             cancel_run,
             list_runs,
             get_run_detail,
+            export_public_report,
         )
     };
 }
@@ -43,6 +44,7 @@ const INVOKE_COMMANDS: &[&str] = command_inventory!(command_names);
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let state = AppState::build(app).map_err(std::io::Error::other)?;
             app.manage(state);
@@ -71,6 +73,7 @@ mod tests {
                 "cancel_run",
                 "list_runs",
                 "get_run_detail",
+                "export_public_report",
             ]
         );
     }
@@ -104,5 +107,20 @@ mod tests {
     #[test]
     fn rust_backend_has_no_generic_opener_dependency() {
         assert!(!include_str!("../Cargo.toml").contains("tauri-plugin-opener"));
+    }
+
+    #[test]
+    fn native_report_picker_is_registered_without_webview_file_authority() {
+        let cargo = include_str!("../Cargo.toml");
+        let source = include_str!("lib.rs");
+        let capability: Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+
+        assert!(cargo.contains("tauri-plugin-dialog"));
+        assert!(source.contains(".plugin(tauri_plugin_dialog::init())"));
+        assert_eq!(capability["permissions"], json!(["core:default"]));
+        assert!(!cargo.contains("tauri-plugin-fs"));
+        assert!(!capability.to_string().contains("dialog:"));
+        assert!(!capability.to_string().contains("fs:"));
     }
 }

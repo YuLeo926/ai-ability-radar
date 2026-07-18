@@ -292,6 +292,197 @@
   margin-top: 1.5rem;
 }
 
+.report-export {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 1rem 1.5rem;
+  align-items: center;
+  margin-top: clamp(2rem, 5vw, 3rem);
+  padding: clamp(1rem, 3vw, 1.4rem);
+  border: 1px solid #9fc2b9;
+  border-radius: 0.9rem;
+  background:
+    radial-gradient(circle at 92% 8%, rgba(244, 170, 73, 0.2), transparent 28%),
+    linear-gradient(145deg, #e8f5f1, #fbfdfc);
+}
+
+.report-export > div:first-child {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.report-export > div:first-child > p:last-child {
+  max-width: 62ch;
+  color: #43655e;
+}
+
+.export-status {
+  grid-column: 1 / -1;
+  padding: 0.7rem 0.8rem;
+  border-left: 0.25rem solid #147d70;
+  background: rgba(255, 255, 255, 0.72);
+  color: #174c43;
+  overflow-wrap: anywhere;
+}
+
+.report-review-backdrop {
+  position: fixed;
+  z-index: 100;
+  inset: 0;
+  display: grid;
+  padding: clamp(0.65rem, 2vw, 1.5rem);
+  background: rgba(10, 29, 25, 0.64);
+  place-items: center;
+}
+
+.report-review-dialog {
+  width: min(100%, 70rem);
+  max-height: calc(100vh - 2rem);
+  overflow: auto;
+  padding: clamp(1rem, 3vw, 1.8rem);
+  border: 1px solid #9fc2b9;
+  border-radius: 1rem;
+  background: #fbfdfc;
+  box-shadow: 0 2rem 6rem rgba(3, 22, 18, 0.34);
+}
+
+.report-review-dialog > header {
+  display: grid;
+  gap: 0.4rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid #c8d9d4;
+}
+
+.report-review-dialog > header h2 {
+  font-size: clamp(1.55rem, 4vw, 2.3rem);
+  letter-spacing: -0.035em;
+}
+
+.report-review-dialog > header p:last-child {
+  max-width: 70ch;
+  color: #43655e;
+}
+
+.report-review-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(14rem, 0.72fr);
+  gap: 1rem;
+  margin-top: 1rem;
+  align-items: start;
+}
+
+.report-allowlist {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.report-allowlist section {
+  min-width: 0;
+  padding: 0.9rem;
+  border: 1px solid #d1dfdb;
+  border-radius: 0.7rem;
+  background: #fff;
+}
+
+.report-allowlist h3,
+.excluded-fields h3 {
+  margin: 0 0 0.65rem;
+  color: #29463f;
+  font-size: 0.96rem;
+}
+
+.report-allowlist dl {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.report-allowlist dl div {
+  display: grid;
+  grid-template-columns: minmax(7rem, 0.55fr) minmax(0, 1fr);
+  gap: 0.65rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid #e2ebe8;
+}
+
+.report-allowlist dt {
+  color: #6a7f79;
+  font-size: 0.78rem;
+  font-weight: 720;
+}
+
+.report-allowlist dd {
+  overflow-wrap: anywhere;
+  color: #29463f;
+  font-size: 0.88rem;
+}
+
+.report-allowlist section > p {
+  margin-top: 0.65rem;
+  color: #43655e;
+  font-size: 0.88rem;
+}
+
+.excluded-fields {
+  padding: 1rem;
+  border: 1px solid #dfc49f;
+  border-left: 0.35rem solid #d48b2c;
+  border-radius: 0.7rem;
+  background: #fff8ec;
+}
+
+.excluded-fields ul {
+  display: grid;
+  gap: 0.32rem;
+  margin: 0;
+  padding-left: 1.2rem;
+  color: #62451f;
+  font-size: 0.88rem;
+}
+
+.export-error {
+  margin-top: 1rem !important;
+  padding: 0.7rem 0.8rem;
+  border-left: 0.3rem solid #b84e3b;
+  background: #fff0ed;
+  color: #742f25;
+}
+
+.report-confirmation {
+  display: flex;
+  gap: 0.7rem;
+  align-items: start;
+  margin-top: 1rem;
+  padding: 0.85rem;
+  border: 1px solid #c8d9d4;
+  border-radius: 0.65rem;
+  background: #edf6f3;
+  color: #29463f;
+  font-weight: 720;
+  cursor: pointer;
+}
+
+.report-confirmation input {
+  width: 1.15rem;
+  height: 1.15rem;
+  margin-top: 0.18rem;
+  accent-color: #147d70;
+}
+
+.report-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.65rem;
+  margin-top: 1rem;
+}
+
+.evidence-button:disabled {
+  border-color: #aebdb9;
+  background: #dce5e2;
+  color: #6a7f79;
+  cursor: not-allowed;
+}
+
 .evidence-button {
   display: inline-flex;
   width: fit-content;
@@ -450,6 +641,34 @@
 
   .history-record {
     grid-template-columns: 1fr;
+  }
+
+  .report-export,
+  .report-review-columns,
+  .report-allowlist {
+    grid-template-columns: 1fr;
+  }
+
+  .report-export > .evidence-button {
+    width: 100%;
+  }
+
+  .report-review-dialog {
+    max-height: calc(100vh - 1.3rem);
+  }
+
+  .report-allowlist dl div {
+    grid-template-columns: 1fr;
+    gap: 0.1rem;
+  }
+
+  .report-dialog-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .report-dialog-actions .evidence-button {
+    width: 100%;
   }
 }
 

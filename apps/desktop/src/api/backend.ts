@@ -159,6 +159,7 @@ export interface Backend {
   cancelRun(runId: string): Promise<boolean>;
   listRuns(): Promise<RunRecord[]>;
   getRunDetail(runId: string): Promise<RunDetail | null>;
+  exportPublicReport(runId: string): Promise<string | null>;
   onRunEvent(listener: (event: RunEvent) => void): Promise<Unlisten>;
   onRunError(listener: (event: RunErrorEvent) => void): Promise<Unlisten>;
 }
