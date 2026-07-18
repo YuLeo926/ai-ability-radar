@@ -1,14 +1,108 @@
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
+mod app_state;
+mod commands;
+mod dto;
+
+use app_state::AppState;
+use commands::{
+    cancel_run, get_bootstrap, get_run_detail, list_runs, next_manual_step, start_cli_run,
+    start_manual_run, submit_manual_answer,
+};
+use tauri::Manager;
+
+macro_rules! command_inventory {
+    ($consumer:ident) => {
+        $consumer!(
+            get_bootstrap,
+            start_manual_run,
+            next_manual_step,
+            submit_manual_answer,
+            start_cli_run,
+            cancel_run,
+            list_runs,
+            get_run_detail,
+        )
+    };
 }
+
+macro_rules! command_handler {
+    ($($command:ident),+ $(,)?) => {
+        tauri::generate_handler![$($command),+]
+    };
+}
+
+#[cfg(test)]
+macro_rules! command_names {
+    ($($command:ident),+ $(,)?) => {
+        &[$(stringify!($command)),+]
+    };
+}
+
+#[cfg(test)]
+const INVOKE_COMMANDS: &[&str] = command_inventory!(command_names);
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet])
+        .setup(|app| {
+            let state = AppState::build(app).map_err(std::io::Error::other)?;
+            app.manage(state);
+            Ok(())
+        })
+        .invoke_handler(command_inventory!(command_handler))
         .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .expect("failed to run AI Ability Radar");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    #[test]
+    fn invoke_surface_is_the_exact_reviewed_allowlist() {
+        assert_eq!(
+            INVOKE_COMMANDS,
+            [
+                "get_bootstrap",
+                "start_manual_run",
+                "next_manual_step",
+                "submit_manual_answer",
+                "start_cli_run",
+                "cancel_run",
+                "list_runs",
+                "get_run_detail",
+            ]
+        );
+    }
+
+    #[test]
+    fn capability_contains_only_core_default() {
+        let capability: Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        assert_eq!(capability["windows"], json!(["main"]));
+        assert_eq!(capability["permissions"], json!(["core:default"]));
+    }
+
+    #[test]
+    fn production_config_bundles_packs_and_has_a_restrictive_local_csp() {
+        let config: Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(config["bundle"]["targets"], json!(["nsis", "msi"]));
+        assert_eq!(
+            config["bundle"]["resources"]["../../../benchmark-packs/"],
+            "benchmark-packs/"
+        );
+
+        let csp = config["app"]["security"]["csp"].as_str().unwrap();
+        assert!(csp.contains("default-src 'self'"));
+        assert!(csp.contains("connect-src ipc: http://ipc.localhost"));
+        assert!(csp.contains("object-src 'none'"));
+        assert!(csp.contains("frame-ancestors 'none'"));
+        assert!(!csp.contains('*'));
+        assert!(!csp.contains("https://"));
+    }
+
+    #[test]
+    fn rust_backend_has_no_generic_opener_dependency() {
+        assert!(!include_str!("../Cargo.toml").contains("tauri-plugin-opener"));
+    }
 }

@@ -1,0 +1,179 @@
+use ability_adapters::{RunEvent, TargetAvailability};
+use ability_core::{
+    Category, FailureKind, RunMode, RunRecord, TargetKind, TaskOutcome, TaskResult,
+};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackSummaryDto {
+    pub id: String,
+    pub version: String,
+    pub title: String,
+    pub task_count: u32,
+    pub estimated_minutes: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapDto {
+    pub targets: Vec<TargetAvailability>,
+    pub client_pack: PackSummaryDto,
+    pub cli_pack: PackSummaryDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TargetSelectionInput {
+    pub kind: TargetKind,
+    pub reported_model: String,
+    pub reasoning_effort: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StartRunInput {
+    pub target: TargetSelectionInput,
+    pub mode: RunMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SubmitAnswerInput {
+    pub run_id: String,
+    pub task_id: String,
+    pub answer: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunDetailDto {
+    pub run: RunRecord,
+    pub task_results: Vec<TaskResultDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskResultDto {
+    pub run_id: Uuid,
+    pub task_id: String,
+    pub category: Category,
+    pub outcome: TaskOutcome,
+    pub score: Option<f64>,
+    pub failure_kind: Option<FailureKind>,
+    pub duration_ms: u64,
+    pub answer_rel_path: Option<String>,
+}
+
+impl TryFrom<TaskResult> for TaskResultDto {
+    type Error = String;
+
+    fn try_from(result: TaskResult) -> Result<Self, Self::Error> {
+        if result
+            .answer_rel_path
+            .as_deref()
+            .is_some_and(|path| !is_safe_relative_artifact(path))
+        {
+            return Err("stored artifact metadata is not a safe relative path".into());
+        }
+        Ok(Self {
+            run_id: result.run_id,
+            task_id: result.task_id,
+            category: result.category,
+            outcome: result.outcome,
+            score: result.score,
+            failure_kind: result.failure_kind,
+            duration_ms: result.duration_ms,
+            answer_rel_path: result.answer_rel_path,
+        })
+    }
+}
+
+fn is_safe_relative_artifact(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with(['/', '\\'])
+        && !value.contains([':', '\\'])
+        && !value.chars().any(char::is_control)
+        && value
+            .split('/')
+            .all(|component| !component.is_empty() && !matches!(component, "." | ".."))
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunErrorEvent {
+    pub run_id: String,
+    pub message: String,
+}
+
+pub type CliRunEventDto = RunEvent;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ability_core::{RunMode, TargetKind};
+    use serde_json::json;
+
+    #[test]
+    fn start_run_input_uses_the_expected_camel_case_wire_shape() {
+        let input: StartRunInput = serde_json::from_value(json!({
+            "target": {
+                "kind": "codex_cli",
+                "reportedModel": "gpt-5.1-codex",
+                "reasoningEffort": "high"
+            },
+            "mode": "quick"
+        }))
+        .unwrap();
+
+        assert_eq!(input.target.kind, TargetKind::CodexCli);
+        assert_eq!(input.target.reported_model, "gpt-5.1-codex");
+        assert_eq!(input.target.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(input.mode, RunMode::Quick);
+    }
+
+    #[test]
+    fn start_run_input_rejects_unknown_outer_and_nested_fields() {
+        let outer = serde_json::from_value::<StartRunInput>(json!({
+            "target": {
+                "kind": "codex_cli",
+                "reportedModel": "default",
+                "reasoningEffort": null
+            },
+            "mode": "quick",
+            "arguments": ["--dangerously-skip-permissions"]
+        }));
+        assert!(outer.is_err());
+
+        let nested = serde_json::from_value::<StartRunInput>(json!({
+            "target": {
+                "kind": "codex_cli",
+                "reportedModel": "default",
+                "reasoningEffort": null,
+                "program": "anything"
+            },
+            "mode": "quick"
+        }));
+        assert!(nested.is_err());
+    }
+
+    #[test]
+    fn submit_answer_input_rejects_unknown_fields() {
+        let valid: SubmitAnswerInput = serde_json::from_value(json!({
+            "runId": "39d9f772-2e12-4b2d-af13-94c32d36f2d3",
+            "taskId": "logic-truth",
+            "answer": "{}"
+        }))
+        .unwrap();
+        assert_eq!(valid.task_id, "logic-truth");
+
+        let unknown = serde_json::from_value::<SubmitAnswerInput>(json!({
+            "runId": "39d9f772-2e12-4b2d-af13-94c32d36f2d3",
+            "taskId": "logic-truth",
+            "answer": "{}",
+            "artifactPath": "C:/Users/example/secrets.txt"
+        }));
+        assert!(unknown.is_err());
+    }
+}
