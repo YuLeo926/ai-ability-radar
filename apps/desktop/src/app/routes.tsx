@@ -1,13 +1,11 @@
 import { Route, Routes } from "react-router-dom";
 import { AppShell } from "../components/AppShell";
 import { CliRunPage } from "../pages/CliRunPage";
+import { HistoryPage } from "../pages/HistoryPage";
 import { HomePage } from "../pages/HomePage";
 import { ManualRunPage } from "../pages/ManualRunPage";
-import {
-  HistoryPage,
-  NotFoundPage,
-  ResultPage,
-} from "../pages/PlaceholderPages";
+import { NotFoundPage } from "../pages/NotFoundPage";
+import { ResultPage } from "../pages/ResultPage";
 
 export function AppRoutes() {
   return (

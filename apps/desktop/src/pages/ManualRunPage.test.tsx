@@ -16,12 +16,13 @@ import { BackendProvider } from "../api/BackendContext";
 import type {
   Backend,
   ManualStep,
+  RunDetail,
   RunRecord,
   TargetKind,
   TaskResult,
 } from "../api/backend";
 import { ManualRunPage } from "./ManualRunPage";
-import { ResultPage } from "./PlaceholderPages";
+import { ResultPage } from "./ResultPage";
 
 const RUN_ID = "6c8cce50-bbf3-4bc5-890d-1f3316222a46";
 const ANSWER_LIMIT_BYTES = 256 * 1024;
@@ -472,12 +473,29 @@ test("retries reading after a successful checkpoint without resubmitting", async
 
 test("navigates after the final checkpoint and announces completion", async () => {
   const user = userEvent.setup();
+  const completedDetail: RunDetail = {
+    run: {
+      ...makeRun("chat_gpt_client", 1),
+      status: "completed",
+      completedTasks: 1,
+      finishedAt: "2026-07-17T00:01:00Z",
+      score: {
+        abilityScore: 100,
+        passedTasks: 1,
+        validTasks: 1,
+        totalTasks: 1,
+        categoryScores: { instruction_following: 100 },
+      },
+    },
+    taskResults: [makeResult()],
+  };
   const backend = fakeBackend({
     nextManualStep: vi
       .fn<Backend["nextManualStep"]>()
       .mockResolvedValueOnce(makeStep(1, 1))
       .mockResolvedValueOnce(null),
     startManualRun: vi.fn(async () => makeRun("chat_gpt_client", 1)),
+    getRunDetail: vi.fn(async () => completedDetail),
   });
   renderWizard(backend);
   await completeSetup(user);
@@ -491,11 +509,9 @@ test("navigates after the final checkpoint and announces completion", async () =
   );
 
   expect(
-    await screen.findByRole("heading", { name: "体检结果" }),
+    await screen.findByRole("heading", { name: "本次客观结果" }),
   ).toBeInTheDocument();
-  expect(screen.getByRole("status")).toHaveTextContent(
-    "全部任务已完成，结果已保存到本机。",
-  );
+  expect(screen.getByText("100.0")).toBeInTheDocument();
 });
 
 test("suppresses double starts and submits while each operation is pending", async () => {

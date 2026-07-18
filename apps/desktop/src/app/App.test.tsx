@@ -69,7 +69,7 @@ test("main navigation marks the current page and reaches history", async () => {
   await user.click(screen.getByRole("link", { name: "历史记录" }));
 
   expect(
-    screen.getByRole("heading", { name: "历史记录" }),
+    await screen.findByRole("heading", { name: "还没有体检记录" }),
   ).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "历史记录" })).toHaveAttribute(
     "aria-current",
@@ -88,14 +88,11 @@ test("history navigation is exact and is not active on unrelated child paths", (
   ).toBeInTheDocument();
 });
 
-test("result routes do not expose the technical run identifier", () => {
+test("result routes fetch persisted detail and do not expose the technical run identifier", async () => {
   renderRoute("/results/run-42");
 
   expect(
-    screen.getByRole("heading", { name: "体检结果" }),
-  ).toBeInTheDocument();
-  expect(
-    screen.getByText("正在读取这次体检的本地结果。"),
+    await screen.findByRole("heading", { name: "没有找到这次体检" }),
   ).toBeInTheDocument();
   expect(screen.queryByText(/run-42/)).not.toBeInTheDocument();
 });
