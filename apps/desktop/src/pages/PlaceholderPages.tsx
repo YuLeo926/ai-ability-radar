@@ -1,4 +1,4 @@
-import { Link, useParams } from "react-router-dom";
+import { Link, useLocation, useParams } from "react-router-dom";
 
 const labels: Record<string, string> = {
   chat_gpt_client: "ChatGPT 客户端",
@@ -10,18 +10,6 @@ const labels: Record<string, string> = {
 function useSelectedTarget(fallback: string): string {
   const { target } = useParams();
   return (target && labels[target]) || fallback;
-}
-
-export function ManualRunPage() {
-  const target = useSelectedTarget("客户端");
-  return (
-    <main className="page placeholder-page">
-      <p className="eyebrow">手动快速体检</p>
-      <h1>{target}体检</h1>
-      <p>当前版本使用逐题复制与粘贴流程。</p>
-      <Link to="/">返回开始页</Link>
-    </main>
-  );
 }
 
 export function CliRunPage() {
@@ -49,10 +37,17 @@ export function HistoryPage() {
 
 export function ResultPage() {
   const { runId } = useParams();
+  const location = useLocation();
+  const navigationState = location.state as
+    | { manualRunCompleted?: boolean }
+    | null;
   return (
     <main className="page placeholder-page">
       <p className="eyebrow">本地结果</p>
       <h1>体检结果</h1>
+      {navigationState?.manualRunCompleted ? (
+        <p role="status">全部任务已完成，结果已保存到本机。</p>
+      ) : null}
       <p>测试编号：{runId}</p>
       <Link to="/history">查看历史记录</Link>
     </main>

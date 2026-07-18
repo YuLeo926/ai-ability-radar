@@ -77,6 +77,17 @@ test("main navigation marks the current page and reaches history", async () => {
   );
 });
 
+test("history navigation is exact and is not active on unrelated child paths", () => {
+  renderRoute("/history/unrelated");
+
+  expect(screen.getByRole("link", { name: "历史记录" })).not.toHaveAttribute(
+    "aria-current",
+  );
+  expect(
+    screen.getByRole("heading", { name: "没有找到这个页面" }),
+  ).toBeInTheDocument();
+});
+
 test("result routes retain the requested run identifier", () => {
   renderRoute("/results/run-42");
 
@@ -90,9 +101,11 @@ test("manual target routes show the selected client", () => {
   renderRoute("/manual/claude_client");
 
   expect(
-    screen.getByRole("heading", { name: "Claude 客户端体检" }),
+    screen.getByRole("heading", { name: "Claude 客户端快速体检" }),
   ).toBeInTheDocument();
-  expect(screen.getByText("当前版本使用逐题复制与粘贴流程。")).toBeInTheDocument();
+  expect(
+    screen.getByText(/一次只处理一道题/),
+  ).toBeInTheDocument();
 });
 
 test("CLI target routes show the selected command-line tool", () => {

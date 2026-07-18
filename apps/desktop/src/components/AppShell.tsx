@@ -18,7 +18,7 @@ export function AppShell() {
           <NavLink className={navClassName} to="/" end>
             开始体检
           </NavLink>
-          <NavLink className={navClassName} to="/history">
+          <NavLink className={navClassName} end to="/history">
             历史记录
           </NavLink>
         </nav>
