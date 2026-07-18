@@ -1,9 +1,19 @@
-export function App() {
+import { BrowserRouter } from "react-router-dom";
+import { BackendProvider } from "../api/BackendContext";
+import type { Backend } from "../api/backend";
+import { tauriBackend } from "../api/tauriBackend";
+import { AppRoutes } from "./routes";
+
+export function App({
+  backend = tauriBackend,
+}: {
+  backend?: Backend;
+} = {}) {
   return (
-    <main>
-      <h1>AI 能力雷达</h1>
-      <p>本地优先的 AI 表现与降智检测工具</p>
-      <button type="button">开始 AI 体检</button>
-    </main>
+    <BackendProvider backend={backend}>
+      <BrowserRouter>
+        <AppRoutes />
+      </BrowserRouter>
+    </BackendProvider>
   );
 }
