@@ -26,6 +26,17 @@ fn spec(script: impl Into<String>) -> ProcessSpec {
     }
 }
 
+#[test]
+fn provider_resolution_never_routes_user_arguments_through_a_shell() {
+    let source = include_str!("../src/command_locator.rs");
+    assert!(!source.contains("cmd.exe"));
+    assert!(!source.contains("powershell"));
+    assert!(!source.contains(".bat"));
+    assert!(!source.contains(".ps1"));
+    assert!(source.contains("@openai/codex/bin/codex.js"));
+    assert!(source.contains("@anthropic-ai/claude-code/cli.js"));
+}
+
 #[tokio::test]
 async fn captures_stdout_stderr_exit_code_and_duration() {
     let output = TokioProcessRunner

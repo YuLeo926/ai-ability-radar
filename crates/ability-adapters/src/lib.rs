@@ -2,6 +2,7 @@ mod classify;
 mod claude;
 mod cli_run;
 mod codex;
+mod command_locator;
 mod process;
 mod verifier;
 

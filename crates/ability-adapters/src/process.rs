@@ -1,3 +1,4 @@
+use crate::command_locator::resolve_launch_command;
 use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -118,16 +119,20 @@ impl ProcessRunner for TokioProcessRunner {
 
         let started = Instant::now();
         let mut supervisor = ProcessSupervisor::new().map_err(ProcessError::Supervision)?;
-        let program = if spec.environment == ProcessEnvironment::Clear {
-            resolve_from_parent_path(&spec.program)
+        let launch = if spec.environment == ProcessEnvironment::Clear {
+            crate::command_locator::LaunchCommand {
+                program: resolve_from_parent_path(&spec.program),
+                prefix_args: Vec::new(),
+            }
         } else {
-            PathBuf::from(&spec.program)
+            resolve_launch_command(&spec.program).map_err(ProcessError::Spawn)?
         };
-        let mut command = Command::new(program);
+        let mut command = Command::new(&launch.program);
         if spec.environment == ProcessEnvironment::Clear {
             command.env_clear();
         }
         command
+            .args(&launch.prefix_args)
             .args(&spec.args)
             .current_dir(&spec.current_dir)
             .envs(&spec.env)
