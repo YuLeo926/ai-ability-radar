@@ -1,6 +1,7 @@
 use crate::command_locator::resolve_launch_command;
 use async_trait::async_trait;
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -125,7 +126,9 @@ impl ProcessRunner for TokioProcessRunner {
                 prefix_args: Vec::new(),
             }
         } else {
-            resolve_launch_command(&spec.program).map_err(ProcessError::Spawn)?
+            let effective_path = effective_inherited_path(&spec.env);
+            resolve_launch_command(&spec.program, effective_path.as_deref())
+                .map_err(ProcessError::Spawn)?
         };
         let mut command = Command::new(&launch.program);
         if spec.environment == ProcessEnvironment::Clear {
@@ -249,6 +252,23 @@ impl ProcessRunner for TokioProcessRunner {
             }
         }
     }
+}
+
+fn effective_inherited_path(environment_overlay: &BTreeMap<String, String>) -> Option<OsString> {
+    let mut effective = std::env::var_os("PATH");
+    // Mirror the child overlay applied by `Command::envs`. Windows environment
+    // keys are case-insensitive, and iteration order makes the last PATH-shaped
+    // key the effective value.
+    for (key, value) in environment_overlay {
+        #[cfg(windows)]
+        let is_path = key.eq_ignore_ascii_case("PATH");
+        #[cfg(not(windows))]
+        let is_path = key == "PATH";
+        if is_path {
+            effective = Some(value.into());
+        }
+    }
+    effective
 }
 
 fn resolve_from_parent_path(program: &str) -> PathBuf {

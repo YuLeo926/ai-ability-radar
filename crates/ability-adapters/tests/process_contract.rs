@@ -28,13 +28,115 @@ fn spec(script: impl Into<String>) -> ProcessSpec {
 
 #[test]
 fn provider_resolution_never_routes_user_arguments_through_a_shell() {
-    let source = include_str!("../src/command_locator.rs");
-    assert!(!source.contains("cmd.exe"));
-    assert!(!source.contains("powershell"));
-    assert!(!source.contains(".bat"));
-    assert!(!source.contains(".ps1"));
-    assert!(source.contains("@openai/codex/bin/codex.js"));
-    assert!(source.contains("@anthropic-ai/claude-code/cli.js"));
+    let locator = include_str!("../src/command_locator.rs");
+    let runner = include_str!("../src/process.rs");
+    for source in [locator, runner] {
+        assert!(!source.contains("cmd.exe"));
+        assert!(!source.contains("powershell"));
+        assert!(!source.contains(".bat"));
+        assert!(!source.contains(".ps1"));
+    }
+    assert!(!runner.contains(".cmd"));
+    assert!(runner.contains("resolve_launch_command"));
+    assert_eq!(runner.matches("Command::new(").count(), 1);
+    assert!(runner.contains("Command::new(&launch.program)"));
+    assert!(runner.contains(".args(&launch.prefix_args)\n            .args(&spec.args)"));
+    assert!(locator.contains("@openai/codex"));
+    assert!(locator.contains("@anthropic-ai/claude-code"));
+}
+
+#[cfg(windows)]
+const PROVIDER_PATH_CHILD_CASE: &str = "ABILITY_RADAR_PROVIDER_PATH_CHILD_CASE";
+#[cfg(windows)]
+const PROVIDER_FAKE_PATH: &str = "ABILITY_RADAR_PROVIDER_FAKE_PATH";
+#[cfg(windows)]
+const PROVIDER_FIXTURE_ROOT: &str = "ABILITY_RADAR_PROVIDER_FIXTURE_ROOT";
+
+#[cfg(windows)]
+#[test]
+fn provider_resolution_uses_the_child_scoped_path_and_preserves_hostile_argv() {
+    let fixture = FakeProviderFixture::new();
+    let empty_parent_path = fixture.root.path().join("empty-parent-path");
+    std::fs::create_dir_all(&empty_parent_path).unwrap();
+
+    run_provider_path_child(
+        "override",
+        empty_parent_path.as_os_str(),
+        &fixture.path,
+        fixture.root.path(),
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn explicitly_empty_child_path_hides_a_parent_provider() {
+    let fixture = FakeProviderFixture::new();
+
+    run_provider_path_child("empty", &fixture.path, &fixture.path, fixture.root.path());
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn provider_path_child_case() {
+    let Ok(case) = std::env::var(PROVIDER_PATH_CHILD_CASE) else {
+        return;
+    };
+    let fake_path = std::env::var_os(PROVIDER_FAKE_PATH).unwrap();
+    let fixture_root = std::path::PathBuf::from(std::env::var_os(PROVIDER_FIXTURE_ROOT).unwrap());
+    let hostile_args = vec![
+        "prompt=&;|<>$() \"quoted value\"".to_owned(),
+        "--model".to_owned(),
+        "model $(not-a-command)".to_owned(),
+        "--workspace".to_owned(),
+        fixture_root
+            .join("workspace with spaces & metacharacters")
+            .to_string_lossy()
+            .into_owned(),
+    ];
+    let mut env = BTreeMap::new();
+    env.insert(
+        "pAtH".to_owned(),
+        if case == "empty" {
+            String::new()
+        } else {
+            fake_path.to_string_lossy().into_owned()
+        },
+    );
+    let process = ProcessSpec {
+        program: "codex".to_owned(),
+        args: hostile_args.clone(),
+        current_dir: fixture_root.clone(),
+        env,
+        environment: ProcessEnvironment::Inherit,
+        timeout: Duration::from_secs(5),
+    };
+
+    if case == "empty" {
+        let error = TokioProcessRunner
+            .run(process, CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ProcessError::Spawn(ref source) if source.kind() == std::io::ErrorKind::NotFound
+        ));
+        return;
+    }
+
+    let output = TokioProcessRunner
+        .run(process, CancellationToken::new())
+        .await
+        .unwrap();
+    let reviewed_entry =
+        std::fs::canonicalize(fixture_root.join("npm/node_modules/@openai/codex/bin/codex.js"))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+    let mut expected = vec![reviewed_entry];
+    expected.extend(hostile_args);
+
+    assert_eq!(output.exit_code, Some(0));
+    assert_eq!(output.stdout.lines().collect::<Vec<_>>(), expected);
 }
 
 #[tokio::test]
@@ -51,6 +153,83 @@ async fn captures_stdout_stderr_exit_code_and_duration() {
     assert_eq!(output.stdout, "ready");
     assert_eq!(output.stderr, "warning");
     assert!(output.duration_ms < 5_000);
+}
+
+#[cfg(windows)]
+struct FakeProviderFixture {
+    root: tempfile::TempDir,
+    path: std::ffi::OsString,
+}
+
+#[cfg(windows)]
+impl FakeProviderFixture {
+    fn new() -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let npm = root.path().join("npm");
+        let node_bin = root.path().join("node-bin");
+        let package_root = npm.join("node_modules/@openai/codex");
+        std::fs::create_dir_all(package_root.join("bin")).unwrap();
+        std::fs::create_dir_all(&node_bin).unwrap();
+        std::fs::write(npm.join("codex.cmd"), "@echo off").unwrap();
+        std::fs::write(package_root.join("bin/codex.js"), "fake provider entry").unwrap();
+        std::fs::write(
+            package_root.join("package.json"),
+            r#"{"name":"@openai/codex","bin":{"codex":"bin/codex.js"}}"#,
+        )
+        .unwrap();
+
+        let helper_source = root.path().join("fake-node.rs");
+        std::fs::write(
+            &helper_source,
+            r#"
+fn main() {
+    for argument in std::env::args_os().skip(1) {
+        println!("{}", argument.to_string_lossy());
+    }
+}
+"#,
+        )
+        .unwrap();
+        let helper = node_bin.join("node.exe");
+        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+        let compiled = std::process::Command::new(rustc)
+            .arg(&helper_source)
+            .arg("-o")
+            .arg(&helper)
+            .status()
+            .unwrap();
+        assert!(compiled.success(), "failed to compile fake node helper");
+
+        Self {
+            root,
+            path: std::env::join_paths([&npm, &node_bin]).unwrap(),
+        }
+    }
+}
+
+#[cfg(windows)]
+fn run_provider_path_child(
+    case: &str,
+    parent_path: &std::ffi::OsStr,
+    fake_path: &std::ffi::OsStr,
+    fixture_root: &std::path::Path,
+) {
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("provider_path_child_case")
+        .arg("--nocapture")
+        .env("PATH", parent_path)
+        .env(PROVIDER_PATH_CHILD_CASE, case)
+        .env(PROVIDER_FAKE_PATH, fake_path)
+        .env(PROVIDER_FIXTURE_ROOT, fixture_root)
+        .output()
+        .unwrap();
+    assert!(
+        child.status.success(),
+        "provider child case {case} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&child.stdout),
+        String::from_utf8_lossy(&child.stderr),
+    );
 }
 
 #[tokio::test]
