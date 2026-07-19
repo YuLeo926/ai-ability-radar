@@ -675,8 +675,18 @@ describe("ResultPage objective semantics", () => {
     }
   });
 
-  test("keeps reproducibility facts collapsed and free of local paths", async () => {
-    renderResult(makeBackend(async () => makeDetail()));
+  test("keeps reproducibility facts collapsed, formats effort, and hides local paths", async () => {
+    renderResult(
+      makeBackend(async () =>
+        makeDetail({
+          target: {
+            kind: "codex_cli",
+            reportedModel: "default",
+            reasoningEffort: "xhigh",
+          },
+        }),
+      ),
+    );
 
     const summary = await screen.findByText("技术与复现信息");
     const details = summary.closest("details");
@@ -688,6 +698,7 @@ describe("ResultPage objective semantics", () => {
     expect(details).toHaveTextContent("系统 Windows 11");
     expect(details).toHaveTextContent("验证器 embedded-verifier 1.0.0");
     expect(details).toHaveTextContent("完整运行");
+    expect(details).toHaveTextContent("极高");
     expect(details?.textContent).not.toMatch(/[A-Z]:\\|\/Users\/|\/home\//);
   });
 
@@ -907,7 +918,7 @@ describe("ResultPage objective semantics", () => {
     ).toBeInTheDocument();
     expect(within(dialog).getByText("ChatGPT 客户端")).toBeInTheDocument();
     expect(within(dialog).getByText("GPT-X")).toBeInTheDocument();
-    expect(within(dialog).getByText("high")).toBeInTheDocument();
+    expect(within(dialog).getByText("高")).toBeInTheDocument();
     expect(within(dialog).getByText("Windows")).toBeInTheDocument();
     expect(within(dialog).getByText("0.2.0")).toBeInTheDocument();
     expect(

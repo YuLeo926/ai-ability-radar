@@ -667,7 +667,7 @@ describe("HistoryPage comparable series", () => {
         target: {
           kind: "codex_cli",
           reportedModel: "default",
-          reasoningEffort: "high",
+          reasoningEffort: "xhigh",
         },
         suiteId: "cli-quick",
         totalTasks: 2,
@@ -712,6 +712,8 @@ describe("HistoryPage comparable series", () => {
       }),
     ];
     renderHistory(makeBackend(async () => records));
+
+    expect(await screen.findByText("极高")).toBeInTheDocument();
 
     expect(
       await screen.findByRole("heading", { name: "严格同条件历史" }),

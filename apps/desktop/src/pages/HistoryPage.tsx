@@ -9,6 +9,7 @@ import type {
   RunStatus,
   TargetKind,
 } from "../api/backend";
+import { formatReasoningEffort } from "../domain/reasoningEffort";
 import "./ResultsHistory.css";
 
 const targetLabels: Record<TargetKind, string> = {
@@ -583,7 +584,13 @@ function HistorySeries({
         <dl>
           <div>
             <dt>推理档位</dt>
-            <dd>{optionalFact(representative.target.reasoningEffort)}</dd>
+            <dd>
+              {formatReasoningEffort(
+                representative.target.kind,
+                representative.target.reasoningEffort,
+                "未记录",
+              )}
+            </dd>
           </div>
           <div>
             <dt>模式</dt>

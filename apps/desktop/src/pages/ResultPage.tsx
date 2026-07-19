@@ -16,6 +16,7 @@ import type {
   TaskResult,
 } from "../api/backend";
 import { CategoryBars } from "../components/CategoryBars";
+import { formatReasoningEffort } from "../domain/reasoningEffort";
 import "./ResultsHistory.css";
 
 const targetLabels: Record<TargetKind, string> = {
@@ -378,7 +379,12 @@ function ReportExportControls({ detail }: { detail: RunDetail }) {
                     </div>
                     <div>
                       <dt>推理档位</dt>
-                      <dd>{technicalValue(run.target.reasoningEffort?.trim())}</dd>
+                      <dd>
+                        {formatReasoningEffort(
+                          run.target.kind,
+                          run.target.reasoningEffort?.trim(),
+                        )}
+                      </dd>
                     </div>
                   </dl>
                 </section>
@@ -857,7 +863,12 @@ function ResultReady({
           </div>
           <div>
             <dt>推理档位</dt>
-            <dd>{technicalValue(run.target.reasoningEffort)}</dd>
+            <dd>
+              {formatReasoningEffort(
+                run.target.kind,
+                run.target.reasoningEffort,
+              )}
+            </dd>
           </div>
           <div>
             <dt>题包</dt>

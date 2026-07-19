@@ -881,6 +881,12 @@ button:disabled,
   }
 }
 
+.reasoning-effort-field,
+.reasoning-custom {
+  display: grid;
+  gap: var(--space-2);
+}
+
 @media (max-width: 30rem) {
   .brand-mark {
     display: none;

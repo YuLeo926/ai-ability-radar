@@ -390,6 +390,29 @@ test.each([
   },
 );
 
+test("uses provider-specific CLI efforts", async () => {
+  const user = userEvent.setup();
+  const codexBackend = fakeBackend();
+  const codex = renderWizard(codexBackend, "/cli/codex_cli");
+  await screen.findByRole("heading", { name: "Codex CLI 快速体检" });
+  await user.selectOptions(screen.getByLabelText("推理档位（可选）"), "max");
+  await acknowledgeAndStart(user);
+  expect(codexBackend.startCliRun).toHaveBeenCalledWith({
+    target: {
+      kind: "codex_cli",
+      reportedModel: "default",
+      reasoningEffort: "max",
+    },
+    mode: "quick",
+  });
+  codex.unmount();
+
+  renderWizard(fakeBackend(), "/cli/claude_code");
+  await screen.findByRole("heading", { name: "Claude Code 快速体检" });
+  expect(screen.queryByRole("option", { name: "Ultra" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("option", { name: /ultracode/i })).not.toBeInTheDocument();
+});
+
 test.each(["chat_gpt_client", "claude_client", "unknown"])(
   "rejects invalid CLI target %s before any backend activity",
   async (target) => {

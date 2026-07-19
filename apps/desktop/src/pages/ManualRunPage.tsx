@@ -7,6 +7,11 @@ import {
 } from "react-router-dom";
 import { useBackend } from "../api/BackendContext";
 import { isSafeRunRecord } from "../api/runtimeValidation";
+import { ReasoningEffortField } from "../components/ReasoningEffortField";
+import {
+  formatReasoningEffort,
+  normalizeReasoningEffortForTarget,
+} from "../domain/reasoningEffort";
 import { useT } from "../i18n/I18nContext";
 import type {
   ManualStep,
@@ -23,7 +28,6 @@ type ClientTargetKind = Extract<
   TargetKind,
   "chat_gpt_client" | "claude_client"
 >;
-type ReasoningEffort = "" | "low" | "medium" | "high";
 type CopyStatus = "idle" | "copied" | "manual";
 
 type WizardState =
@@ -74,13 +78,6 @@ function sameTarget(left: TargetSelection, right: TargetSelection): boolean {
   );
 }
 
-function reasoningEffortLabel(value?: string | null): string {
-  if (value === "low") return "低";
-  if (value === "medium") return "中";
-  if (value === "high") return "高";
-  return "未显示 / 不适用";
-}
-
 function validateModel(value: string): string | null {
   if (CONTROL_CHARACTER.test(value)) {
     return "模型名称不能包含控制字符";
@@ -103,10 +100,12 @@ function SetupPage({
   kind,
   model,
   modelTouched,
+  reasoningError,
   reasoningEffort,
   onFreshChatChange,
   onModelChange,
   onReasoningEffortChange,
+  onReasoningValidationChange,
   onStart,
 }: {
   busy: boolean;
@@ -115,10 +114,12 @@ function SetupPage({
   kind: ClientTargetKind;
   model: string;
   modelTouched: boolean;
-  reasoningEffort: ReasoningEffort;
+  reasoningError: string | null;
+  reasoningEffort: string;
   onFreshChatChange(value: boolean): void;
   onModelChange(value: string): void;
-  onReasoningEffortChange(value: ReasoningEffort): void;
+  onReasoningEffortChange(value: string): void;
+  onReasoningValidationChange(error: string | null): void;
   onStart(): void;
 }) {
   const modelError = validateModel(model);
@@ -169,22 +170,15 @@ function SetupPage({
             </p>
           ) : null}
 
-          <label className="field">
-            <span>推理档位（没有显示可留空）</span>
-            <select
-              onChange={(event) =>
-                onReasoningEffortChange(
-                  event.target.value as ReasoningEffort,
-                )
-              }
-              value={reasoningEffort}
-            >
-              <option value="">未显示 / 不适用</option>
-              <option value="low">低</option>
-              <option value="medium">中</option>
-              <option value="high">高</option>
-            </select>
-          </label>
+          <ReasoningEffortField
+            emptyLabel="未显示 / 不适用"
+            id="manual-reasoning"
+            kind={kind}
+            label="推理档位（没有显示可留空）"
+            onChange={onReasoningEffortChange}
+            onValidationChange={onReasoningValidationChange}
+            value={reasoningEffort}
+          />
 
           <label className="check-row">
             <input
@@ -211,7 +205,9 @@ function SetupPage({
           </p>
         ) : null}
         <button
-          disabled={busy || !freshChat || Boolean(modelError)}
+          disabled={
+            busy || !freshChat || Boolean(modelError) || Boolean(reasoningError)
+          }
           onClick={onStart}
           type="button"
         >
@@ -349,7 +345,13 @@ function ResumeReviewPage({
         </div>
         <div>
           <dt>原推理档位</dt>
-          <dd>{reasoningEffortLabel(run.target.reasoningEffort)}</dd>
+          <dd>
+            {formatReasoningEffort(
+              run.target.kind,
+              run.target.reasoningEffort,
+              "未显示 / 不适用",
+            )}
+          </dd>
         </div>
       </dl>
       <button onClick={onResume} type="button">
@@ -579,8 +581,8 @@ function ManualWizard({
   const [cancelError, setCancelError] = useState("");
   const [model, setModel] = useState("");
   const [modelTouched, setModelTouched] = useState(false);
-  const [reasoningEffort, setReasoningEffort] =
-    useState<ReasoningEffort>("");
+  const [reasoningEffort, setReasoningEffort] = useState("");
+  const [reasoningError, setReasoningError] = useState<string | null>(null);
   const [freshChat, setFreshChat] = useState(false);
   const [state, setState] = useState<WizardState>(
     resumeRunId
@@ -825,7 +827,7 @@ function ManualWizard({
   async function start() {
     const modelError = validateModel(model);
     setModelTouched(true);
-    if (modelError || !freshChat || state.kind !== "setup") {
+    if (modelError || reasoningError || !freshChat || state.kind !== "setup") {
       return;
     }
     if (!beginOperation()) {
@@ -833,10 +835,14 @@ function ManualWizard({
     }
 
     setState({ kind: "starting" });
+    const normalizedReasoningEffort = normalizeReasoningEffortForTarget(
+      kind,
+      reasoningEffort,
+    );
     const requestedTarget: TargetSelection = {
       kind,
       reportedModel: model.trim(),
-      reasoningEffort: reasoningEffort || null,
+      reasoningEffort: normalizedReasoningEffort || null,
     };
     let run: RunRecord;
     try {
@@ -1026,7 +1032,9 @@ function ManualWizard({
           setModel(value);
         }}
         onReasoningEffortChange={setReasoningEffort}
+        onReasoningValidationChange={setReasoningError}
         onStart={() => void start()}
+        reasoningError={reasoningError}
         reasoningEffort={reasoningEffort}
       />
     );

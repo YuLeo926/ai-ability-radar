@@ -255,7 +255,9 @@ describe("Task 21 accessibility baseline", () => {
   test.each([
     ["/", "选择要体检的 AI"],
     ["/manual/chat_gpt_client", "ChatGPT 客户端快速体检"],
+    ["/manual/claude_client", "Claude 客户端快速体检"],
     ["/cli/codex_cli", "Codex CLI 快速体检"],
+    ["/cli/claude_code", "Claude Code 快速体检"],
     ["/history", "严格同条件历史"],
     [`/results/${runId}`, "本次客观结果"],
     ["/missing", "没有找到这个页面"],

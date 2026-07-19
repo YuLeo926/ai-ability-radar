@@ -445,6 +445,47 @@ test.each([
   },
 );
 
+test("sends ChatGPT xhigh and preserves a Claude custom effort", async () => {
+  const user = userEvent.setup();
+  const chatBackend = fakeBackend();
+  const chat = renderWizard(chatBackend, "/manual/chat_gpt_client");
+  expect(screen.getByRole("option", { name: "极高" })).toHaveValue("xhigh");
+  expect(screen.getByRole("option", { name: "最高" })).toHaveValue("max");
+  await completeSetup(user);
+  await user.selectOptions(
+    screen.getByLabelText("推理档位（没有显示可留空）"),
+    "xhigh",
+  );
+  await user.click(screen.getByRole("button", { name: "开始快速体检" }));
+  expect(chatBackend.startManualRun).toHaveBeenCalledWith({
+    target: {
+      kind: "chat_gpt_client",
+      reportedModel: "GPT-5",
+      reasoningEffort: "xhigh",
+    },
+    mode: "quick",
+  });
+  chat.unmount();
+
+  const claudeBackend = fakeBackend();
+  renderWizard(claudeBackend, "/manual/claude_client");
+  await completeSetup(user, "Claude Sonnet");
+  await user.selectOptions(
+    screen.getByLabelText("推理档位（没有显示可留空）"),
+    "__custom__",
+  );
+  await user.type(screen.getByLabelText("按界面原样填写"), "扩展思考");
+  await user.click(screen.getByRole("button", { name: "开始快速体检" }));
+  expect(claudeBackend.startManualRun).toHaveBeenCalledWith({
+    target: {
+      kind: "claude_client",
+      reportedModel: "Claude Sonnet",
+      reasoningEffort: "扩展思考",
+    },
+    mode: "quick",
+  });
+});
+
 test.each(["codex_cli", "claude_code", "unknown"])(
   "rejects invalid manual target %s before any backend call",
   async (target) => {

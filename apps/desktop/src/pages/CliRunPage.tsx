@@ -13,6 +13,11 @@ import {
 import { useBackend } from "../api/BackendContext";
 import { useT } from "../i18n/I18nContext";
 import { isSafeRunRecord } from "../api/runtimeValidation";
+import { ReasoningEffortField } from "../components/ReasoningEffortField";
+import {
+  formatReasoningEffort,
+  normalizeReasoningEffortForTarget,
+} from "../domain/reasoningEffort";
 import type {
   Bootstrap,
   RunEvent,
@@ -25,7 +30,6 @@ import type {
 import "./CliRunPage.css";
 
 type CliTargetKind = Extract<TargetKind, "codex_cli" | "claude_code">;
-type ReasoningEffort = "" | "low" | "medium" | "high";
 type BootstrapState =
   | { kind: "loading" }
   | { kind: "ready"; value: Bootstrap }
@@ -78,13 +82,6 @@ function sameTarget(left: TargetSelection, right: TargetSelection): boolean {
     left.reportedModel === right.reportedModel &&
     (left.reasoningEffort ?? null) === (right.reasoningEffort ?? null)
   );
-}
-
-function reasoningEffortLabel(value?: string | null): string {
-  if (value === "low") return "低";
-  if (value === "medium") return "中";
-  if (value === "high") return "高";
-  return "CLI 默认";
 }
 
 function releaseUnlisten(unlisten: Unlisten): void {
@@ -179,8 +176,8 @@ function CliWizard({
   const [syncState, setSyncState] = useState<SyncState>("ready");
   const [model, setModel] = useState("");
   const [modelTouched, setModelTouched] = useState(false);
-  const [reasoningEffort, setReasoningEffort] =
-    useState<ReasoningEffort>("");
+  const [reasoningEffort, setReasoningEffort] = useState("");
+  const [reasoningError, setReasoningError] = useState<string | null>(null);
   const [acceptedCost, setAcceptedCost] = useState(false);
   const [starting, setStarting] = useState(false);
   const [setupError, setSetupError] = useState("");
@@ -500,7 +497,7 @@ function CliWizard({
       acceptedCost &&
       (resumeRunId
         ? resumePreview?.kind === "ready"
-        : !modelError) &&
+        : !modelError && !reasoningError) &&
       !starting,
   );
 
@@ -538,7 +535,9 @@ function CliWizard({
               target: {
                 kind,
                 reportedModel: model.trim() || "default",
-                reasoningEffort: reasoningEffort || null,
+                reasoningEffort:
+                  normalizeReasoningEffortForTarget(kind, reasoningEffort) ||
+                  null,
               },
               mode: "quick",
             }),
@@ -795,8 +794,10 @@ function CliWizard({
                 <div>
                   <dt>原推理档位</dt>
                   <dd>
-                    {reasoningEffortLabel(
+                    {formatReasoningEffort(
+                      resumePreview.run.target.kind,
                       resumePreview.run.target.reasoningEffort,
+                      "CLI 默认",
                     )}
                   </dd>
                 </div>
@@ -855,23 +856,15 @@ function CliWizard({
                   </p>
                 ) : null}
 
-                <div className="field">
-                  <label htmlFor="cli-reasoning">推理档位（可选）</label>
-                  <select
-                    id="cli-reasoning"
-                    onChange={(event) =>
-                      setReasoningEffort(
-                        event.target.value as ReasoningEffort,
-                      )
-                    }
-                    value={reasoningEffort}
-                  >
-                    <option value="">CLI 默认</option>
-                    <option value="low">低</option>
-                    <option value="medium">中</option>
-                    <option value="high">高</option>
-                  </select>
-                </div>
+                <ReasoningEffortField
+                  emptyLabel="CLI 默认"
+                  id="cli-reasoning"
+                  kind={kind}
+                  label="推理档位（可选）"
+                  onChange={setReasoningEffort}
+                  onValidationChange={setReasoningError}
+                  value={reasoningEffort}
+                />
               </>
             )}
 
