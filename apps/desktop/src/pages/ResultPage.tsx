@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useBackend } from "../api/BackendContext";
+import { useT } from "../i18n/I18nContext";
 import {
   isSafeRunDetail,
   scoreableResultScore,
@@ -710,7 +711,11 @@ function ResultReady({
   const noScore = statusPresentation(run.status);
 
   return (
-    <main className="evidence-page result-page">
+    <main
+      className="evidence-page result-page"
+      id="page-content"
+      tabIndex={-1}
+    >
       <header className="evidence-hero">
         <p className="eyebrow">
           {targetLabels[run.target.kind]} · {modelLabel(run)}
@@ -927,6 +932,7 @@ function ResultReady({
 export function ResultPage() {
   const { runId = "" } = useParams();
   const backend = useBackend();
+  const t = useT();
   const [attempt, setAttempt] = useState(0);
   const [dataStatus, setDataStatus] = useState<{
     message: string;
@@ -965,9 +971,14 @@ export function ResultPage() {
 
   if (visibleState.kind === "loading") {
     return (
-      <main aria-busy="true" className="evidence-page evidence-state">
+      <main
+        aria-busy="true"
+        className="evidence-page evidence-state"
+        id="page-content"
+        tabIndex={-1}
+      >
         <p aria-label="正在读取本地结果" role="status">
-          正在读取本地结果…
+          {t("result.loading")}
         </p>
       </main>
     );
@@ -975,7 +986,11 @@ export function ResultPage() {
 
   if (visibleState.kind === "error") {
     return (
-      <main className="evidence-page evidence-state">
+      <main
+        className="evidence-page evidence-state"
+        id="page-content"
+        tabIndex={-1}
+      >
         <section aria-labelledby="result-error-title">
           <p className="eyebrow">本地结果</p>
           <h1 id="result-error-title">暂时无法读取结果</h1>
@@ -985,7 +1000,7 @@ export function ResultPage() {
             onClick={() => setAttempt((value) => value + 1)}
             type="button"
           >
-            重新读取
+            {t("common.reload")}
           </button>
         </section>
       </main>
@@ -994,14 +1009,18 @@ export function ResultPage() {
 
   if (visibleState.kind === "not-found") {
     return (
-      <main className="evidence-page evidence-state">
+      <main
+        className="evidence-page evidence-state"
+        id="page-content"
+        tabIndex={-1}
+      >
         <section aria-labelledby="result-missing-title">
           <p className="eyebrow">本地结果</p>
           <h1 id="result-missing-title">没有找到这次体检</h1>
           <p>这条记录可能已被删除，或内容不完整，无法安全显示。</p>
           <div className="evidence-actions">
             <Link className="evidence-button" to="/">
-              返回开始页
+              {t("common.backHome")}
             </Link>
             <Link className="evidence-button secondary" to="/history">
               查看历史记录

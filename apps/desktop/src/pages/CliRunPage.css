@@ -143,7 +143,7 @@
 .cli-run-page select:focus-visible,
 .cli-run-page button:focus-visible,
 .cli-run-page a:focus-visible {
-  outline: 0.2rem solid #f4aa49;
+  outline: 0.2rem solid var(--focus);
   outline-offset: 0.16rem;
 }
 

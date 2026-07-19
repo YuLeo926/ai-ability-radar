@@ -1,10 +1,30 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Tauri + React + Typescript</title>
+    <meta
+      name="description"
+      content="在本机运行并查看 AI 客户端与编程 CLI 的客观题包结果。"
+    />
+    <meta name="color-scheme" content="light dark" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22 fill=%22none%22 stroke=%22%23126e69%22%3E%3Ccircle cx=%2216%22 cy=%2216%22 r=%2213%22/%3E%3Ccircle cx=%2216%22 cy=%2216%22 r=%227%22/%3E%3Cpath d=%22M16 3v26M3 16h26%22/%3E%3Ccircle cx=%2220%22 cy=%2212%22 r=%222%22 fill=%22%23b06c00%22 stroke=%22none%22/%3E%3C/svg%3E"
+    />
+    <title>AI 能力雷达 · 本机客观体检</title>
+    <script>
+      (() => {
+        try {
+          const theme = localStorage.getItem("ai-ability-radar.theme");
+          if (theme === "light" || theme === "dark") {
+            document.documentElement.dataset.theme = theme;
+          }
+        } catch {
+          // Storage may be blocked; system theme remains the safe default.
+        }
+      })();
+    </script>
   </head>
 
   <body>

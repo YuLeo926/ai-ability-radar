@@ -1,0 +1,92 @@
+:root {
+  color-scheme: light;
+  --canvas: #f1f5f4;
+  --panel: #fbfdfc;
+  --panel-raised: #ffffff;
+  --surface-muted: #e5eeec;
+  --text-primary: #122b2a;
+  --text-muted: #506765;
+  --border: #b8cbc8;
+  --border-strong: #6f8884;
+  --brand: #126e69;
+  --brand-strong: #0b5653;
+  --brand-soft: #d5ebe7;
+  --mineral: #315d78;
+  --success: #176b4f;
+  --success-soft: #d9eee5;
+  --warning: #8a5700;
+  --warning-soft: #f8e7bd;
+  --danger: #9b3439;
+  --danger-soft: #f7dfe1;
+  --focus: #145da0;
+  --on-brand: #ffffff;
+  --shadow-sm: 0 1px 2px rgb(18 43 42 / 8%);
+  --shadow-md: 0 18px 48px rgb(27 65 62 / 11%);
+  --radius-sm: 0.45rem;
+  --radius-md: 0.85rem;
+  --radius-lg: 1.25rem;
+  --space-1: 0.35rem;
+  --space-2: 0.65rem;
+  --space-3: 1rem;
+  --space-4: 1.5rem;
+  --space-5: 2.25rem;
+  --space-6: 3.5rem;
+  --font-display: "Bahnschrift", "Aptos Display",
+    "Segoe UI Variable Display", "Microsoft YaHei UI", sans-serif;
+  --font-body: "Aptos", "Segoe UI Variable Text", "Microsoft YaHei UI",
+    "Segoe UI", sans-serif;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --canvas: #081414;
+  --panel: #0f2120;
+  --panel-raised: #142a29;
+  --surface-muted: #1a3432;
+  --text-primary: #edf6f4;
+  --text-muted: #b2c8c4;
+  --border: #365653;
+  --border-strong: #648782;
+  --brand: #72d2c5;
+  --brand-strong: #9be5da;
+  --brand-soft: #173d39;
+  --mineral: #8dbbd7;
+  --success: #83d5ad;
+  --success-soft: #173b30;
+  --warning: #f0bf62;
+  --warning-soft: #443519;
+  --danger: #ff9ca1;
+  --danger-soft: #47252a;
+  --focus: #9bc8ff;
+  --on-brand: #071a18;
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 30%);
+  --shadow-md: 0 22px 60px rgb(0 0 0 / 34%);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+    --canvas: #081414;
+    --panel: #0f2120;
+    --panel-raised: #142a29;
+    --surface-muted: #1a3432;
+    --text-primary: #edf6f4;
+    --text-muted: #b2c8c4;
+    --border: #365653;
+    --border-strong: #648782;
+    --brand: #72d2c5;
+    --brand-strong: #9be5da;
+    --brand-soft: #173d39;
+    --mineral: #8dbbd7;
+    --success: #83d5ad;
+    --success-soft: #173b30;
+    --warning: #f0bf62;
+    --warning-soft: #443519;
+    --danger: #ff9ca1;
+    --danger-soft: #47252a;
+    --focus: #9bc8ff;
+    --on-brand: #071a18;
+    --shadow-sm: 0 1px 2px rgb(0 0 0 / 30%);
+    --shadow-md: 0 22px 60px rgb(0 0 0 / 34%);
+  }
+}

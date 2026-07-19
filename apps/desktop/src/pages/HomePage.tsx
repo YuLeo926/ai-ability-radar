@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { useBackend } from "../api/BackendContext";
+import { useT } from "../i18n/I18nContext";
 import type {
   Bootstrap,
   PackSummary,
@@ -149,6 +150,7 @@ function TargetGroup({
 
 export function HomePage() {
   const backend = useBackend();
+  const t = useT();
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<BootstrapState>({ kind: "loading" });
 
@@ -177,9 +179,14 @@ export function HomePage() {
 
   if (state.kind === "loading") {
     return (
-      <main aria-busy="true" className="page bootstrap-state">
+      <main
+        aria-busy="true"
+        className="page bootstrap-state"
+        id="page-content"
+        tabIndex={-1}
+      >
         <p aria-label="正在检查本机环境" role="status">
-          正在检查本机环境…
+          {t("home.loading")}
         </p>
       </main>
     );
@@ -187,13 +194,13 @@ export function HomePage() {
 
   if (state.kind === "error") {
     return (
-      <main className="page bootstrap-state">
+      <main className="page bootstrap-state" id="page-content" tabIndex={-1}>
         <section aria-labelledby="bootstrap-error-title" role="alert">
           <p className="eyebrow">本地环境检查</p>
           <h1 id="bootstrap-error-title">无法读取本机环境</h1>
           <p>{state.message}</p>
           <button type="button" onClick={() => setAttempt((value) => value + 1)}>
-            重新检查
+            {t("home.retry")}
           </button>
         </section>
       </main>
@@ -204,7 +211,7 @@ export function HomePage() {
   const clis = state.data.targets.filter((target) => isCli(target.kind));
 
   return (
-    <main className="page home-page">
+    <main className="page home-page" id="page-content" tabIndex={-1}>
       <section className="hero" aria-labelledby="home-title">
         <p className="eyebrow">本地优先 · 四条结果序列分别记录</p>
         <h1 id="home-title">选择要体检的 AI</h1>

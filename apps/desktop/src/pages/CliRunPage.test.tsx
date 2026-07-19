@@ -685,6 +685,64 @@ test("recovers a lost first event through immediate non-overlapping polling", as
   expect(screen.getByText("2 / 4 已完成")).toBeInTheDocument();
 });
 
+test("elapsed ticks stay outside the progress live region while completion updates it", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-07-19T05:00:00.000Z"));
+  let listener: ((event: RunEvent) => void) | undefined;
+  const running = makeRun("codex_cli", {
+    startedAt: new Date(Date.now() - 65_000).toISOString(),
+  });
+  const backend = fakeBackend({
+    startCliRun: vi.fn(async () => running),
+    getRunDetail: vi.fn(async () => detail(running)),
+    onRunEvent: vi.fn(async (next) => {
+      listener = next;
+      return () => undefined;
+    }),
+  });
+  renderWizard(backend);
+  await act(async () => {
+    await Promise.resolve();
+  });
+  fireEvent.click(screen.getByRole("checkbox"));
+  fireEvent.click(screen.getByRole("button", { name: /4/ }));
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  const card = document.querySelector(".cli-progress-card");
+  const liveRegion = card?.querySelector<HTMLElement>(
+    '[role="status"][aria-live="polite"]',
+  );
+  const elapsed = card?.querySelector<HTMLElement>(
+    ".cli-live-facts p:last-child",
+  );
+  expect(liveRegion).toBeInTheDocument();
+  expect(elapsed).toBeInTheDocument();
+  expect(liveRegion).not.toContainElement(elapsed ?? null);
+  const initialAnnouncement = liveRegion?.textContent;
+  const initialElapsed = elapsed?.textContent;
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1_000);
+  });
+  expect(liveRegion).toHaveTextContent(initialAnnouncement ?? "");
+  expect(elapsed?.textContent).not.toBe(initialElapsed);
+
+  act(() => {
+    listener?.({
+      runId: RUN_ID,
+      kind: "task_finished",
+      taskId: "task-one",
+      completedTasks: 1,
+      totalTasks: 4,
+    });
+  });
+  expect(liveRegion?.textContent).not.toBe(initialAnnouncement);
+  expect(liveRegion).toHaveTextContent("1 / 4");
+});
+
 test("announces null/failed synchronization and preserves monotonic progress", async () => {
   vi.useFakeTimers();
   let listener: ((event: RunEvent) => void) | undefined;

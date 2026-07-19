@@ -5,6 +5,7 @@ import { expect, test } from "vitest";
 import RootApp from "../App";
 import { BackendProvider } from "../api/BackendContext";
 import type { Backend } from "../api/backend";
+import { I18nProvider } from "../i18n/I18nContext";
 import { App } from "./App";
 import { AppRoutes } from "./routes";
 
@@ -73,6 +74,21 @@ test("the root entry remains the single default application export", () => {
   expect(RootApp).toBe(App);
 });
 
+test("the application entry retires the Vite starter stylesheet", () => {
+  const retiredStarterStyles = import.meta.glob("../App.css", {
+    eager: true,
+    import: "default",
+    query: "?raw",
+  });
+
+  expect(Object.keys(retiredStarterStyles)).toEqual([]);
+});
+
+test("the real application root installs the typed i18n provider", () => {
+  const root = App({ backend });
+  expect(root.type).toBe(I18nProvider);
+});
+
 test("main navigation marks the current page and reaches history", async () => {
   const user = userEvent.setup();
   renderRoute("/");
@@ -122,6 +138,10 @@ test("manual target routes show the selected client", () => {
   expect(
     screen.getByText(/一次只处理一道题/),
   ).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "开始体检" })).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
 });
 
 test("CLI target routes show the selected command-line tool", () => {
@@ -130,6 +150,22 @@ test("CLI target routes show the selected command-line tool", () => {
   expect(
     screen.getByRole("status", { name: "正在检查 Codex CLI 环境" }),
   ).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "开始体检" })).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
+});
+
+test("result routes belong to history navigation", async () => {
+  renderRoute("/results/run-42");
+  await screen.findByRole("heading", { name: "没有找到这次体检" });
+  expect(screen.getByRole("link", { name: "历史记录" })).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
+  expect(screen.getByRole("link", { name: "开始体检" })).not.toHaveAttribute(
+    "aria-current",
+  );
 });
 
 test("unknown routes explain the problem and offer a way home", async () => {
@@ -139,6 +175,12 @@ test("unknown routes explain the problem and offer a way home", async () => {
   expect(
     screen.getByRole("heading", { name: "没有找到这个页面" }),
   ).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "开始体检" })).not.toHaveAttribute(
+    "aria-current",
+  );
+  expect(screen.getByRole("link", { name: "历史记录" })).not.toHaveAttribute(
+    "aria-current",
+  );
   await user.click(screen.getByRole("link", { name: "返回开始页" }));
 
   expect(

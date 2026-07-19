@@ -11,6 +11,7 @@ import {
   useSearchParams,
 } from "react-router-dom";
 import { useBackend } from "../api/BackendContext";
+import { useT } from "../i18n/I18nContext";
 import { isSafeRunRecord } from "../api/runtimeValidation";
 import type {
   Bootstrap,
@@ -131,12 +132,18 @@ function availabilityBlocker(
 }
 
 function UnsupportedCliPage() {
+  const t = useT();
+
   return (
-    <main className="page placeholder-page unsupported-cli-page">
+    <main
+      className="page placeholder-page unsupported-cli-page"
+      id="page-content"
+      tabIndex={-1}
+    >
       <p className="eyebrow">不支持的地址</p>
       <h1>不支持的 CLI 体检</h1>
       <p>这个地址不是 Codex CLI 或 Claude Code 体检。</p>
-      <Link to="/">返回开始页</Link>
+      <Link to="/">{t("common.backHome")}</Link>
     </main>
   );
 }
@@ -629,7 +636,11 @@ function CliWizard({
 
   if (bootstrapState.kind === "loading") {
     return (
-      <main className="page run-page cli-run-page cli-loading-page">
+      <main
+        className="page run-page cli-run-page cli-loading-page"
+        id="page-content"
+        tabIndex={-1}
+      >
         <p className="eyebrow">CLI · 本地预检</p>
         <h1>{label} 快速体检</h1>
         <p
@@ -645,7 +656,11 @@ function CliWizard({
 
   if (bootstrapState.kind === "error") {
     return (
-      <main className="page run-page cli-run-page cli-loading-page">
+      <main
+        className="page run-page cli-run-page cli-loading-page"
+        id="page-content"
+        tabIndex={-1}
+      >
         <p className="eyebrow">CLI · 本地预检</p>
         <h1>{label} 快速体检</h1>
         <section
@@ -668,7 +683,11 @@ function CliWizard({
 
   if (!run && resumePreview?.kind === "error") {
     return (
-      <main className="page run-page cli-run-page cli-loading-page">
+      <main
+        className="page run-page cli-run-page cli-loading-page"
+        id="page-content"
+        tabIndex={-1}
+      >
         <p className="eyebrow">CLI · 恢复未完成体检</p>
         <h1>{label} 快速体检</h1>
         <section className="cli-alert-card" role="alert">
@@ -683,7 +702,11 @@ function CliWizard({
   if (!run) {
     const pack = bootstrapState.value.cliPack;
     return (
-      <main className="page run-page cli-run-page cli-setup-page">
+      <main
+        className="page run-page cli-run-page cli-setup-page"
+        id="page-content"
+        tabIndex={-1}
+      >
         <section aria-labelledby="cli-setup-title" className="cli-setup">
           <p className="eyebrow">CLI · 自动快速体检</p>
           <h1 id="cli-setup-title">{label} 快速体检</h1>
@@ -925,13 +948,24 @@ function CliWizard({
         : undefined;
 
   return (
-    <main className="page run-page cli-run-page cli-progress-page">
+    <main
+      className="page run-page cli-run-page cli-progress-page"
+      id="page-content"
+      tabIndex={-1}
+    >
       <p className="eyebrow">{label} · 自动运行</p>
       <h1>正在完成本地微型项目</h1>
       <div className="cli-progress-card">
-        <p className="cli-progress-number">
-          {progress.completed} / {progress.total} 已完成
-        </p>
+        <div
+          aria-live="polite"
+          className="cli-progress-announcement"
+          role="status"
+        >
+          <p className="cli-progress-number">
+            {progress.completed} / {progress.total} 已完成
+          </p>
+          <p>第 {currentPosition} / {progress.total} 个微型项目</p>
+        </div>
         <progress
           aria-label={`已完成 ${progress.completed} / ${progress.total}`}
           max={Math.max(progress.total, 1)}
@@ -940,7 +974,6 @@ function CliWizard({
           {progress.completed}/{progress.total}
         </progress>
         <div className="cli-live-facts">
-          <p>第 {currentPosition} / {progress.total} 个微型项目</p>
           <p>{formatElapsed(run.startedAt, now)}</p>
         </div>
       </div>

@@ -7,6 +7,7 @@ import {
 } from "react-router-dom";
 import { useBackend } from "../api/BackendContext";
 import { isSafeRunRecord } from "../api/runtimeValidation";
+import { useT } from "../i18n/I18nContext";
 import type {
   ManualStep,
   RunRecord,
@@ -125,7 +126,11 @@ function SetupPage({
   const label = clientLabels[kind];
 
   return (
-    <main className="page run-page manual-setup-page">
+    <main
+      className="page run-page manual-setup-page"
+      id="page-content"
+      tabIndex={-1}
+    >
       <section aria-labelledby="manual-setup-title" className="manual-setup">
         <p className="eyebrow">客户端 · 快速体检 · 约 10–15 分钟</p>
         <h1 id="manual-setup-title">{label}快速体检</h1>
@@ -241,6 +246,8 @@ function PendingStepPage({
     <main
       aria-busy={!error}
       className="page run-page manual-transition-page"
+      id="page-content"
+      tabIndex={-1}
     >
       <p className="eyebrow">
         {run.totalTasks} 道任务 · 本地运行已创建
@@ -274,6 +281,8 @@ function RecoveryPage({ failed }: { failed: boolean }) {
     <main
       aria-busy={!failed}
       className="page run-page manual-transition-page"
+      id="page-content"
+      tabIndex={-1}
     >
       <p className="eyebrow">客户端 · 恢复未完成体检</p>
       <h1>{failed ? "无法恢复这次体检" : "正在恢复这次体检"}</h1>
@@ -301,7 +310,11 @@ function ResumeReviewPage({
   onResume(): void;
 }) {
   return (
-    <main className="page run-page manual-transition-page">
+    <main
+      className="page run-page manual-transition-page"
+      id="page-content"
+      tabIndex={-1}
+    >
       <p className="eyebrow">客户端 · 恢复未完成体检</p>
       <h1>确认恢复原体检</h1>
       <p>恢复会继续下面这份本地记录，不会按当前网址创建或改写目标。</p>
@@ -328,7 +341,11 @@ function ResumeReviewPage({
 
 function ResumeErrorPage({ message }: { message: string }) {
   return (
-    <main className="page run-page manual-transition-page">
+    <main
+      className="page run-page manual-transition-page"
+      id="page-content"
+      tabIndex={-1}
+    >
       <p className="eyebrow">客户端 · 恢复未完成体检</p>
       <h1>无法恢复这次体检</h1>
       <p className="form-error" role="alert">
@@ -364,8 +381,12 @@ function TaskPage({
   const completedTasks = step.taskNumber - 1;
 
   return (
-    <main className="page run-page manual-task-page">
-      <header className="progress-copy">
+    <main
+      className="page run-page manual-task-page"
+      id="page-content"
+      tabIndex={-1}
+    >
+      <header aria-live="polite" className="progress-copy">
         <p>
           第 {step.taskNumber} / {step.totalTasks} 题 · 已完成{" "}
           {completedTasks} 题
@@ -882,17 +903,22 @@ function ManualWizard({
 }
 
 export function ManualRunPage() {
+  const t = useT();
   const { target = "" } = useParams();
   const [searchParams] = useSearchParams();
   const resumeRunId = searchParams.get("resume") || undefined;
 
   if (!isClientTarget(target)) {
     return (
-      <main className="page placeholder-page unsupported-manual-page">
+      <main
+        className="page placeholder-page unsupported-manual-page"
+        id="page-content"
+        tabIndex={-1}
+      >
         <p className="eyebrow">不支持的地址</p>
         <h1>不支持的客户端体检</h1>
         <p>这个地址不是 ChatGPT 或 Claude 客户端体检。</p>
-        <Link to="/">返回开始页</Link>
+        <Link to="/">{t("common.backHome")}</Link>
       </main>
     );
   }

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useBackend } from "../api/BackendContext";
 import { isSafeRunRecordList } from "../api/runtimeValidation";
+import { useT } from "../i18n/I18nContext";
 import type {
   DataSettings,
   RunRecord,
@@ -727,6 +728,7 @@ function HistorySeries({
 
 export function HistoryPage() {
   const backend = useBackend();
+  const t = useT();
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<HistoryState>({ kind: "loading" });
 
@@ -775,9 +777,14 @@ export function HistoryPage() {
 
   if (state.kind === "loading") {
     return (
-      <main aria-busy="true" className="evidence-page evidence-state">
+      <main
+        aria-busy="true"
+        className="evidence-page evidence-state"
+        id="page-content"
+        tabIndex={-1}
+      >
         <p aria-label="正在读取本地历史" role="status">
-          正在读取本地历史…
+          {t("history.loading")}
         </p>
       </main>
     );
@@ -785,7 +792,11 @@ export function HistoryPage() {
 
   if (state.kind === "error") {
     return (
-      <main className="evidence-page evidence-state">
+      <main
+        className="evidence-page evidence-state"
+        id="page-content"
+        tabIndex={-1}
+      >
         <section aria-labelledby="history-error-title">
           <p className="eyebrow">仅保存在本机</p>
           <h1 id="history-error-title">暂时无法读取历史</h1>
@@ -795,7 +806,7 @@ export function HistoryPage() {
             onClick={() => setAttempt((value) => value + 1)}
             type="button"
           >
-            重新读取
+            {t("common.reload")}
           </button>
         </section>
       </main>
@@ -804,7 +815,11 @@ export function HistoryPage() {
 
   if (groups.length === 0) {
     return (
-      <main className="evidence-page history-page">
+      <main
+        className="evidence-page history-page"
+        id="page-content"
+        tabIndex={-1}
+      >
         <section
           aria-labelledby="history-empty-title"
           className="history-empty-state"
@@ -822,7 +837,11 @@ export function HistoryPage() {
   }
 
   return (
-    <main className="evidence-page history-page">
+    <main
+      className="evidence-page history-page"
+      id="page-content"
+      tabIndex={-1}
+    >
       <header className="evidence-hero">
         <p className="eyebrow">条件完全一致才放在同一组</p>
         <h1>严格同条件历史</h1>
