@@ -47,6 +47,18 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test Rust
         run: cargo test --workspace --all-targets --locked
+      - name: Install deterministic fake CLIs
+        run: |
+          cargo build -p ability-radar-fake-cli --locked
+          $fakeBin = Join-Path $env:RUNNER_TEMP "ability-radar-fake-bin"
+          New-Item -ItemType Directory -Force -Path $fakeBin | Out-Null
+          Copy-Item target/debug/ability-radar-fake-cli.exe (Join-Path $fakeBin "codex.exe")
+          Copy-Item target/debug/ability-radar-fake-cli.exe (Join-Path $fakeBin "claude.exe")
+          "$fakeBin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Test real coordinator with deterministic fake CLIs
+        env:
+          ABILITY_RADAR_FAKE_CLI_E2E: "1"
+        run: cargo test -p ability-radar --test fake_cli_e2e --locked -- --ignored
       - name: Test frontend
         run: npm test
       - name: Build frontend

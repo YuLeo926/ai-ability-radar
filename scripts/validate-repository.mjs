@@ -49,13 +49,288 @@ function requireText(path, patterns) {
   return source;
 }
 
+function stripTomlComment(line) {
+  let quote;
+  let escaped = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index];
+    if (quote === '"') {
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === '"') {
+        quote = undefined;
+      }
+      continue;
+    }
+    if (quote === "'") {
+      if (character === "'") quote = undefined;
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+    } else if (character === "#") {
+      return line.slice(0, index);
+    }
+  }
+  return line;
+}
+
+function tomlSection(source, sectionName) {
+  const lines = [];
+  let active = false;
+  for (const rawLine of source.replace(/\r\n?/g, "\n").split("\n")) {
+    const line = stripTomlComment(rawLine);
+    const header = line.trim().match(/^\[([^\]]+)\]$/);
+    if (header) {
+      active = header[1] === sectionName;
+      continue;
+    }
+    if (active) lines.push(line);
+  }
+  return lines.join("\n");
+}
+
+function tomlBasicKey(source, start) {
+  let value = "";
+  let cursor = start + 1;
+  const escapes = new Map([
+    ['"', '"'],
+    ["\\", "\\"],
+    ["b", "\b"],
+    ["t", "\t"],
+    ["n", "\n"],
+    ["f", "\f"],
+    ["r", "\r"],
+  ]);
+  while (cursor < source.length) {
+    const character = source[cursor];
+    if (character === '"') {
+      return { valid: true, value, cursor: cursor + 1 };
+    }
+    if (character === "\\") {
+      const escape = source[cursor + 1];
+      if (escapes.has(escape)) {
+        value += escapes.get(escape);
+        cursor += 2;
+        continue;
+      }
+      if (escape === "u" || escape === "U") {
+        const digits = escape === "u" ? 4 : 8;
+        const hex = source.slice(cursor + 2, cursor + 2 + digits);
+        if (
+          hex.length !== digits ||
+          !/^[0-9A-Fa-f]+$/.test(hex)
+        ) {
+          return { valid: false };
+        }
+        const codePoint = Number.parseInt(hex, 16);
+        if (
+          codePoint > 0x10ffff ||
+          (codePoint >= 0xd800 && codePoint <= 0xdfff)
+        ) {
+          return { valid: false };
+        }
+        value += String.fromCodePoint(codePoint);
+        cursor += digits + 2;
+        continue;
+      }
+      return { valid: false };
+    }
+    const codePoint = source.codePointAt(cursor);
+    if ((codePoint < 0x20 && codePoint !== 0x09) || codePoint === 0x7f) {
+      return { valid: false };
+    }
+    value += String.fromCodePoint(codePoint);
+    cursor += codePoint > 0xffff ? 2 : 1;
+  }
+  return { valid: false };
+}
+
+function tomlLiteralKey(source, start) {
+  let value = "";
+  let cursor = start + 1;
+  while (cursor < source.length) {
+    const character = source[cursor];
+    if (character === "'") {
+      return { valid: true, value, cursor: cursor + 1 };
+    }
+    const codePoint = source.codePointAt(cursor);
+    if ((codePoint < 0x20 && codePoint !== 0x09) || codePoint === 0x7f) {
+      return { valid: false };
+    }
+    value += String.fromCodePoint(codePoint);
+    cursor += codePoint > 0xffff ? 2 : 1;
+  }
+  return { valid: false };
+}
+
+function tomlDottedKey(source) {
+  const segments = [];
+  let cursor = 0;
+  const skipWhitespace = () => {
+    while (source[cursor] === " " || source[cursor] === "\t") cursor += 1;
+  };
+  skipWhitespace();
+  while (cursor < source.length) {
+    let segment;
+    if (source[cursor] === '"') {
+      segment = tomlBasicKey(source, cursor);
+    } else if (source[cursor] === "'") {
+      segment = tomlLiteralKey(source, cursor);
+    } else {
+      const match = source.slice(cursor).match(/^[A-Za-z0-9_-]+/);
+      if (!match) return { valid: false };
+      segment = {
+        valid: true,
+        value: match[0],
+        cursor: cursor + match[0].length,
+      };
+    }
+    if (!segment.valid) return { valid: false };
+    segments.push(segment.value);
+    cursor = segment.cursor;
+    skipWhitespace();
+    if (cursor === source.length) {
+      return { valid: segments.length > 0, segments };
+    }
+    if (source[cursor] !== ".") return { valid: false };
+    cursor += 1;
+    skipWhitespace();
+    if (cursor === source.length) return { valid: false };
+  }
+  return { valid: false };
+}
+
+function tomlTableHeader(line) {
+  const trimmed = stripTomlComment(line).trim();
+  if (!trimmed.startsWith("[")) return { present: false };
+  let array = false;
+  let keySource;
+  if (trimmed.startsWith("[[")) {
+    if (
+      trimmed.startsWith("[[[") ||
+      !trimmed.endsWith("]]") ||
+      trimmed.endsWith("]]]")
+    ) {
+      return { present: true, valid: false, raw: trimmed };
+    }
+    array = true;
+    keySource = trimmed.slice(2, -2);
+  } else {
+    if (!trimmed.endsWith("]") || trimmed.endsWith("]]")) {
+      return { present: true, valid: false, raw: trimmed };
+    }
+    keySource = trimmed.slice(1, -1);
+  }
+  const parsed = tomlDottedKey(keySource);
+  if (!parsed.valid) {
+    return { present: true, valid: false, raw: trimmed };
+  }
+  return {
+    present: true,
+    valid: true,
+    raw: trimmed,
+    array,
+    segments: parsed.segments,
+  };
+}
+
+function tomlTables(source) {
+  const tables = [];
+  const invalidHeaders = [];
+  let current;
+  const lines = source.replace(/\r\n?/g, "\n").split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const rawLine = lines[index];
+    const parsedHeader = tomlTableHeader(rawLine);
+    if (parsedHeader.present) {
+      if (!parsedHeader.valid) {
+        invalidHeaders.push({ line: index + 1, raw: parsedHeader.raw });
+        current = undefined;
+        continue;
+      }
+      current = {
+        name: parsedHeader.segments.join("."),
+        array: parsedHeader.array,
+        segments: parsedHeader.segments,
+        entries: [],
+      };
+      tables.push(current);
+      continue;
+    }
+    const line = stripTomlComment(rawLine);
+    if (current && line.trim()) current.entries.push(line.trim());
+  }
+  return { tables, invalidHeaders };
+}
+
+function tomlStringArray(source, sectionName, key) {
+  const section = tomlSection(source, sectionName);
+  const match = section.match(
+    new RegExp(`(?:^|\\n)\\s*${key}\\s*=\\s*\\[([\\s\\S]*?)\\]`),
+  );
+  if (!match) return undefined;
+  const values = match[1]
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (values.some((value) => !/^"[^"]+"$/.test(value))) return undefined;
+  return values.map((value) => value.slice(1, -1));
+}
+
+function tomlStringArrayValue(source, key) {
+  const assignment = source.match(new RegExp(`^${key}\\s*=\\s*\\[`, "m"));
+  if (!assignment) return { present: false, valid: true, values: undefined };
+  const start = assignment.index + assignment[0].length;
+  let quoted = false;
+  let end = -1;
+  for (let index = start; index < source.length; index += 1) {
+    const character = source[index];
+    if (character === '"' && source[index - 1] !== "\\") quoted = !quoted;
+    if (character === "]" && !quoted) {
+      end = index;
+      break;
+    }
+  }
+  if (end < 0) return { present: true, valid: false, values: [] };
+
+  const body = source.slice(start, end);
+  const values = [];
+  let cursor = 0;
+  while (cursor < body.length) {
+    while (cursor < body.length && /\s/.test(body[cursor])) cursor += 1;
+    if (cursor >= body.length) break;
+    const value = body.slice(cursor).match(/^"([^"\\]*(?:\\.[^"\\]*)*)"/);
+    if (!value) return { present: true, valid: false, values };
+    values.push(value[1]);
+    cursor += value[0].length;
+    while (cursor < body.length && /\s/.test(body[cursor])) cursor += 1;
+    if (cursor >= body.length) break;
+    if (body[cursor] !== ",") {
+      return { present: true, valid: false, values };
+    }
+    cursor += 1;
+  }
+  return { present: true, valid: true, values };
+}
+
 function cargoPackages(source) {
   return [...source.matchAll(/\[\[package\]\]\r?\n([\s\S]*?)(?=\r?\n\[\[package\]\]|\s*$)/g)]
-    .map((match) => ({
-      name: match[1].match(/^name = "([^"]+)"$/m)?.[1],
-      version: match[1].match(/^version = "([^"]+)"$/m)?.[1],
-      source: match[1].match(/^source = "([^"]+)"$/m)?.[1],
-    }))
+    .map((match) => {
+      const dependencyArray = tomlStringArrayValue(
+        match[1],
+        "dependencies",
+      );
+      return {
+        name: match[1].match(/^name = "([^"]+)"$/m)?.[1],
+        version: match[1].match(/^version = "([^"]+)"$/m)?.[1],
+        source: match[1].match(/^source = "([^"]+)"$/m)?.[1],
+        dependencies: dependencyArray.values,
+        dependenciesValid: dependencyArray.valid,
+      };
+    })
     .filter(({ name, version }) => name && version);
 }
 
@@ -80,10 +355,13 @@ function packageKey({ name, version }) {
   return `${name}@${version}`;
 }
 
-function sha256(path) {
-  const canonical = readFileSync(join(root, path), "utf8")
-    .replace(/\r\n?/g, "\n");
+function normalizedSourceSha256(source) {
+  const canonical = source.replace(/\r\n?/g, "\n");
   return createHash("sha256").update(canonical, "utf8").digest("hex");
+}
+
+function sha256(path) {
+  return normalizedSourceSha256(readFileSync(join(root, path), "utf8"));
 }
 
 const requiredFiles = [
@@ -102,6 +380,12 @@ const requiredFiles = [
   "docs/methodology.md",
   "docs/licenses/npm-dependencies.json",
   "docs/licenses/rust-dependencies.json",
+  "docs/release-checklist.md",
+  "docs/test-matrix.md",
+  "tools/fake-cli/Cargo.toml",
+  "tools/fake-cli/src/main.rs",
+  "tools/fake-cli/tests/fake_cli.rs",
+  "apps/desktop/src-tauri/tests/fake_cli_e2e.rs",
   "site/index.html",
   "site/.nojekyll",
 ];
@@ -162,6 +446,97 @@ for (const pkg of cargoPackages(read("Cargo.lock")).filter(({ name }) => ownedCa
   }
 }
 
+const workspaceManifest = read("Cargo.toml");
+const workspaceMembers = tomlStringArray(
+  workspaceManifest,
+  "workspace",
+  "members",
+);
+if (
+  workspaceMembers?.filter((member) => member === "tools/fake-cli").length !==
+  1
+) {
+  fail("Cargo workspace must include tools/fake-cli exactly once in the members array");
+}
+const fakeManifest = read("tools/fake-cli/Cargo.toml");
+const fakeManifestSourceSeal = "7c767f6e1420f6a12547abd526b311c39861b8355a8973b1cc1553a1b800d57d";
+if (normalizedSourceSha256(fakeManifest) !== fakeManifestSourceSeal) {
+  fail("tools/fake-cli/Cargo.toml normalized source seal mismatch");
+}
+const fakeManifestContracts = [
+  ["package name", /^name = "ability-radar-fake-cli"$/m],
+  ["fixture version 0.1.0", /^version = "0\.1\.0"$/m],
+  ["first-party Apache-2.0 license", /^license = "Apache-2\.0"$/m],
+  ["publish = false", /^publish = false$/m],
+  ["serde_json dependency", /^serde_json = "1"$/m],
+];
+for (const [label, pattern] of fakeManifestContracts) {
+  if (!pattern.test(fakeManifest)) fail(`fake CLI manifest is missing ${label}`);
+}
+const parsedFakeManifestTables = tomlTables(fakeManifest);
+for (const header of parsedFakeManifestTables.invalidHeaders) {
+  fail(
+    `fake CLI manifest has invalid TOML table header at line ${header.line}: ${header.raw}`,
+  );
+}
+const dependencyTableSegments = new Set([
+  "dependencies",
+  "build-dependencies",
+  "dev-dependencies",
+]);
+function isCargoDependencyTable({ segments }) {
+  if (dependencyTableSegments.has(segments[0])) return true;
+  return (
+    segments.length >= 3 &&
+    segments[0] === "target" &&
+    dependencyTableSegments.has(segments[2])
+  );
+}
+const fakeDependencyTables = parsedFakeManifestTables.tables.filter(
+  isCargoDependencyTable,
+);
+const directFakeDependencyTables = fakeDependencyTables.filter(
+  ({ segments }) => (
+    segments.length === 1 && segments[0] === "dependencies"
+  ),
+);
+const fakeDependencies = directFakeDependencyTables.flatMap(
+  ({ entries }) => entries,
+);
+if (
+  directFakeDependencyTables.length !== 1 ||
+  fakeDependencies.length !== 1 ||
+  fakeDependencies[0] !== 'serde_json = "1"'
+) {
+  fail('fake CLI dependency set must be exactly serde_json = "1"');
+}
+for (const table of fakeDependencyTables.filter(
+  ({ segments, entries }) =>
+    !(segments.length === 1 && segments[0] === "dependencies") &&
+    entries.length > 0,
+)) {
+  fail(
+    `fake CLI dependency surface must not declare ${table.name}; only direct serde_json is allowed`,
+  );
+}
+const lockedFake = cargoPackages(read("Cargo.lock")).filter(
+  ({ name }) => name === "ability-radar-fake-cli",
+);
+if (
+  lockedFake.length !== 1 ||
+  lockedFake[0].version !== "0.1.0" ||
+  lockedFake[0].source ||
+  lockedFake[0].dependenciesValid !== true ||
+  JSON.stringify(lockedFake[0].dependencies) !== JSON.stringify(["serde_json"])
+) {
+  fail(
+    "Cargo.lock must contain exactly one first-party fake CLI at 0.1.0 with dependencies exactly serde_json",
+  );
+}
+if (/tools[\\/]fake-cli|ability-radar-fake-cli/i.test(JSON.stringify(tauriConfig.bundle?.resources ?? {}))) {
+  fail("fake CLI must never be a bundled Tauri resource");
+}
+
 const actions = new Map([
   ["actions/checkout", ["df4cb1c069e1874edd31b4311f1884172cec0e10", "v6"]],
   ["actions/setup-node", ["249970729cb0ef3589644e2896645e5dc5ba9c38", "v6"]],
@@ -177,9 +552,27 @@ const workflowPaths = [
   ".github/workflows/release.yml",
   ".github/workflows/pages.yml",
 ];
+// Publication workflows are sealed as a fail-closed backstop for YAML syntax
+// the lightweight structural parser intentionally does not model. Intentional
+// changes must update both this reviewed normalized-source seal and the exact
+// structural contracts below.
+const publicationWorkflowSeals = new Map([
+  [
+    ".github/workflows/release.yml",
+    "ce165a64435a551bd1fb43da7df0eeb99e3210cb0e329c6fae8516bcb9fcc2fc",
+  ],
+  [
+    ".github/workflows/pages.yml",
+    "64d04a6b6c57188551b246392c29b286b9c9e2deaea7000d5f0a6963265a0f29",
+  ],
+]);
 const workflows = new Map();
 for (const path of workflowPaths) {
   const source = read(path);
+  const reviewedSeal = publicationWorkflowSeals.get(path);
+  if (reviewedSeal && normalizedSourceSha256(source) !== reviewedSeal) {
+    fail(`${path} normalized source seal mismatch`);
+  }
   const workflow = parseWorkflow(source);
   workflows.set(path, { source, workflow });
 
@@ -250,6 +643,15 @@ for (const [path, required] of requiredActions) {
     const count = actionSteps(workflow, action).length;
     if (count !== 1) fail(`${path} must use ${action} exactly once; found ${count}`);
   }
+  const actualSequence = [...workflow.jobs.values()]
+    .flatMap((job) => job.steps)
+    .filter((step) => step.uses)
+    .map((step) => step.uses.split("@", 1)[0]);
+  if (JSON.stringify(actualSequence) !== JSON.stringify(required)) {
+    fail(
+      `${path} approved action sequence must be exact: ${required.join(", ")}`,
+    );
+  }
 }
 
 function requireCommand(path, job, label, pattern) {
@@ -258,9 +660,161 @@ function requireCommand(path, job, label, pattern) {
   }
 }
 
+function exactObject(actual, expected) {
+  const actualEntries = Object.entries(actual ?? {}).sort(([a], [b]) =>
+    a.localeCompare(b, "en"),
+  );
+  const expectedEntries = Object.entries(expected).sort(([a], [b]) =>
+    a.localeCompare(b, "en"),
+  );
+  return JSON.stringify(actualEntries) === JSON.stringify(expectedEntries);
+}
+
+const baseStepFields = [
+  "env",
+  "envDeclaration",
+  "envValid",
+  "name",
+  "run",
+  "uses",
+  "usesComment",
+  "with",
+  "withDeclaration",
+  "withValid",
+];
+
+function exactFields(actual, expected) {
+  return (
+    JSON.stringify(Object.keys(actual ?? {}).sort()) ===
+    JSON.stringify([...expected].sort())
+  );
+}
+
+function requireExactStepFields(path, step, extraFields, label) {
+  if (!exactFields(step, [...baseStepFields, ...extraFields])) {
+    fail(`${path} ${label} has unallowlisted step fields or controls`);
+  }
+}
+
+function requireExactStepContract(path, step, expected, label) {
+  const extra = expected.extra ?? {};
+  requireExactStepFields(path, step, Object.keys(extra), label);
+  const expectedWith = expected.with ?? {};
+  const expectedEnv = expected.env ?? {};
+  const expectedWithDeclaration =
+    Object.keys(expectedWith).length > 0 ? "block" : "absent";
+  const expectedEnvDeclaration =
+    Object.keys(expectedEnv).length > 0 ? "block" : "absent";
+  const scalarContract =
+    step?.name === expected.name &&
+    step?.uses === (expected.uses ?? "") &&
+    step?.usesComment === (expected.usesComment ?? "") &&
+    step?.run === (expected.run ?? "") &&
+    step?.withDeclaration === expectedWithDeclaration &&
+    step?.withValid === true &&
+    step?.envDeclaration === expectedEnvDeclaration &&
+    step?.envValid === true;
+  const extraContract = Object.entries(extra).every(
+    ([key, value]) => step?.[key] === value,
+  );
+  if (
+    !scalarContract ||
+    !extraContract ||
+    !exactObject(step?.with, expectedWith) ||
+    !exactObject(step?.env, expectedEnv)
+  ) {
+    fail(`${path} ${label} contract must be exact`);
+  }
+}
+
+const baseJobFields = [
+  "env",
+  "envDeclaration",
+  "envValid",
+  "id",
+  "permissions",
+  "permissionsDeclaration",
+  "permissionsValid",
+  "runs-on",
+  "steps",
+  "timeoutMinutes",
+];
+
+function requireExactJobContract(path, job, expected, label) {
+  const extra = expected.extra ?? {};
+  const expectedEnv = expected.env ?? {};
+  const expectedEnvDeclaration =
+    Object.keys(expectedEnv).length > 0 ? "block" : "absent";
+  const fieldsExact = exactFields(job, [
+    ...baseJobFields,
+    ...Object.keys(extra),
+  ]);
+  const extraContract = Object.entries(extra).every(
+    ([key, value]) => job?.[key] === value,
+  );
+  if (
+    !fieldsExact ||
+    job?.id !== expected.id ||
+    job?.["runs-on"] !== expected.runsOn ||
+    job?.timeoutMinutes !== expected.timeoutMinutes ||
+    job?.permissionsDeclaration !== "block" ||
+    job?.permissionsValid !== true ||
+    !exactObject(job?.permissions, expected.permissions) ||
+    job?.envDeclaration !== expectedEnvDeclaration ||
+    job?.envValid !== true ||
+    !exactObject(job?.env, expectedEnv) ||
+    !extraContract
+  ) {
+    fail(`${path} ${label} fields or contract must be exact`);
+  }
+}
+
+function requireNoTopLevelEnv(path, workflow, label) {
+  if (
+    workflow?.topEnvDeclaration !== "absent" ||
+    workflow?.topEnvValid !== true ||
+    !exactObject(workflow?.topEnv, {})
+  ) {
+    fail(`${path} ${label} must have no top-level env declaration`);
+  }
+}
+
+function namedStep(path, job, name) {
+  const matches = job?.steps.filter((step) => step.name === name) ?? [];
+  if (matches.length !== 1) {
+    fail(`${path} must have exactly one step named ${name}; found ${matches.length}`);
+  }
+  return matches[0];
+}
+
 const ciPath = ".github/workflows/ci.yml";
 const ciWorkflow = workflows.get(ciPath)?.workflow;
 const ciJob = ciWorkflow?.jobs.get("test");
+if (
+  ciWorkflow?.topEnvDeclaration !== "absent" ||
+  ciWorkflow?.topEnvValid !== true ||
+  !exactObject(ciWorkflow?.topEnv, {})
+) {
+  fail(`${ciPath} CI workflow must have no env declaration or environment`);
+}
+if (
+  ciJob?.envDeclaration !== "absent" ||
+  ciJob?.envValid !== true ||
+  !exactObject(ciJob?.env, {})
+) {
+  fail(`${ciPath} CI job must have no env declaration or environment`);
+}
+requireExactJobContract(
+  ciPath,
+  ciJob,
+  {
+    id: "test",
+    runsOn: "windows-latest",
+    timeoutMinutes: "60",
+    permissions: { contents: "read" },
+  },
+  "CI job",
+);
 if (!exactPermissions(ciJob, { contents: "read" })) {
   fail(`${ciPath} test job permissions must be exactly contents: read`);
 }
@@ -282,82 +836,288 @@ const ciCommands = [
   ["Rust formatting check", /(?:^|\n)\s*cargo fmt --all --check\s*(?:$|\n)/],
   ["locked all-target clippy", /(?:^|\n)\s*cargo clippy --workspace --all-targets --locked -- -D warnings\s*(?:$|\n)/],
   ["locked all-target tests", /(?:^|\n)\s*cargo test --workspace --all-targets --locked\s*(?:$|\n)/],
+  ["locked fake CLI build", /(?:^|\n)\s*cargo build -p ability-radar-fake-cli --locked\s*(?:$|\n)/],
+  ["temporary fake CLI directory", /Join-Path \$env:RUNNER_TEMP "ability-radar-fake-bin"/],
+  ["fake Codex executable copy", /Copy-Item target\/debug\/ability-radar-fake-cli\.exe \(Join-Path \$fakeBin "codex\.exe"\)/],
+  ["fake Claude executable copy", /Copy-Item target\/debug\/ability-radar-fake-cli\.exe \(Join-Path \$fakeBin "claude\.exe"\)/],
+  ["temporary fake CLI PATH install", /"\$fakeBin" \| Out-File -FilePath \$env:GITHUB_PATH -Encoding utf8 -Append/],
+  ["locked opted-in fake CLI E2E", /(?:^|\n)\s*cargo test -p ability-radar --test fake_cli_e2e --locked -- --ignored\s*(?:$|\n)/],
   ["frontend tests", /(?:^|\n)\s*npm test\s*(?:$|\n)/],
   ["frontend build", /(?:^|\n)\s*npm run build\s*(?:$|\n)/],
   ["debug NSIS build", /(?:^|\n)\s*npm run tauri -- build --debug --bundles nsis\s*(?:$|\n)/],
 ];
 for (const [label, pattern] of ciCommands) requireCommand(ciPath, ciJob, label, pattern);
-const ciArtifact = actionSteps(ciWorkflow, "actions/upload-artifact")[0];
+const fakeInstallName = "Install deterministic fake CLIs";
+const fakeE2eName = "Test real coordinator with deterministic fake CLIs";
+const fakeInstall = namedStep(ciPath, ciJob, fakeInstallName);
+const fakeE2e = namedStep(ciPath, ciJob, fakeE2eName);
+requireExactStepFields(ciPath, fakeInstall, [], fakeInstallName);
+requireExactStepFields(ciPath, fakeE2e, [], fakeE2eName);
+const expectedFakeInstallRun = `cargo build -p ability-radar-fake-cli --locked
+$fakeBin = Join-Path $env:RUNNER_TEMP "ability-radar-fake-bin"
+New-Item -ItemType Directory -Force -Path $fakeBin | Out-Null
+Copy-Item target/debug/ability-radar-fake-cli.exe (Join-Path $fakeBin "codex.exe")
+Copy-Item target/debug/ability-radar-fake-cli.exe (Join-Path $fakeBin "claude.exe")
+"$fakeBin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append`;
 if (
-  ciArtifact?.with.path !==
-  "target/debug/bundle/nsis/ability-radar_0.2.0_x64-setup.exe"
+  fakeInstall?.run !== expectedFakeInstallRun ||
+  fakeInstall?.uses ||
+  !exactObject(fakeInstall?.env, {}) ||
+  !exactObject(fakeInstall?.with, {})
 ) {
-  fail(`${ciPath} must upload the exact debug NSIS installer`);
+  fail(`${ciPath} ${fakeInstallName} step must have the exact fake-only run contract`);
 }
-if (ciArtifact?.with["if-no-files-found"] !== "error") {
-  fail(`${ciPath} artifact upload must fail when the installer is missing`);
+const expectedFakeE2eRun =
+  "cargo test -p ability-radar --test fake_cli_e2e --locked -- --ignored";
+requireExactStepContract(
+  ciPath,
+  fakeInstall,
+  { name: fakeInstallName, run: expectedFakeInstallRun },
+  fakeInstallName,
+);
+requireExactStepContract(
+  ciPath,
+  fakeE2e,
+  {
+    name: fakeE2eName,
+    run: expectedFakeE2eRun,
+    env: { ABILITY_RADAR_FAKE_CLI_E2E: "1" },
+  },
+  fakeE2eName,
+);
+if (
+  fakeE2e?.run !== expectedFakeE2eRun ||
+  fakeE2e?.uses ||
+  !exactObject(fakeE2e?.with, {})
+) {
+  fail(`${ciPath} ${fakeE2eName} step must have the exact E2E run contract`);
+}
+if (
+  fakeE2e?.envDeclaration !== "block" ||
+  fakeE2e?.envValid !== true ||
+  !exactObject(fakeE2e?.env, { ABILITY_RADAR_FAKE_CLI_E2E: "1" })
+) {
+  fail(`${ciPath} fake CLI E2E environment must exactly opt in on ${fakeE2eName}`);
+}
+const fakeInstallIndex = ciJob?.steps.indexOf(fakeInstall) ?? -1;
+const fakeE2eIndex = ciJob?.steps.indexOf(fakeE2e) ?? -1;
+if (fakeInstallIndex < 0 || fakeE2eIndex !== fakeInstallIndex + 1) {
+  fail(`${ciPath} fake CLI install must be immediately before its E2E step`);
+}
+for (const step of ciJob?.steps ?? []) {
+  if (step === fakeInstall || step === fakeE2e) continue;
+  if (
+    /ability-radar-fake-cli|ability-radar-fake-bin|fake_cli_e2e/.test(step.run) ||
+    Object.hasOwn(step.env, "ABILITY_RADAR_FAKE_CLI_E2E")
+  ) {
+    fail(`${ciPath} fake CLI commands and opt-in may exist only in the named fake steps`);
+  }
+}
+const ciArtifact = actionSteps(ciWorkflow, "actions/upload-artifact")[0];
+requireExactStepFields(ciPath, ciArtifact, [], "CI artifact owner");
+const expectedCiArtifactInputs = {
+  name: "ability-radar-windows-debug-nsis",
+  path: "target/debug/bundle/nsis/ability-radar_0.2.0_x64-setup.exe",
+  "if-no-files-found": "error",
+  "retention-days": "7",
+};
+requireExactStepContract(
+  ciPath,
+  ciArtifact,
+  {
+    name: "Upload exact debug installer",
+    uses: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+    usesComment: "v7",
+    with: expectedCiArtifactInputs,
+  },
+  "CI artifact owner",
+);
+if (
+  ciArtifact?.name !== "Upload exact debug installer" ||
+  !exactObject(ciArtifact?.with, expectedCiArtifactInputs)
+) {
+  fail(`${ciPath} CI artifact input allowlist must contain only the exact debug NSIS installer`);
+}
+for (const path of workflowPaths) {
+  const workflow = workflows.get(path)?.workflow;
+  for (const step of actionSteps(workflow, "actions/upload-artifact")) {
+    if (/fake|tools[\\/]fake-cli|ability-radar-fake-cli/i.test(step.with.path ?? "")) {
+      fail(`${path} must never upload the fake CLI`);
+    }
+  }
 }
 
 const releasePath = ".github/workflows/release.yml";
-const releaseSource = workflows.get(releasePath)?.source ?? "";
 const releaseWorkflow = workflows.get(releasePath)?.workflow;
 const releaseJob = releaseWorkflow?.jobs.get("release");
-if (!exactPermissions(releaseJob, { contents: "write" })) {
-  fail(`${releasePath} release job permissions must be exactly contents: write`);
-}
-if (releaseJob?.env.RELEASE_TAG !== "${{ github.ref_name }}") {
-  fail(`${releasePath} must import github.ref_name through RELEASE_TAG`);
-}
-const releaseRust = actionSteps(releaseWorkflow, "dtolnay/rust-toolchain")[0];
-if (releaseRust?.with.toolchain !== "stable") {
-  fail(`${releasePath} Rust toolchain action must explicitly select stable`);
-}
-const verifyTag = releaseJob?.steps.find(({ name }) => name === "Verify release tag");
-if (!verifyTag?.run.includes("$env:RELEASE_TAG")) {
-  fail(`${releasePath} release tag gate must use the RELEASE_TAG environment variable`);
-}
-if (!/\^v\(0\|\[1-9\]\\d\*\)\\\.\(0\|\[1-9\]\\d\*\)\\\.\(0\|\[1-9\]\\d\*\)\$/.test(verifyTag?.run ?? "")) {
-  fail(`${releasePath} must enforce a strict semantic-version release tag`);
-}
-if (!/"v\$\(\$config\.version\)"\s*-cne\s*\$tag/.test(verifyTag?.run ?? "")) {
-  fail(`${releasePath} must compare the release tag to the exact app version`);
-}
-const tauriRelease = actionSteps(releaseWorkflow, "tauri-apps/tauri-action")[0];
-const expectedReleaseInputs = {
-  tagName: "${{ env.RELEASE_TAG }}",
-  releaseDraft: "true",
-  prerelease: "true",
-  uploadUpdaterJson: "false",
-  uploadUpdaterSignatures: "false",
-};
-for (const [key, value] of Object.entries(expectedReleaseInputs)) {
-  if (tauriRelease?.with[key] !== value) {
-    fail(`${releasePath} tauri release input ${key} must be ${value}`);
-  }
-}
-if (!/未签名/.test(tauriRelease?.with.releaseBody ?? "")) {
-  fail(`${releasePath} release body must warn that the installer is unsigned`);
-}
-requireCommand(
+requireNoTopLevelEnv(releasePath, releaseWorkflow, "release workflow");
+requireExactJobContract(
   releasePath,
   releaseJob,
-  "SHA-256 checksum generation",
-  /Set-Content -LiteralPath SHA256SUMS\.txt/,
+  {
+    id: "release",
+    runsOn: "windows-latest",
+    timeoutMinutes: "60",
+    permissions: { contents: "write" },
+    env: { RELEASE_TAG: "${{ github.ref_name }}" },
+  },
+  "release job",
 );
-requireCommand(
-  releasePath,
-  releaseJob,
-  "checksum upload",
-  /gh release upload \$env:RELEASE_TAG SHA256SUMS\.txt --clobber/,
-);
-if ([...releaseSource.matchAll(/\$\{\{\s*github\.ref_name\s*\}\}/g)].length !== 1) {
-  fail(".github/workflows/release.yml must import github.ref_name exactly once through RELEASE_TAG");
+const exactVerifyTagRun = `$tag = $env:RELEASE_TAG
+if ($tag -cnotmatch '^v(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)$') {
+  throw "Release tag must be a strict vMAJOR.MINOR.PATCH semantic version."
+}
+$config = Get-Content apps/desktop/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+if ("v$($config.version)" -cne $tag) {
+  throw "Release tag does not exactly match the Tauri application version."
+}`;
+const exactReleaseBody = `Windows 10/11 x64 v0.2 预览版。
+
+**警告：安装程序未签名。** Windows SmartScreen 可能显示风险提示。
+核心数据默认只保存在本机；真实 CLI 测试消耗运行者自己的订阅用量。
+下载后请使用随发布提供的 SHA256SUMS.txt 校验安装程序。`;
+const exactChecksumRun = `$files = Get-ChildItem target/release/bundle -Recurse -File |
+  Where-Object { $_.Extension -in ".exe", ".msi" } |
+  Sort-Object FullName
+if (-not $files) {
+  throw "No Windows installer was produced; refusing to publish an empty checksum file."
+}
+$lines = foreach ($file in $files) {
+  $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
+  "$hash  $($file.Name)"
+}
+Set-Content -LiteralPath SHA256SUMS.txt -Value $lines -Encoding utf8NoBOM`;
+const exactReleaseSteps = [
+  {
+    name: "Check out tagged revision",
+    label: "release checkout input",
+    uses: "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10",
+    usesComment: "v6",
+    with: { "fetch-depth": "0", "persist-credentials": "false" },
+  },
+  {
+    name: "Verify release tag",
+    run: exactVerifyTagRun,
+    extra: { shell: "pwsh" },
+  },
+  {
+    name: "Set up Node.js",
+    uses: "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+    usesComment: "v6",
+    with: { "node-version": "22", cache: "npm" },
+  },
+  {
+    name: "Set up Rust",
+    uses: "dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c",
+    usesComment: "reviewed master",
+    with: { toolchain: "stable", components: "clippy,rustfmt" },
+  },
+  { name: "Install frontend dependencies", run: "npm ci" },
+  {
+    name: "Validate repository contracts",
+    run: "npm run validate:repository",
+  },
+  { name: "Check Rust formatting", run: "cargo fmt --all --check" },
+  {
+    name: "Lint Rust",
+    run: "cargo clippy --workspace --all-targets --locked -- -D warnings",
+  },
+  {
+    name: "Test Rust",
+    run: "cargo test --workspace --all-targets --locked",
+  },
+  { name: "Test frontend", run: "npm test" },
+  {
+    name: "Build unsigned draft prerelease",
+    label: "Tauri release input allowlist owner",
+    uses: "tauri-apps/tauri-action@944946e3e4cac6603d1fe8f514171e9ecd3c78aa",
+    usesComment: "v1",
+    env: { GITHUB_TOKEN: "${{ github.token }}" },
+    with: {
+      projectPath: "apps/desktop",
+      tauriScript: "npm run tauri --",
+      tagName: "${{ env.RELEASE_TAG }}",
+      releaseName: "AI 能力雷达 ${{ env.RELEASE_TAG }}",
+      releaseBody: exactReleaseBody,
+      releaseDraft: "true",
+      prerelease: "true",
+      uploadUpdaterJson: "false",
+      uploadUpdaterSignatures: "false",
+    },
+    extra: { id: "tauri" },
+  },
+  {
+    name: "Generate SHA-256 checksums",
+    run: exactChecksumRun,
+    extra: { shell: "pwsh" },
+  },
+  {
+    name: "Upload checksums to the draft prerelease",
+    label: "checksum upload",
+    run: "gh release upload $env:RELEASE_TAG SHA256SUMS.txt --clobber",
+    env: { GH_TOKEN: "${{ github.token }}" },
+    extra: { shell: "pwsh" },
+  },
+];
+if (
+  JSON.stringify(releaseJob?.steps.map((step) => step.name)) !==
+  JSON.stringify(exactReleaseSteps.map(({ name }) => name))
+) {
+  fail(`${releasePath} release step sequence must be exact`);
+}
+for (const [index, expected] of exactReleaseSteps.entries()) {
+  requireExactStepContract(
+    releasePath,
+    releaseJob?.steps[index],
+    expected,
+    expected.label ?? expected.name,
+  );
 }
 
 const pagesPath = ".github/workflows/pages.yml";
 const pagesWorkflow = workflows.get(pagesPath)?.workflow;
 const pagesBuild = pagesWorkflow?.jobs.get("build");
 const pagesDeploy = pagesWorkflow?.jobs.get("deploy");
+requireNoTopLevelEnv(pagesPath, pagesWorkflow, "Pages workflow");
+requireExactJobContract(
+  pagesPath,
+  pagesBuild,
+  {
+    id: "build",
+    runsOn: "ubuntu-latest",
+    timeoutMinutes: "10",
+    permissions: { contents: "read", pages: "read" },
+  },
+  "Pages build job",
+);
+requireExactJobContract(
+  pagesPath,
+  pagesDeploy,
+  {
+    id: "deploy",
+    runsOn: "ubuntu-latest",
+    timeoutMinutes: "10",
+    permissions: { pages: "write", "id-token": "write" },
+    extra: { needs: "build", environment: "" },
+  },
+  "Pages deploy job",
+);
+const expectedPagesBuildSteps = [
+  "Check out repository",
+  "Configure Pages",
+  "Validate repository contracts",
+  "Assemble static site",
+  "Upload Pages artifact",
+];
+const expectedPagesDeploySteps = ["Deploy"];
+if (
+  JSON.stringify(pagesBuild?.steps.map((step) => step.name)) !==
+    JSON.stringify(expectedPagesBuildSteps) ||
+  JSON.stringify(pagesDeploy?.steps.map((step) => step.name)) !==
+    JSON.stringify(expectedPagesDeploySteps)
+) {
+  fail(`${pagesPath} Pages step sequence must be exact`);
+}
 if (!exactPermissions(pagesBuild, { contents: "read", pages: "read" })) {
   fail(`${pagesPath} build permissions must be exactly contents: read and pages: read`);
 }
@@ -370,6 +1130,120 @@ requireCommand(
   "site assembly",
   /(?:^|\n)\s*cp docs\/privacy\.md _site\/docs\/privacy\.md\s*(?:$|\n)/,
 );
+const assembleSite = namedStep(pagesPath, pagesBuild, "Assemble static site");
+const pagesCheckout = namedStep(pagesPath, pagesBuild, "Check out repository");
+const configurePages = namedStep(pagesPath, pagesBuild, "Configure Pages");
+const validatePages = namedStep(
+  pagesPath,
+  pagesBuild,
+  "Validate repository contracts",
+);
+const deployPages = namedStep(pagesPath, pagesDeploy, "Deploy");
+requireExactStepFields(pagesPath, pagesCheckout, [], "Pages checkout");
+requireExactStepFields(pagesPath, configurePages, [], "Configure Pages");
+requireExactStepFields(
+  pagesPath,
+  validatePages,
+  [],
+  "Validate repository contracts",
+);
+requireExactStepFields(pagesPath, assembleSite, [], "Assemble static site");
+requireExactStepFields(pagesPath, deployPages, ["id"], "Deploy Pages owner");
+if (validatePages?.run !== "node scripts/validate-repository.mjs") {
+  fail(`${pagesPath} Pages step sequence and commands must be exact`);
+}
+const expectedSiteAssembly = `cp -R site _site
+mkdir -p _site/docs
+cp docs/privacy.md _site/docs/privacy.md
+cp docs/security.md _site/docs/security.md
+cp docs/methodology.md _site/docs/methodology.md
+cp docs/troubleshooting.md _site/docs/troubleshooting.md`;
+const exactPagesBuildContracts = [
+  {
+    name: "Check out repository",
+    label: "Pages checkout input",
+    uses: "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10",
+    usesComment: "v6",
+    with: { "persist-credentials": "false" },
+  },
+  {
+    name: "Configure Pages",
+    label: "Configure Pages input",
+    uses: "actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b",
+    usesComment: "v5",
+  },
+  {
+    name: "Validate repository contracts",
+    label: "Pages validator",
+    run: "node scripts/validate-repository.mjs",
+  },
+  {
+    name: "Assemble static site",
+    label: "Pages assembly",
+    run: expectedSiteAssembly,
+  },
+  {
+    name: "Upload Pages artifact",
+    label: "Upload Pages artifact",
+    uses:
+      "actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9",
+    usesComment: "v5",
+    with: { path: "_site" },
+  },
+];
+for (const [index, expected] of exactPagesBuildContracts.entries()) {
+  requireExactStepContract(
+    pagesPath,
+    pagesBuild?.steps[index],
+    expected,
+    expected.label,
+  );
+}
+requireExactStepContract(
+  pagesPath,
+  pagesDeploy?.steps[0],
+  {
+    name: "Deploy",
+    uses: "actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128",
+    usesComment: "v5",
+    extra: { id: "deployment" },
+  },
+  "Deploy Pages input",
+);
+if (
+  assembleSite?.run !== expectedSiteAssembly ||
+  assembleSite?.uses ||
+  !exactObject(assembleSite?.env, {}) ||
+  !exactObject(assembleSite?.with, {})
+) {
+  fail(`${pagesPath} Assemble static site step must own the exact site assembly commands`);
+}
+for (const step of runSteps(pagesWorkflow)) {
+  if (
+    step !== assembleSite &&
+    /_site(?:\/|\b)/.test(step.run)
+  ) {
+    fail(`${pagesPath} non-assembly steps must not write into _site`);
+  }
+}
+const pagesArtifact = actionSteps(
+  pagesWorkflow,
+  "actions/upload-pages-artifact",
+)[0];
+requireExactStepFields(pagesPath, pagesArtifact, [], "Upload Pages artifact");
+if (
+  pagesArtifact?.name !== "Upload Pages artifact" ||
+  !exactObject(pagesArtifact?.with, { path: "_site" })
+) {
+  fail(`${pagesPath} Pages artifact path must be exactly _site`);
+}
+
+const expectedTauriResources = {
+  "../../../benchmark-packs/": "benchmark-packs/",
+};
+if (!exactObject(tauriConfig.bundle?.resources, expectedTauriResources)) {
+  fail("Tauri resource allowlist must contain only the sealed benchmark packs");
+}
 
 const updaterInputs = [
   "package.json",
@@ -549,6 +1423,9 @@ const reportedRustKeys = (rustReport.packages ?? []).map(packageKey);
 const reportedNpmKeys = (npmReport.packages ?? []).map(packageKey);
 if (new Set(reportedRustKeys).size !== reportedRustKeys.length) {
   fail("Rust license report contains duplicate package versions");
+}
+if (reportedRustKeys.some((key) => key.startsWith("ability-radar-fake-cli@"))) {
+  fail("Rust third-party license report must exclude the first-party fake CLI workspace package");
 }
 if (new Set(reportedNpmKeys).size !== reportedNpmKeys.length) {
   fail("npm license report contains duplicate package versions");

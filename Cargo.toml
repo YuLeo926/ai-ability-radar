@@ -4,4 +4,5 @@ members = [
   "apps/desktop/src-tauri",
   "crates/ability-core",
   "crates/ability-adapters",
+  "tools/fake-cli",
 ]

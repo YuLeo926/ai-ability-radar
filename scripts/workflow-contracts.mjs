@@ -55,11 +55,15 @@ function cleanRun(lines) {
 export function parseWorkflow(source) {
   const workflow = {
     topPermissions: undefined,
+    topEnv: {},
+    topEnvDeclaration: "absent",
+    topEnvValid: true,
     hasConcurrency: false,
     jobs: new Map(),
   };
   const lines = source.replace(/\r\n?/g, "\n").split("\n");
   let inJobs = false;
+  let topSection;
   let job;
   let jobSection;
   let step;
@@ -97,6 +101,14 @@ export function parseWorkflow(source) {
       jobSection = undefined;
       stepSection = undefined;
       inJobs = text === "jobs:";
+      topSection = undefined;
+      const pair = keyValue(text);
+      if (pair?.[0] === "env") {
+        workflow.topEnvDeclaration =
+          pair[1] === "" ? "block" : "unsupported";
+        workflow.topEnvValid = pair[1] === "";
+        if (workflow.topEnvValid) topSection = "env";
+      }
       if (text.startsWith("permissions:")) {
         workflow.topPermissions = scalar(text.slice("permissions:".length));
       } else if (text === "concurrency:") {
@@ -104,7 +116,14 @@ export function parseWorkflow(source) {
       }
       continue;
     }
-    if (!inJobs) continue;
+    if (!inJobs) {
+      if (indent === 2 && topSection === "env") {
+        const pair = keyValue(text);
+        if (!pair || pair[0] === "<<") workflow.topEnvValid = false;
+        else workflow.topEnv[pair[0]] = pair[1];
+      }
+      continue;
+    }
 
     if (indent === 2) {
       const pair = keyValue(text);
@@ -112,7 +131,11 @@ export function parseWorkflow(source) {
       job = {
         id: pair[0],
         permissions: {},
+        permissionsDeclaration: "absent",
+        permissionsValid: true,
         env: {},
+        envDeclaration: "absent",
+        envValid: true,
         timeoutMinutes: undefined,
         steps: [],
       };
@@ -126,29 +149,50 @@ export function parseWorkflow(source) {
     if (indent === 4) {
       step = undefined;
       stepSection = undefined;
-      if (text === "permissions:") jobSection = "permissions";
-      else if (text === "env:") jobSection = "env";
-      else if (text === "steps:") jobSection = "steps";
+      const pair = keyValue(text);
+      if (pair?.[0] === "permissions") {
+        job.permissionsDeclaration =
+          pair[1] === "" ? "block" : "unsupported";
+        job.permissionsValid = pair[1] === "";
+        jobSection = job.permissionsValid ? "permissions" : undefined;
+      } else if (pair?.[0] === "env") {
+        job.envDeclaration = pair[1] === "" ? "block" : "unsupported";
+        job.envValid = pair[1] === "";
+        jobSection = job.envValid ? "env" : undefined;
+      } else if (text === "steps:") jobSection = "steps";
       else {
         jobSection = undefined;
-        const pair = keyValue(text);
         if (pair?.[0] === "timeout-minutes") job.timeoutMinutes = pair[1];
+        else if (pair) job[pair[0]] = pair[1];
       }
       continue;
     }
 
     if (indent === 6 && jobSection === "permissions") {
       const pair = keyValue(text);
-      if (pair) job.permissions[pair[0]] = pair[1];
+      if (!pair || pair[0] === "<<") job.permissionsValid = false;
+      else job.permissions[pair[0]] = pair[1];
       continue;
     }
     if (indent === 6 && jobSection === "env") {
       const pair = keyValue(text);
-      if (pair) job.env[pair[0]] = pair[1];
+      if (!pair || pair[0] === "<<") job.envValid = false;
+      else job.env[pair[0]] = pair[1];
       continue;
     }
     if (indent === 6 && jobSection === "steps" && text.startsWith("-")) {
-      step = { name: "", uses: "", usesComment: "", with: {}, env: {}, run: "" };
+      step = {
+        name: "",
+        uses: "",
+        usesComment: "",
+        with: {},
+        withDeclaration: "absent",
+        withValid: true,
+        env: {},
+        envDeclaration: "absent",
+        envValid: true,
+        run: "",
+      };
       job.steps.push(step);
       stepSection = undefined;
       const pair = keyValue(text.slice(1).trim());
@@ -164,10 +208,14 @@ export function parseWorkflow(source) {
       const pair = keyValue(text);
       if (!pair) continue;
       const [key, value] = pair;
-      if (key === "with" && value === "") {
-        stepSection = "with";
-      } else if (key === "env" && value === "") {
-        stepSection = "env";
+      if (key === "with") {
+        step.withDeclaration = value === "" ? "block" : "unsupported";
+        step.withValid = value === "";
+        stepSection = step.withValid ? "with" : undefined;
+      } else if (key === "env") {
+        step.envDeclaration = value === "" ? "block" : "unsupported";
+        step.envValid = value === "";
+        stepSection = step.envValid ? "env" : undefined;
       } else {
         stepSection = undefined;
         if (key === "run" && isBlockScalar(value)) {
@@ -182,7 +230,10 @@ export function parseWorkflow(source) {
 
     if (indent === 10 && (stepSection === "with" || stepSection === "env")) {
       const pair = keyValue(text);
-      if (!pair) continue;
+      if (!pair || pair[0] === "<<") {
+        step[`${stepSection}Valid`] = false;
+        continue;
+      }
       const [key, value] = pair;
       if (stepSection === "with" && isBlockScalar(value)) {
         block = { target: "with", key, step, indent, lines: [] };
