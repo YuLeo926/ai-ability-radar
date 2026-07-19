@@ -71,6 +71,7 @@ function makeBackend(listRuns: Backend["listRuns"]): Backend {
       throw new Error("unused fake resumeCliRun");
     },
     cancelRun: async () => false,
+    interruptManualRun: async () => false,
     listRuns,
     getRunDetail: async () => null,
     exportPublicReport: async () => null,

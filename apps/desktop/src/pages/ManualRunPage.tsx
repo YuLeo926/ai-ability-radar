@@ -223,14 +223,26 @@ function SetupPage({
 }
 
 function PendingStepPage({
+  cancelBusy,
+  cancelConfirm,
+  cancelError,
   error,
   first,
   run,
+  onBeginCancel,
+  onConfirmCancel,
+  onDismissCancel,
   onRetry,
 }: {
+  cancelBusy: boolean;
+  cancelConfirm: boolean;
+  cancelError: string;
   error?: string;
   first: boolean;
   run: RunRecord;
+  onBeginCancel(): void;
+  onConfirmCancel(): void;
+  onDismissCancel(): void;
   onRetry?(): void;
 }) {
   const submitted = !first;
@@ -272,6 +284,14 @@ function PendingStepPage({
           {submitted ? "本题已提交，正在读取下一题…" : "正在读取第一题…"}
         </p>
       )}
+      <CancelControls
+        busy={cancelBusy}
+        confirm={cancelConfirm}
+        error={cancelError}
+        onBegin={onBeginCancel}
+        onConfirm={onConfirmCancel}
+        onDismiss={onDismissCancel}
+      />
     </main>
   );
 }
@@ -356,22 +376,84 @@ function ResumeErrorPage({ message }: { message: string }) {
   );
 }
 
+function CancelControls({
+  busy,
+  confirm,
+  error,
+  onBegin,
+  onConfirm,
+  onDismiss,
+}: {
+  busy: boolean;
+  confirm: boolean;
+  error: string;
+  onBegin(): void;
+  onConfirm(): void;
+  onDismiss(): void;
+}) {
+  return (
+    <>
+      {confirm ? (
+        <div className="button-row">
+          <button
+            className="danger"
+            disabled={busy}
+            onClick={onConfirm}
+            type="button"
+          >
+            {busy ? "正在取消…" : "确认取消"}
+          </button>
+          <button
+            className="secondary"
+            disabled={busy}
+            onClick={onDismiss}
+            type="button"
+          >
+            继续体检
+          </button>
+        </div>
+      ) : (
+        <button className="secondary" onClick={onBegin} type="button">
+          取消本次体检
+        </button>
+      )}
+      {error ? (
+        <p className="form-error" role="alert">
+          {error}
+        </p>
+      ) : null}
+    </>
+  );
+}
+
 function TaskPage({
   answer,
   busy,
+  cancelBusy,
+  cancelConfirm,
+  cancelError,
   copyStatus,
   error,
   step,
   onAnswerChange,
+  onBeginCancel,
+  onConfirmCancel,
+  onDismissCancel,
   onCopy,
   onSubmit,
 }: {
   answer: string;
   busy: boolean;
+  cancelBusy: boolean;
+  cancelConfirm: boolean;
+  cancelError: string;
   copyStatus: CopyStatus;
   error: string;
   step: ManualStep;
   onAnswerChange(value: string): void;
+  onBeginCancel(): void;
+  onConfirmCancel(): void;
+  onDismissCancel(): void;
   onCopy(): void;
   onSubmit(): void;
 }) {
@@ -466,6 +548,14 @@ function TaskPage({
         <button disabled={!canSubmit} onClick={onSubmit} type="button">
           提交并进入下一题
         </button>
+        <CancelControls
+          busy={busy || cancelBusy}
+          confirm={cancelConfirm}
+          error={cancelError}
+          onBegin={onBeginCancel}
+          onConfirm={onConfirmCancel}
+          onDismiss={onDismissCancel}
+        />
       </section>
     </main>
   );
@@ -481,8 +571,12 @@ function ManualWizard({
   const backend = useBackend();
   const navigate = useNavigate();
   const mounted = useRef(true);
+  const activeRunId = useRef<string | null>(null);
   const pending = useRef(false);
   const resumeStarted = useRef(false);
+  const [cancelBusy, setCancelBusy] = useState(false);
+  const [cancelConfirm, setCancelConfirm] = useState(false);
+  const [cancelError, setCancelError] = useState("");
   const [model, setModel] = useState("");
   const [modelTouched, setModelTouched] = useState(false);
   const [reasoningEffort, setReasoningEffort] =
@@ -502,8 +596,9 @@ function ManualWizard({
     return () => {
       mounted.current = false;
       pending.current = false;
+      bestEffortInterruptActiveRun();
     };
-  }, []);
+  }, [backend]);
 
   useEffect(() => {
     if (!resumeRunId || resumeStarted.current) {
@@ -523,10 +618,62 @@ function ManualWizard({
 
   function completeNavigation(run: RunRecord) {
     pending.current = false;
+    activeRunId.current = null;
     navigate(`/results/${run.id}`, {
       replace: true,
       state: { manualRunCompleted: true },
     });
+  }
+
+  function bestEffortInterruptActiveRun(runId = activeRunId.current) {
+    if (runId) {
+      void backend.interruptManualRun(runId).catch(() => undefined);
+    }
+  }
+
+  function adoptActiveRun(run: RunRecord): boolean {
+    if (!mounted.current) {
+      bestEffortInterruptActiveRun(run.id);
+      return false;
+    }
+    activeRunId.current = run.id;
+    return true;
+  }
+
+  async function cancelActiveRun() {
+    const runId = activeRunId.current;
+    if (!runId || cancelBusy) {
+      return;
+    }
+    setCancelBusy(true);
+    setCancelError("");
+    try {
+      const cancelled = await backend.cancelRun(runId);
+      if (!mounted.current) {
+        if (!cancelled) {
+          bestEffortInterruptActiveRun(runId);
+        }
+        return;
+      }
+      if (!cancelled || activeRunId.current !== runId) {
+        setCancelBusy(false);
+        setCancelError("无法取消这次体检，请稍后重试。");
+        return;
+      }
+      activeRunId.current = null;
+      pending.current = false;
+      navigate(`/results/${runId}`, {
+        replace: true,
+        state: { manualRunCancelled: true },
+      });
+    } catch {
+      if (!mounted.current) {
+        bestEffortInterruptActiveRun(runId);
+        return;
+      }
+      setCancelBusy(false);
+      setCancelError("无法取消这次体检，请稍后重试。");
+    }
   }
 
   function showStep(run: RunRecord, step: ManualStep | null) {
@@ -552,11 +699,13 @@ function ManualWizard({
         backend.nextManualStep(run.id),
       );
       if (!mounted.current) {
+        bestEffortInterruptActiveRun(run.id);
         return;
       }
       showStep(run, step);
     } catch (reason) {
       if (!mounted.current) {
+        bestEffortInterruptActiveRun(run.id);
         return;
       }
       pending.current = false;
@@ -637,9 +786,6 @@ function ManualWizard({
           },
         }),
       );
-      if (!mounted.current) {
-        return;
-      }
       if (
         !isSafeRunRecord(recovered) ||
         recovered.id !== resumeRunId ||
@@ -648,6 +794,10 @@ function ManualWizard({
         recovered.status !== "running" ||
         !recovered.environment.resumed
       ) {
+        bestEffortInterruptActiveRun(resumeRunId);
+        if (!mounted.current) {
+          return;
+        }
         pending.current = false;
         setState({
           kind: "resume-error",
@@ -655,8 +805,12 @@ function ManualWizard({
         });
         return;
       }
+      if (!adoptActiveRun(recovered)) {
+        return;
+      }
       await readFirstStep(recovered);
     } catch {
+      bestEffortInterruptActiveRun(resumeRunId);
       if (!mounted.current) {
         return;
       }
@@ -679,15 +833,16 @@ function ManualWizard({
     }
 
     setState({ kind: "starting" });
+    const requestedTarget: TargetSelection = {
+      kind,
+      reportedModel: model.trim(),
+      reasoningEffort: reasoningEffort || null,
+    };
     let run: RunRecord;
     try {
       run = await Promise.resolve().then(() =>
         backend.startManualRun({
-          target: {
-            kind,
-            reportedModel: model.trim(),
-            reasoningEffort: reasoningEffort || null,
-          },
+          target: requestedTarget,
           mode: "quick",
         }),
       );
@@ -700,7 +855,31 @@ function ManualWizard({
       return;
     }
 
+    const isTrustedFreshRun =
+      isSafeRunRecord(run) &&
+      run.status === "running" &&
+      run.mode === "quick" &&
+      run.completedTasks === 0 &&
+      run.finishedAt == null &&
+      run.score == null &&
+      !run.environment.resumed &&
+      sameTarget(run.target, requestedTarget);
+    if (!isTrustedFreshRun) {
+      if (!mounted.current) {
+        return;
+      }
+      pending.current = false;
+      setState({
+        kind: "setup",
+        error: "无法创建这次体检，请稍后重试。",
+      });
+      return;
+    }
     if (!mounted.current) {
+      bestEffortInterruptActiveRun(run.id);
+      return;
+    }
+    if (!adoptActiveRun(run)) {
       return;
     }
     await readFirstStep(run);
@@ -752,11 +931,13 @@ function ManualWizard({
         backend.nextManualStep(run.id),
       );
       if (!mounted.current) {
+        bestEffortInterruptActiveRun(run.id);
         return;
       }
       showStep(run, step);
     } catch (reason) {
       if (!mounted.current) {
+        bestEffortInterruptActiveRun(run.id);
         return;
       }
       pending.current = false;
@@ -796,6 +977,7 @@ function ManualWizard({
       );
     } catch (reason) {
       if (!mounted.current) {
+        bestEffortInterruptActiveRun(answeringState.run.id);
         return;
       }
       pending.current = false;
@@ -807,6 +989,7 @@ function ManualWizard({
     }
 
     if (!mounted.current) {
+      bestEffortInterruptActiveRun(answeringState.run.id);
       return;
     }
     await readNextStep(answeringState.run);
@@ -818,6 +1001,15 @@ function ManualWizard({
     }
     await readNextStep(state.run);
   }
+
+  const beginCancel = () => {
+    setCancelConfirm(true);
+    setCancelError("");
+  };
+  const dismissCancel = () => {
+    setCancelConfirm(false);
+    setCancelError("");
+  };
 
   if (state.kind === "setup" || state.kind === "starting") {
     return (
@@ -853,14 +1045,31 @@ function ManualWizard({
   }
 
   if (state.kind === "loading-first") {
-    return <PendingStepPage first run={state.run} />;
+    return (
+      <PendingStepPage
+        cancelBusy={cancelBusy}
+        cancelConfirm={cancelConfirm}
+        cancelError={cancelError}
+        first
+        onBeginCancel={beginCancel}
+        onConfirmCancel={() => void cancelActiveRun()}
+        onDismissCancel={dismissCancel}
+        run={state.run}
+      />
+    );
   }
 
   if (state.kind === "first-step-error") {
     return (
       <PendingStepPage
+        cancelBusy={cancelBusy}
+        cancelConfirm={cancelConfirm}
+        cancelError={cancelError}
         error={state.error}
         first
+        onBeginCancel={beginCancel}
+        onConfirmCancel={() => void cancelActiveRun()}
+        onDismissCancel={dismissCancel}
         onRetry={() => void retryFirstStep()}
         run={state.run}
       />
@@ -868,14 +1077,31 @@ function ManualWizard({
   }
 
   if (state.kind === "loading-next") {
-    return <PendingStepPage first={false} run={state.run} />;
+    return (
+      <PendingStepPage
+        cancelBusy={cancelBusy}
+        cancelConfirm={cancelConfirm}
+        cancelError={cancelError}
+        first={false}
+        onBeginCancel={beginCancel}
+        onConfirmCancel={() => void cancelActiveRun()}
+        onDismissCancel={dismissCancel}
+        run={state.run}
+      />
+    );
   }
 
   if (state.kind === "next-step-error") {
     return (
       <PendingStepPage
+        cancelBusy={cancelBusy}
+        cancelConfirm={cancelConfirm}
+        cancelError={cancelError}
         error={state.error}
         first={false}
+        onBeginCancel={beginCancel}
+        onConfirmCancel={() => void cancelActiveRun()}
+        onDismissCancel={dismissCancel}
         onRetry={() => void retryNextStep()}
         run={state.run}
       />
@@ -886,6 +1112,9 @@ function ManualWizard({
     <TaskPage
       answer={state.answer}
       busy={state.kind === "submitting"}
+      cancelBusy={cancelBusy}
+      cancelConfirm={cancelConfirm}
+      cancelError={cancelError}
       copyStatus={state.copyStatus}
       error={state.kind === "answering" ? state.submitError : ""}
       onAnswerChange={(answer) =>
@@ -895,6 +1124,9 @@ function ManualWizard({
             : current,
         )
       }
+      onBeginCancel={beginCancel}
+      onConfirmCancel={() => void cancelActiveRun()}
+      onDismissCancel={dismissCancel}
       onCopy={() => void copyPrompt()}
       onSubmit={() => void submit()}
       step={state.step}

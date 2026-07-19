@@ -184,7 +184,14 @@ function runDetail(): RunDetail {
 function fakeBackend(overrides: Partial<Backend> = {}): Backend {
   return {
     getBootstrap: vi.fn(async () => bootstrap()),
-    startManualRun: vi.fn(async () => runRecord()),
+    startManualRun: vi.fn(async (input) => ({
+      ...runRecord(),
+      target: input.target,
+      status: "running" as const,
+      finishedAt: null,
+      completedTasks: 0,
+      score: undefined,
+    })),
     nextManualStep: vi.fn(async () => ({
       runId,
       taskId: "task-1",
@@ -197,6 +204,7 @@ function fakeBackend(overrides: Partial<Backend> = {}): Backend {
     resumeManualRun: vi.fn(async () => runRecord()),
     resumeCliRun: vi.fn(async () => runRecord()),
     cancelRun: vi.fn(async () => false),
+    interruptManualRun: vi.fn(async () => false),
     listRuns: vi.fn(async () => [runRecord()]),
     getRunDetail: vi.fn(async () => runDetail()),
     exportPublicReport: vi.fn(async () => null),

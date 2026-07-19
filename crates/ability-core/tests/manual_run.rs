@@ -33,6 +33,23 @@ fn write_pack(root: &std::path::Path, target_kinds: &str, grader: &str) {
     .unwrap();
 }
 
+fn write_two_task_pack(root: &std::path::Path) {
+    fs::create_dir_all(root).unwrap();
+    fs::write(root.join("one.txt"), "one").unwrap();
+    fs::write(root.join("two.txt"), "two").unwrap();
+    fs::write(
+        root.join("manifest.json"),
+        r#"{
+          "schema_version":1,"id":"two-step","version":"1.0.0","title":"Two Step",
+          "target_kinds":["chat_gpt_client"],"tasks":[
+            {"id":"one","category":"logic","prompt_file":"one.txt","starter_dir":null,"time_budget_secs":60,"max_turns":1,"grader":{"type":"exact_text","expected":"1"}},
+            {"id":"two","category":"logic","prompt_file":"two.txt","starter_dir":null,"time_budget_secs":60,"max_turns":1,"grader":{"type":"exact_text","expected":"2"}}
+          ]
+        }"#,
+    )
+    .unwrap();
+}
+
 fn environment(pack: &ability_core::LoadedPack) -> EnvironmentFingerprint {
     EnvironmentFingerprint {
         os_family: "windows".into(),
@@ -175,20 +192,7 @@ fn start_rejects_a_mismatched_environment_or_external_verifier_before_persisting
 fn submissions_must_follow_the_pack_order_and_cannot_follow_completion() {
     let dir = tempdir().unwrap();
     let pack_dir = dir.path().join("pack");
-    fs::create_dir_all(&pack_dir).unwrap();
-    fs::write(pack_dir.join("one.txt"), "one").unwrap();
-    fs::write(pack_dir.join("two.txt"), "two").unwrap();
-    fs::write(
-        pack_dir.join("manifest.json"),
-        r#"{
-          "schema_version":1,"id":"two-step","version":"1.0.0","title":"Two Step",
-          "target_kinds":["chat_gpt_client"],"tasks":[
-            {"id":"one","category":"logic","prompt_file":"one.txt","starter_dir":null,"time_budget_secs":60,"max_turns":1,"grader":{"type":"exact_text","expected":"1"}},
-            {"id":"two","category":"logic","prompt_file":"two.txt","starter_dir":null,"time_budget_secs":60,"max_turns":1,"grader":{"type":"exact_text","expected":"2"}}
-          ]
-        }"#,
-    )
-    .unwrap();
+    write_two_task_pack(&pack_dir);
     let pack = Arc::new(PackLoader::load(&pack_dir).unwrap());
     let repo = Arc::new(RunRepository::open(&dir.path().join("runs.db")).unwrap());
     let service = ManualRunService::new(repo.clone(), dir.path().join("artifacts"));
@@ -212,6 +216,157 @@ fn submissions_must_follow_the_pack_order_and_cannot_follow_completion() {
         Err(RunServiceError::RunNotFound(id)) if id == run.id
     ));
     assert_eq!(repo.get_task_results(run.id).unwrap().len(), 2);
+}
+
+#[test]
+fn cancelling_one_manual_run_is_exact_idempotent_and_does_not_touch_another_run() {
+    let dir = tempdir().unwrap();
+    let pack_dir = dir.path().join("pack");
+    write_pack(
+        &pack_dir,
+        r#"["chat_gpt_client"]"#,
+        r#"{"type":"exact_text","expected":"4"}"#,
+    );
+    let pack = Arc::new(PackLoader::load(&pack_dir).unwrap());
+    let repo = Arc::new(RunRepository::open(&dir.path().join("runs.db")).unwrap());
+    let service = ManualRunService::new(repo.clone(), dir.path().join("artifacts"));
+    let first = service
+        .start(
+            pack.clone(),
+            chatgpt_target(),
+            RunMode::Quick,
+            environment(&pack),
+        )
+        .unwrap();
+    let second = service
+        .start(
+            pack.clone(),
+            chatgpt_target(),
+            RunMode::Quick,
+            environment(&pack),
+        )
+        .unwrap();
+
+    assert!(service.cancel(first.id).unwrap());
+    assert!(!service.cancel(first.id).unwrap());
+    assert_eq!(
+        repo.get_run(first.id).unwrap().unwrap().status,
+        RunStatus::Cancelled
+    );
+    assert_eq!(
+        repo.get_run(second.id).unwrap().unwrap().status,
+        RunStatus::Running
+    );
+    assert!(matches!(
+        service.next_step(first.id),
+        Err(RunServiceError::RunNotFound(id)) if id == first.id
+    ));
+    assert_eq!(
+        service.next_step(second.id).unwrap().unwrap().task_id,
+        "one"
+    );
+}
+
+#[test]
+fn manual_cancel_preserves_a_committed_prefix_but_never_overwrites_completion() {
+    let dir = tempdir().unwrap();
+    let pack_dir = dir.path().join("pack");
+    write_two_task_pack(&pack_dir);
+    let pack = Arc::new(PackLoader::load(&pack_dir).unwrap());
+    let repo = Arc::new(RunRepository::open(&dir.path().join("runs.db")).unwrap());
+    let service = ManualRunService::new(repo.clone(), dir.path().join("artifacts"));
+
+    let partial = service
+        .start(
+            pack.clone(),
+            chatgpt_target(),
+            RunMode::Quick,
+            environment(&pack),
+        )
+        .unwrap();
+    service.submit_answer(partial.id, "one", "1").unwrap();
+    assert!(service.cancel(partial.id).unwrap());
+    assert_eq!(
+        repo.get_run(partial.id).unwrap().unwrap().status,
+        RunStatus::Cancelled
+    );
+    assert_eq!(repo.get_task_results(partial.id).unwrap().len(), 1);
+    assert!(
+        !repo.has_running_runs().unwrap(),
+        "a terminal manual cancellation must release the full-backup precondition"
+    );
+    assert!(matches!(
+        service.resume(
+            partial.id,
+            chatgpt_target(),
+            pack.clone(),
+            environment(&pack),
+        ),
+        Err(RunServiceError::NotResumable(_))
+    ));
+    assert!(matches!(
+        service.submit_answer(partial.id, "two", "2"),
+        Err(RunServiceError::RunNotFound(id)) if id == partial.id
+    ));
+    assert_eq!(
+        repo.get_run(partial.id).unwrap().unwrap().status,
+        RunStatus::Cancelled,
+        "resume and submit attempts must not overwrite the terminal status"
+    );
+
+    let completed = service
+        .start(
+            pack.clone(),
+            chatgpt_target(),
+            RunMode::Quick,
+            environment(&pack),
+        )
+        .unwrap();
+    service.submit_answer(completed.id, "one", "1").unwrap();
+    service.submit_answer(completed.id, "two", "2").unwrap();
+    assert!(!service.cancel(completed.id).unwrap());
+    assert_eq!(
+        repo.get_run(completed.id).unwrap().unwrap().status,
+        RunStatus::Completed
+    );
+}
+
+#[test]
+fn manual_interrupt_preserves_a_committed_prefix_and_remains_resumable() {
+    let dir = tempdir().unwrap();
+    let pack_dir = dir.path().join("pack");
+    write_two_task_pack(&pack_dir);
+    let pack = Arc::new(PackLoader::load(&pack_dir).unwrap());
+    let repo = Arc::new(RunRepository::open(&dir.path().join("runs.db")).unwrap());
+    let service = ManualRunService::new(repo.clone(), dir.path().join("artifacts"));
+    let run = service
+        .start(
+            pack.clone(),
+            chatgpt_target(),
+            RunMode::Quick,
+            environment(&pack),
+        )
+        .unwrap();
+    service.submit_answer(run.id, "one", "1").unwrap();
+
+    assert!(service.interrupt(run.id).unwrap());
+    assert!(!service.interrupt(run.id).unwrap());
+    let interrupted = repo.get_run(run.id).unwrap().unwrap();
+    assert_eq!(interrupted.status, RunStatus::Interrupted);
+    assert_eq!(interrupted.completed_tasks, 1);
+    assert_eq!(repo.get_task_results(run.id).unwrap().len(), 1);
+    assert!(!repo.has_running_runs().unwrap());
+    assert!(matches!(
+        service.next_step(run.id),
+        Err(RunServiceError::RunNotFound(id)) if id == run.id
+    ));
+
+    let resumed = service
+        .resume(run.id, run.target, pack.clone(), environment(&pack))
+        .unwrap();
+    assert_eq!(resumed.status, RunStatus::Running);
+    assert!(resumed.environment.resumed);
+    assert_eq!(service.next_step(run.id).unwrap().unwrap().task_id, "two");
 }
 
 #[cfg(windows)]

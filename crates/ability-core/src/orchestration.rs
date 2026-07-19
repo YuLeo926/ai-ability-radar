@@ -289,6 +289,28 @@ impl ManualRunService {
         }))
     }
 
+    pub fn cancel(&self, run_id: Uuid) -> Result<bool, RunServiceError> {
+        let mut active = self.active.lock().map_err(|_| RunServiceError::Poisoned)?;
+        if !active.contains_key(&run_id) {
+            return Ok(false);
+        }
+        self.repository
+            .finish_without_score(run_id, RunStatus::Cancelled)?;
+        active.remove(&run_id);
+        Ok(true)
+    }
+
+    pub fn interrupt(&self, run_id: Uuid) -> Result<bool, RunServiceError> {
+        let mut active = self.active.lock().map_err(|_| RunServiceError::Poisoned)?;
+        if !active.contains_key(&run_id) {
+            return Ok(false);
+        }
+        self.repository
+            .finish_without_score(run_id, RunStatus::Interrupted)?;
+        active.remove(&run_id);
+        Ok(true)
+    }
+
     pub fn submit_answer(
         &self,
         run_id: Uuid,
@@ -396,12 +418,12 @@ impl ManualRunService {
                         Err(StorageError::RunNotFound(run_id))
                     } else {
                         self.repository
-                            .set_run_status(run_id, RunStatus::Interrupted)
+                            .interrupt_running_after_checkpoint_cleanup(run_id)
                     };
                     #[cfg(not(all(test, windows)))]
                     let status_result = self
                         .repository
-                        .set_run_status(run_id, RunStatus::Interrupted);
+                        .interrupt_running_after_checkpoint_cleanup(run_id);
                     match status_result {
                         Ok(()) => Err(RunServiceError::CheckpointCleanup {
                             storage: Box::new(error),

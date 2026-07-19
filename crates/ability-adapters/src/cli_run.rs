@@ -148,49 +148,66 @@ impl CliRunService {
         current_environment: EnvironmentFingerprint,
     ) -> Result<RunRecord, CliRunError> {
         validate_artifact_root(&self.artifact_root)?;
+        validate_pack(pack, expected_target.kind).map_err(|_| CliRunError::NotResumable)?;
         let artifact_store = ArtifactStore::new(self.artifact_root.clone());
         let pack_task_ids = pack
             .tasks
             .iter()
             .map(|task| task.definition.id.clone())
             .collect::<Vec<_>>();
-        self.repository
-            .resume_run(run_id, &expected_target, |run, results| {
-                if run.target != expected_target {
-                    return Err(StorageError::InvalidData(
-                        "run target changed while recovery was being validated".into(),
-                    ));
-                }
-                validate_pack(pack, run.target.kind).map_err(|_| {
-                    StorageError::InvalidData("sealed CLI pack is not resumable".into())
-                })?;
-                validate_recovery(run, results, pack, &current_environment, true)?;
-                let checkpoints = results
-                    .iter()
-                    .map(|result| RecoveryArtifactCheckpoint {
-                        task_id: result.task_id.clone(),
-                        raw_artifact: result.answer_rel_path.is_some(),
-                    })
-                    .collect::<Vec<_>>();
-                artifact_store
-                    .prepare_recovery_artifacts(
-                        run.id,
-                        run.target.kind,
-                        &pack_task_ids,
-                        &checkpoints,
-                    )
-                    .map_err(|_| {
-                        StorageError::InvalidData(
-                            "recovery artifact ownership is inconsistent".into(),
-                        )
-                    })
-            })
-            .map_err(|error| match error {
-                StorageError::InvalidData(_) | StorageError::RunNotFound(_) => {
-                    CliRunError::NotResumable
-                }
-                other => CliRunError::Storage(other),
-            })
+        let preflight_run = self
+            .repository
+            .get_run(run_id)?
+            .ok_or(CliRunError::NotResumable)?;
+        let preflight_results = self.repository.get_task_results(run_id)?;
+        let retry_marker = validate_cli_recovery_with_retry_marker(
+            &preflight_run,
+            &preflight_results,
+            &expected_target,
+            pack,
+            &current_environment,
+        )
+        .map_err(|_| CliRunError::NotResumable)?;
+        let validate = |run: &RunRecord, results: &[TaskResult]| {
+            if run.target != expected_target {
+                return Err(StorageError::InvalidData(
+                    "run target changed while recovery was being validated".into(),
+                ));
+            }
+            validate_pack(pack, run.target.kind).map_err(|_| {
+                StorageError::InvalidData("sealed CLI pack is not resumable".into())
+            })?;
+            validate_recovery(run, results, pack, &current_environment, true)?;
+            let checkpoints = results
+                .iter()
+                .map(|result| RecoveryArtifactCheckpoint {
+                    task_id: result.task_id.clone(),
+                    raw_artifact: result.answer_rel_path.is_some(),
+                })
+                .collect::<Vec<_>>();
+            artifact_store
+                .prepare_recovery_artifacts(run.id, run.target.kind, &pack_task_ids, &checkpoints)
+                .map_err(|_| {
+                    StorageError::InvalidData("recovery artifact ownership is inconsistent".into())
+                })
+        };
+        let resumed = if let Some(marker) = retry_marker {
+            self.repository.resume_run_retrying_exact_marker(
+                run_id,
+                &expected_target,
+                &marker,
+                validate,
+            )
+        } else {
+            self.repository
+                .resume_run(run_id, &expected_target, validate)
+        };
+        resumed.map_err(|error| match error {
+            StorageError::InvalidData(_) | StorageError::RunNotFound(_) => {
+                CliRunError::NotResumable
+            }
+            other => CliRunError::Storage(other),
+        })
     }
 
     pub async fn execute(
@@ -465,7 +482,17 @@ impl CliRunService {
                 return Ok(());
             }
             if result.outcome == TaskOutcome::Invalid {
-                break;
+                self.repository
+                    .finish_without_score(run_id, RunStatus::Interrupted)?;
+                send_event(
+                    &events,
+                    run_id,
+                    RunEventKind::RunFinished,
+                    None,
+                    completed_tasks,
+                    total_tasks,
+                );
+                return Ok(());
             }
         }
 
@@ -699,6 +726,85 @@ impl CliRunService {
             },
         }
     }
+}
+
+fn validate_cli_recovery_with_retry_marker(
+    run: &RunRecord,
+    results: &[TaskResult],
+    expected_target: &TargetSelection,
+    pack: &LoadedPack,
+    current_environment: &EnvironmentFingerprint,
+) -> Result<Option<TaskResult>, StorageError> {
+    if run.status != RunStatus::Interrupted || run.target != *expected_target {
+        return Err(StorageError::InvalidData(
+            "run is not the reviewed interrupted CLI run".into(),
+        ));
+    }
+    let invalids = results
+        .iter()
+        .filter(|result| result.outcome == TaskOutcome::Invalid)
+        .collect::<Vec<_>>();
+    if invalids.is_empty() {
+        validate_recovery(run, results, pack, current_environment, true)?;
+        return Ok(None);
+    }
+    if invalids.len() != 1 || results.len() > pack.tasks.len() {
+        return Err(StorageError::InvalidData(
+            "CLI recovery has an invalid retry marker shape".into(),
+        ));
+    }
+
+    let marker = invalids[0];
+    let prefix_len = results.len().checked_sub(1).ok_or_else(|| {
+        StorageError::InvalidData("CLI recovery retry marker is not trailing".into())
+    })?;
+    let next_task = pack.tasks.get(prefix_len).ok_or_else(|| {
+        StorageError::InvalidData("CLI recovery retry marker exceeds the sealed pack".into())
+    })?;
+    let canonical_log = format!("runs/{}/logs/{}.log", run.id, marker.task_id);
+    let retryable_failure = matches!(
+        marker.failure_kind,
+        Some(
+            FailureKind::CliMissing
+                | FailureKind::RuntimeMissing
+                | FailureKind::AuthExpired
+                | FailureKind::QuotaExhausted
+                | FailureKind::Network
+                | FailureKind::AppInterrupted
+                | FailureKind::InfrastructureTimeout
+                | FailureKind::VerifierError
+        )
+    );
+    if marker.run_id != run.id
+        || marker.task_id != next_task.definition.id
+        || marker.category != next_task.definition.category
+        || marker.score.is_some()
+        || !retryable_failure
+        || marker
+            .answer_rel_path
+            .as_ref()
+            .is_some_and(|path| path != &canonical_log)
+    {
+        return Err(StorageError::InvalidData(
+            "CLI recovery retry marker is inconsistent".into(),
+        ));
+    }
+
+    let prefix = results
+        .iter()
+        .filter(|result| result.task_id != marker.task_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    if prefix.len() != prefix_len {
+        return Err(StorageError::InvalidData(
+            "CLI recovery retry marker is not unique".into(),
+        ));
+    }
+    let mut prefix_run = run.clone();
+    prefix_run.completed_tasks = u32::try_from(prefix.len())
+        .map_err(|_| StorageError::InvalidData("checkpoint count exceeds range".into()))?;
+    validate_recovery(&prefix_run, &prefix, pack, current_environment, true)?;
+    Ok(Some(marker.clone()))
 }
 
 struct CreatedWorkspace {

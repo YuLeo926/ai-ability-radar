@@ -26,6 +26,8 @@ export const tauriBackend: Backend = {
   resumeCliRun: (input) =>
     invoke<RunRecord>("resume_cli_run", { input }),
   cancelRun: (runId) => invoke<boolean>("cancel_run", { runId }),
+  interruptManualRun: (runId) =>
+    invoke<boolean>("interrupt_manual_run", { runId }),
   listRuns: () => invoke<RunRecord[]>("list_runs"),
   getRunDetail: (runId) =>
     invoke<RunDetail | null>("get_run_detail", { runId }),

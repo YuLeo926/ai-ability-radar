@@ -1,4 +1,7 @@
-use crate::{RunRecord, RunStatus, ScoreSummary, TargetKind, TargetSelection, TaskResult};
+use crate::{
+    FailureKind, RunRecord, RunStatus, ScoreSummary, TargetKind, TargetSelection, TaskOutcome,
+    TaskResult, grading::has_coherent_task_evidence, summarize_scores,
+};
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -49,9 +52,13 @@ impl RunRepository {
 
     pub fn insert_run(&self, run: &RunRecord) -> Result<(), StorageError> {
         validate_run(run)?;
-        if run.completed_tasks != 0 {
+        if !matches!(run.status, RunStatus::Created | RunStatus::Running)
+            || run.completed_tasks != 0
+            || run.finished_at.is_some()
+            || run.score.is_some()
+        {
             return Err(StorageError::InvalidData(
-                "a new run cannot have completed tasks before checkpoints exist".into(),
+                "a new run must be created or running with no terminal evidence".into(),
             ));
         }
         let target_json = serde_json::to_string(&run.target)?;
@@ -60,7 +67,7 @@ impl RunRepository {
         let environment_json = serde_json::to_string(&run.environment)?;
         let score_json = run.score.as_ref().map(serde_json::to_string).transpose()?;
         let mut connection = self.connection.lock();
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute(
             "INSERT OR IGNORE INTO targets(target_json) VALUES (?1)",
             [&target_json],
@@ -112,7 +119,21 @@ impl RunRepository {
             .map(serde_json::to_string)
             .transpose()?;
         let mut connection = self.connection.lock();
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (status_json, total_tasks): (String, i64) = transaction
+            .query_row(
+                "SELECT status_json,total_tasks FROM runs WHERE id=?1",
+                [result.run_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .ok_or(StorageError::RunNotFound(result.run_id))?;
+        let status: RunStatus = serde_json::from_str(&status_json)?;
+        if status != RunStatus::Running {
+            return Err(StorageError::InvalidData(
+                "task results can be saved only while the run is running".into(),
+            ));
+        }
         transaction.execute(
             "INSERT INTO task_results(
               run_id,task_id,category_json,outcome_json,score,failure_kind_json,
@@ -138,11 +159,6 @@ impl RunRepository {
                 &result.detail,
             ],
         )?;
-        let total_tasks: i64 = transaction.query_row(
-            "SELECT total_tasks FROM runs WHERE id=?1",
-            [result.run_id.to_string()],
-            |row| row.get(0),
-        )?;
         let checkpoint_count: i64 = transaction.query_row(
             "SELECT COUNT(*) FROM task_results WHERE run_id=?1",
             [result.run_id.to_string()],
@@ -153,12 +169,20 @@ impl RunRepository {
                 "checkpoint count exceeds the run total_tasks".into(),
             ));
         }
-        transaction.execute(
+        let changed = transaction.execute(
             "UPDATE runs SET completed_tasks=(
               SELECT COUNT(*) FROM task_results WHERE run_id=?1
-            ) WHERE id=?1",
-            [result.run_id.to_string()],
+            ) WHERE id=?1 AND status_json=?2",
+            params![
+                result.run_id.to_string(),
+                serde_json::to_string(&RunStatus::Running)?,
+            ],
         )?;
+        if changed != 1 {
+            return Err(StorageError::InvalidData(
+                "run changed while checkpoint evidence was being saved".into(),
+            ));
+        }
         transaction.commit()?;
         Ok(())
     }
@@ -171,18 +195,70 @@ impl RunRepository {
         if let Some(score) = score {
             validate_score_summary(score)?;
         }
-        let changed = self.connection.lock().execute(
-            "UPDATE runs SET status_json=?2, finished_at=?3, score_json=?4 WHERE id=?1",
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (status_json, total_tasks, completed_tasks): (String, i64, i64) = transaction
+            .query_row(
+                "SELECT status_json,total_tasks,completed_tasks FROM runs WHERE id=?1",
+                [run_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?
+            .ok_or(StorageError::RunNotFound(run_id))?;
+        let status: RunStatus = serde_json::from_str(&status_json)?;
+        let result_count: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM task_results WHERE run_id=?1",
+            [run_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if status != RunStatus::Running
+            || completed_tasks != total_tasks
+            || result_count != total_tasks
+        {
+            return Err(StorageError::InvalidData(
+                "complete_run requires a running run with complete task evidence".into(),
+            ));
+        }
+        if score.is_some_and(|value| i64::from(value.total_tasks) != total_tasks) {
+            return Err(StorageError::InvalidData(
+                "score total_tasks does not match the run total_tasks".into(),
+            ));
+        }
+        let total_tasks_u32 = u32::try_from(total_tasks)
+            .map_err(|_| StorageError::InvalidData("run total_tasks is out of range".into()))?;
+        let results = task_results_in_transaction(&transaction, run_id)?;
+        if results
+            .iter()
+            .any(|result| !has_coherent_task_evidence(result))
+        {
+            return Err(StorageError::InvalidData(
+                "complete_run requires coherent task evidence".into(),
+            ));
+        }
+        let canonical_score = summarize_scores(&results, total_tasks_u32);
+        if score != canonical_score.as_ref() {
+            return Err(StorageError::InvalidData(
+                "score does not match canonical task evidence".into(),
+            ));
+        }
+        let changed = transaction.execute(
+            "UPDATE runs
+             SET status_json=?2, finished_at=?3, score_json=?4
+             WHERE id=?1 AND status_json=?5 AND completed_tasks=total_tasks",
             params![
                 run_id.to_string(),
                 serde_json::to_string(&RunStatus::Completed)?,
                 Utc::now().to_rfc3339(),
                 score.map(serde_json::to_string).transpose()?,
+                serde_json::to_string(&RunStatus::Running)?,
             ],
         )?;
-        if changed == 0 {
-            return Err(StorageError::RunNotFound(run_id));
+        if changed != 1 {
+            return Err(StorageError::InvalidData(
+                "run changed while completion was being validated".into(),
+            ));
         }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -231,15 +307,11 @@ impl RunRepository {
         }
     }
 
-    pub fn set_run_status(&self, run_id: Uuid, status: RunStatus) -> Result<(), StorageError> {
-        let changed = self.connection.lock().execute(
-            "UPDATE runs SET status_json=?2 WHERE id=?1",
-            params![run_id.to_string(), serde_json::to_string(&status)?],
-        )?;
-        if changed == 0 {
-            return Err(StorageError::RunNotFound(run_id));
-        }
-        Ok(())
+    pub(crate) fn interrupt_running_after_checkpoint_cleanup(
+        &self,
+        run_id: Uuid,
+    ) -> Result<(), StorageError> {
+        self.finish_without_score(run_id, RunStatus::Interrupted)
     }
 
     pub fn get_run(&self, run_id: Uuid) -> Result<Option<RunRecord>, StorageError> {
@@ -518,6 +590,38 @@ impl RunRepository {
     where
         F: FnOnce(&RunRecord, &[TaskResult]) -> Result<(), StorageError>,
     {
+        self.resume_run_inner(run_id, expected_target, None, validate)
+    }
+
+    pub fn resume_run_retrying_exact_marker<F>(
+        &self,
+        run_id: Uuid,
+        expected_target: &TargetSelection,
+        expected_marker: &TaskResult,
+        validate: F,
+    ) -> Result<RunRecord, StorageError>
+    where
+        F: FnOnce(&RunRecord, &[TaskResult]) -> Result<(), StorageError>,
+    {
+        validate_retry_marker(expected_marker)?;
+        if expected_marker.run_id != run_id {
+            return Err(StorageError::InvalidData(
+                "retry marker belongs to a different run".into(),
+            ));
+        }
+        self.resume_run_inner(run_id, expected_target, Some(expected_marker), validate)
+    }
+
+    fn resume_run_inner<F>(
+        &self,
+        run_id: Uuid,
+        expected_target: &TargetSelection,
+        expected_marker: Option<&TaskResult>,
+        validate: F,
+    ) -> Result<RunRecord, StorageError>
+    where
+        F: FnOnce(&RunRecord, &[TaskResult]) -> Result<(), StorageError>,
+    {
         let mut connection = self.connection.lock();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut run = transaction
@@ -538,8 +642,53 @@ impl RunRepository {
                 "run target does not match the reviewed recovery target".into(),
             ));
         }
-        let results = task_results_in_transaction(&transaction, run_id)?;
-        validate(&run, &results)?;
+        let stored_results = task_results_in_transaction(&transaction, run_id)?;
+        let candidate_results = if let Some(expected_marker) = expected_marker {
+            let stored_count = u32::try_from(stored_results.len()).map_err(|_| {
+                StorageError::InvalidData("completed task count is too large".into())
+            })?;
+            if run.completed_tasks != stored_count {
+                return Err(StorageError::InvalidData(
+                    "persisted completed count does not match stored results".into(),
+                ));
+            }
+            let stored_marker = stored_results
+                .iter()
+                .find(|result| result.task_id == expected_marker.task_id)
+                .ok_or_else(|| {
+                    StorageError::InvalidData("retry marker changed before resume".into())
+                })?;
+            if stored_marker != expected_marker {
+                return Err(StorageError::InvalidData(
+                    "retry marker changed before resume".into(),
+                ));
+            }
+            stored_results
+                .iter()
+                .filter(|result| result.task_id != expected_marker.task_id)
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            stored_results
+        };
+        if expected_marker.is_some() {
+            run.completed_tasks = u32::try_from(candidate_results.len()).map_err(|_| {
+                StorageError::InvalidData("completed task count is too large".into())
+            })?;
+        }
+        validate(&run, &candidate_results)?;
+
+        if let Some(expected_marker) = expected_marker {
+            let changed = transaction.execute(
+                "DELETE FROM task_results WHERE run_id=?1 AND task_id=?2",
+                params![run_id.to_string(), &expected_marker.task_id],
+            )?;
+            if changed != 1 {
+                return Err(StorageError::InvalidData(
+                    "retry marker changed before resume".into(),
+                ));
+            }
+        }
 
         run.status = RunStatus::Running;
         run.finished_at = None;
@@ -547,12 +696,14 @@ impl RunRepository {
         run.environment.resumed = true;
         let changed = transaction.execute(
             "UPDATE runs
-             SET status_json=?2,finished_at=NULL,score_json=NULL,environment_json=?3
-             WHERE id=?1 AND status_json=?4",
+             SET status_json=?2,finished_at=NULL,score_json=NULL,environment_json=?3,
+                 completed_tasks=?4
+             WHERE id=?1 AND status_json=?5",
             params![
                 run_id.to_string(),
                 serde_json::to_string(&RunStatus::Running)?,
                 serde_json::to_string(&run.environment)?,
+                run.completed_tasks,
                 serde_json::to_string(&RunStatus::Interrupted)?,
             ],
         )?;
@@ -852,6 +1003,31 @@ fn validate_task_result(result: &TaskResult) -> Result<(), StorageError> {
     {
         return Err(StorageError::InvalidData(
             "answer path must be relative".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_retry_marker(result: &TaskResult) -> Result<(), StorageError> {
+    validate_task_result(result)?;
+    if result.outcome != TaskOutcome::Invalid
+        || result.score.is_some()
+        || !matches!(
+            result.failure_kind,
+            Some(
+                FailureKind::CliMissing
+                    | FailureKind::RuntimeMissing
+                    | FailureKind::AuthExpired
+                    | FailureKind::QuotaExhausted
+                    | FailureKind::Network
+                    | FailureKind::AppInterrupted
+                    | FailureKind::InfrastructureTimeout
+                    | FailureKind::VerifierError
+            )
+        )
+    {
+        return Err(StorageError::InvalidData(
+            "retry resume requires invalid infrastructure evidence".into(),
         ));
     }
     Ok(())

@@ -9,9 +9,9 @@ mod data_management_tests;
 use app_state::AppState;
 use commands::{
     cancel_run, delete_raw_artifacts, delete_run, delete_target_history, export_full_backup,
-    export_public_report, get_bootstrap, get_data_settings, get_run_detail, list_runs,
-    next_manual_step, resume_cli_run, resume_manual_run, set_raw_retention, start_cli_run,
-    start_manual_run, submit_manual_answer,
+    export_public_report, get_bootstrap, get_data_settings, get_run_detail, interrupt_manual_run,
+    list_runs, next_manual_step, resume_cli_run, resume_manual_run, set_raw_retention,
+    start_cli_run, start_manual_run, submit_manual_answer,
 };
 use tauri::Manager;
 
@@ -26,6 +26,7 @@ macro_rules! command_inventory {
             resume_manual_run,
             resume_cli_run,
             cancel_run,
+            interrupt_manual_run,
             list_runs,
             get_run_detail,
             export_public_report,
@@ -87,6 +88,7 @@ mod tests {
                 "resume_manual_run",
                 "resume_cli_run",
                 "cancel_run",
+                "interrupt_manual_run",
                 "list_runs",
                 "get_run_detail",
                 "export_public_report",

@@ -1,6 +1,6 @@
 use crate::{
     Category, FailureKind, RunRecord, RunStatus, ScoreSummary, TargetKind, TaskOutcome, TaskResult,
-    summarize_scores,
+    grading::has_coherent_task_evidence, summarize_scores,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use regex::Regex;
@@ -526,49 +526,6 @@ fn validate_completed_evidence(run: &RunRecord, tasks: &[TaskResult]) -> Result<
         return Err(ReportError::InvalidData("score"));
     }
     Ok(total_duration_ms)
-}
-
-fn has_coherent_task_evidence(task: &TaskResult) -> bool {
-    let scoreable = scoreable_result_score(task).is_some();
-    match task.outcome {
-        TaskOutcome::Passed => scoreable,
-        TaskOutcome::Failed => scoreable || is_infrastructure_failure(task.failure_kind),
-        TaskOutcome::Invalid | TaskOutcome::Cancelled => !matches!(
-            task.failure_kind,
-            Some(FailureKind::WrongAnswer | FailureKind::AgentBudgetExceeded)
-        ),
-    }
-}
-
-fn scoreable_result_score(task: &TaskResult) -> Option<f64> {
-    let score = task.score?;
-    if !valid_score(score) {
-        return None;
-    }
-    match task.outcome {
-        TaskOutcome::Passed if task.failure_kind.is_none() && score == 100.0 => Some(score),
-        TaskOutcome::Failed if score < 100.0 && !is_infrastructure_failure(task.failure_kind) => {
-            Some(score)
-        }
-        _ => None,
-    }
-}
-
-fn is_infrastructure_failure(failure: Option<FailureKind>) -> bool {
-    matches!(
-        failure,
-        Some(
-            FailureKind::CliMissing
-                | FailureKind::RuntimeMissing
-                | FailureKind::AuthExpired
-                | FailureKind::QuotaExhausted
-                | FailureKind::Network
-                | FailureKind::UserCancelled
-                | FailureKind::AppInterrupted
-                | FailureKind::InfrastructureTimeout
-                | FailureKind::VerifierError
-        )
-    )
 }
 
 fn score_summaries_equal(stored: Option<&ScoreSummary>, recomputed: Option<&ScoreSummary>) -> bool {

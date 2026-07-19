@@ -121,6 +121,7 @@ function fakeBackend(overrides: Partial<Backend> = {}): Backend {
     }),
     resumeCliRun: vi.fn(async () => makeRun()),
     cancelRun: vi.fn(async () => false),
+    interruptManualRun: vi.fn(async () => false),
     listRuns: vi.fn(async () => []),
     getRunDetail: vi.fn(async () => detail(makeRun())),
     exportPublicReport: vi.fn(async () => null),

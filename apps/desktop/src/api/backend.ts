@@ -177,6 +177,7 @@ export interface Backend {
   resumeManualRun(input: ResumeRunInput): Promise<RunRecord>;
   resumeCliRun(input: ResumeRunInput): Promise<RunRecord>;
   cancelRun(runId: string): Promise<boolean>;
+  interruptManualRun(runId: string): Promise<boolean>;
   listRuns(): Promise<RunRecord[]>;
   getRunDetail(runId: string): Promise<RunDetail | null>;
   exportPublicReport(runId: string): Promise<string | null>;

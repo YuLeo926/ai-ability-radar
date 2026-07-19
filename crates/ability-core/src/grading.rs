@@ -103,6 +103,18 @@ fn scoreable_result_score(result: &TaskResult) -> Option<f64> {
     }
 }
 
+pub(crate) fn has_coherent_task_evidence(result: &TaskResult) -> bool {
+    let scoreable = scoreable_result_score(result).is_some();
+    match result.outcome {
+        TaskOutcome::Passed => scoreable,
+        TaskOutcome::Failed => scoreable || is_infrastructure_failure(result.failure_kind),
+        TaskOutcome::Invalid | TaskOutcome::Cancelled => !matches!(
+            result.failure_kind,
+            Some(FailureKind::WrongAnswer | FailureKind::AgentBudgetExceeded)
+        ),
+    }
+}
+
 fn is_infrastructure_failure(failure_kind: Option<FailureKind>) -> bool {
     matches!(
         failure_kind,

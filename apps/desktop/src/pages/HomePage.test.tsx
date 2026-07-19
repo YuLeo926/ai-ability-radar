@@ -67,6 +67,7 @@ function backendFor(load: () => Promise<Bootstrap>): Backend {
       throw new Error("unused fake resumeCliRun");
     },
     cancelRun: async () => false,
+    interruptManualRun: async () => false,
     listRuns: async () => [],
     getRunDetail: async () => null,
     exportPublicReport: async () => null,

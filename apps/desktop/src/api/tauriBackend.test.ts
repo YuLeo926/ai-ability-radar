@@ -16,7 +16,7 @@ beforeEach(() => {
   bridge.listen.mockReset();
 });
 
-test("uses exactly the seventeen reviewed commands and narrow camelCase payloads", async () => {
+test("uses exactly the eighteen reviewed commands and narrow camelCase payloads", async () => {
   bridge.invoke.mockResolvedValue(undefined);
   const manualInput: StartRunInput = {
     target: {
@@ -62,6 +62,7 @@ test("uses exactly the seventeen reviewed commands and narrow camelCase payloads
     },
   });
   await tauriBackend.cancelRun("run-cli");
+  await tauriBackend.interruptManualRun("run-manual");
   await tauriBackend.listRuns();
   await tauriBackend.getRunDetail("run-result");
   await tauriBackend.exportPublicReport("run-result");
@@ -110,6 +111,7 @@ test("uses exactly the seventeen reviewed commands and narrow camelCase payloads
       },
     ],
     ["cancel_run", { runId: "run-cli" }],
+    ["interrupt_manual_run", { runId: "run-manual" }],
     ["list_runs"],
     ["get_run_detail", { runId: "run-result" }],
     ["export_public_report", { input: { runId: "run-result" } }],

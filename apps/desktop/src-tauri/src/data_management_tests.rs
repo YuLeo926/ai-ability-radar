@@ -1,8 +1,8 @@
 use crate::app_state::RunOperationRegistry;
 use crate::data_management::{create_full_backup, prune_expired_artifacts};
 use ability_core::{
-    ArtifactStore, Category, EnvironmentFingerprint, RunMode, RunRecord, RunRepository, RunStatus,
-    TargetKind, TargetSelection, TaskOutcome, TaskResult,
+    summarize_scores, ArtifactStore, Category, EnvironmentFingerprint, RunMode, RunRecord,
+    RunRepository, RunStatus, TargetKind, TargetSelection, TaskOutcome, TaskResult,
 };
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::Connection;
@@ -19,7 +19,7 @@ fn now() -> DateTime<Utc> {
         .with_timezone(&Utc)
 }
 
-fn run(status: RunStatus, target: TargetKind, finished_at: Option<DateTime<Utc>>) -> RunRecord {
+fn run(target: TargetKind) -> RunRecord {
     let mut run = RunRecord::new(
         TargetSelection {
             kind: target,
@@ -43,8 +43,7 @@ fn run(status: RunStatus, target: TargetKind, finished_at: Option<DateTime<Utc>>
             resumed: false,
         },
     );
-    run.status = status;
-    run.finished_at = finished_at;
+    run.status = RunStatus::Running;
     run
 }
 
@@ -62,27 +61,53 @@ fn result(run_id: Uuid) -> TaskResult {
     }
 }
 
+fn persist_terminal(repository: &RunRepository, run: RunRecord, status: RunStatus) -> RunRecord {
+    repository.insert_run(&run).unwrap();
+    let evidence = result(run.id);
+    repository.save_task_result(&evidence).unwrap();
+    match status {
+        RunStatus::Completed => {
+            let score = summarize_scores(&[evidence], 1).unwrap();
+            repository.complete_run(run.id, Some(&score)).unwrap();
+        }
+        RunStatus::Interrupted | RunStatus::Cancelled => {
+            repository.finish_without_score(run.id, status).unwrap();
+        }
+        _ => panic!("terminal fixture requires a terminal status"),
+    }
+    repository.get_run(run.id).unwrap().unwrap()
+}
+
+fn set_fixture_finished_at(database: &std::path::Path, run: &RunRecord, value: DateTime<Utc>) {
+    // Retention tests need a deterministic clock; the run reached its terminal
+    // state through the production lifecycle before only its timestamp is shifted.
+    Connection::open(database)
+        .unwrap()
+        .execute(
+            "UPDATE runs SET finished_at=?2 WHERE id=?1",
+            rusqlite::params![run.id.to_string(), value.to_rfc3339()],
+        )
+        .unwrap();
+}
+
 #[test]
 fn pruning_deletes_only_expired_terminal_raw_trees_and_preserves_evidence() {
     let directory = tempdir().unwrap();
-    let repository = RunRepository::open(&directory.path().join("ability.db")).unwrap();
+    let database = directory.path().join("ability.db");
+    let repository = RunRepository::open(&database).unwrap();
     repository.set_raw_retention_days(Some(7)).unwrap();
-    let expired = run(
+    let expired = persist_terminal(
+        &repository,
+        run(TargetKind::ChatGptClient),
         RunStatus::Completed,
-        TargetKind::ChatGptClient,
-        Some(now() - Duration::days(7)),
     );
-    let interrupted = run(
+    let interrupted = persist_terminal(
+        &repository,
+        run(TargetKind::ChatGptClient),
         RunStatus::Interrupted,
-        TargetKind::ChatGptClient,
-        Some(now() - Duration::days(30)),
     );
-    repository.insert_run(&expired).unwrap();
-    repository.insert_run(&interrupted).unwrap();
-    repository.save_task_result(&result(expired.id)).unwrap();
-    repository
-        .save_task_result(&result(interrupted.id))
-        .unwrap();
+    set_fixture_finished_at(&database, &expired, now() - Duration::days(7));
+    set_fixture_finished_at(&database, &interrupted, now() - Duration::days(30));
     let artifact_root = directory.path().join("artifacts");
     for id in [expired.id, interrupted.id] {
         let tree = artifact_root.join("runs").join(id.to_string());
@@ -114,20 +139,21 @@ fn pruning_deletes_only_expired_terminal_raw_trees_and_preserves_evidence() {
 #[test]
 fn pruning_claims_the_complete_candidate_set_before_artifact_access() {
     let directory = tempdir().unwrap();
-    let repository = RunRepository::open(&directory.path().join("ability.db")).unwrap();
+    let database = directory.path().join("ability.db");
+    let repository = RunRepository::open(&database).unwrap();
     repository.set_raw_retention_days(Some(7)).unwrap();
-    let first = run(
+    let first = persist_terminal(
+        &repository,
+        run(TargetKind::ChatGptClient),
         RunStatus::Completed,
-        TargetKind::ChatGptClient,
-        Some(now() - Duration::days(8)),
     );
-    let second = run(
+    let second = persist_terminal(
+        &repository,
+        run(TargetKind::ChatGptClient),
         RunStatus::Completed,
-        TargetKind::ChatGptClient,
-        Some(now() - Duration::days(9)),
     );
-    repository.insert_run(&first).unwrap();
-    repository.insert_run(&second).unwrap();
+    set_fixture_finished_at(&database, &first, now() - Duration::days(8));
+    set_fixture_finished_at(&database, &second, now() - Duration::days(9));
     let artifact_root = directory.path().join("artifacts");
     for id in [first.id, second.id] {
         let tree = artifact_root.join("runs").join(id.to_string());
@@ -154,9 +180,11 @@ fn pruning_claims_the_complete_candidate_set_before_artifact_access() {
 fn full_backup_has_exact_unique_safe_entries_manifest_and_readable_snapshot() {
     let directory = tempdir().unwrap();
     let repository = RunRepository::open(&directory.path().join("ability.db")).unwrap();
-    let manual = run(RunStatus::Completed, TargetKind::ChatGptClient, Some(now()));
-    repository.insert_run(&manual).unwrap();
-    repository.save_task_result(&result(manual.id)).unwrap();
+    let manual = persist_terminal(
+        &repository,
+        run(TargetKind::ChatGptClient),
+        RunStatus::Completed,
+    );
     let artifact_root = directory.path().join("artifacts");
     let tree = artifact_root.join("runs").join(manual.id.to_string());
     fs::create_dir_all(&tree).unwrap();

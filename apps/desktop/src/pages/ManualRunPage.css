@@ -167,6 +167,21 @@
   color: #174c43;
 }
 
+.run-page button.danger {
+  border-color: #9e3b33;
+  background: #a9443b;
+}
+
+.run-page button.danger:hover:not(:disabled) {
+  background: #8a352f;
+}
+
+.run-page .button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
 .run-page .form-error {
   max-width: 66ch;
   color: #982f28;

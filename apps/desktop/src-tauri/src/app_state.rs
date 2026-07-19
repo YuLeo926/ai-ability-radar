@@ -446,8 +446,8 @@ mod tests {
         ProcessEnvironment, ProcessError, ProcessOutput, ProcessRunner, ProcessSpec,
     };
     use ability_core::{
-        EnvironmentFingerprint, PackLoader, RunMode, RunRecord, RunRepository, RunStatus,
-        TargetKind, TargetSelection,
+        summarize_scores, Category, EnvironmentFingerprint, PackLoader, RunMode, RunRecord,
+        RunRepository, RunStatus, TargetKind, TargetSelection, TaskOutcome, TaskResult,
     };
     use async_trait::async_trait;
     use std::collections::BTreeMap;
@@ -745,9 +745,34 @@ mod tests {
                 resumed: false,
             },
         );
-        expired.status = RunStatus::Completed;
-        expired.finished_at = Some(chrono::Utc::now() - chrono::Duration::days(8));
+        expired.status = RunStatus::Running;
         repository.insert_run(&expired).unwrap();
+        let evidence = TaskResult {
+            run_id: expired.id,
+            task_id: "retention-fixture".into(),
+            category: Category::Logic,
+            outcome: TaskOutcome::Passed,
+            score: Some(100.0),
+            failure_kind: None,
+            duration_ms: 1,
+            answer_rel_path: None,
+            detail: "coherent retention fixture".into(),
+        };
+        repository.save_task_result(&evidence).unwrap();
+        let score = summarize_scores(&[evidence], 1).unwrap();
+        repository.complete_run(expired.id, Some(&score)).unwrap();
+        // Shift only the lifecycle-produced terminal timestamp to exercise the
+        // deterministic startup-retention boundary.
+        rusqlite::Connection::open(&database)
+            .unwrap()
+            .execute(
+                "UPDATE runs SET finished_at=?2 WHERE id=?1",
+                rusqlite::params![
+                    expired.id.to_string(),
+                    (chrono::Utc::now() - chrono::Duration::days(8)).to_rfc3339()
+                ],
+            )
+            .unwrap();
         let hostile = app_data
             .path()
             .join("artifacts/runs")

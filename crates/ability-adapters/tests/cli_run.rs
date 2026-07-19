@@ -939,7 +939,7 @@ async fn budget_exhaustion_is_scored_zero_and_later_tasks_continue() {
 }
 
 #[tokio::test]
-async fn infrastructure_invalid_result_short_circuits_but_run_completes() {
+async fn infrastructure_invalid_result_short_circuits_and_interrupts_for_retry() {
     let fixture = Fixture::new(2);
     let run = fixture.prepare();
     let adapter = Arc::new(FakeAdapter::new(
@@ -965,7 +965,8 @@ async fn infrastructure_invalid_result_short_circuits_but_run_completes() {
     assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
     assert_eq!(verifier.calls.load(Ordering::SeqCst), 0);
     let stored = fixture.repository.get_run(run.id).unwrap().unwrap();
-    assert_eq!(stored.status, RunStatus::Completed);
+    assert_eq!(stored.status, RunStatus::Interrupted);
+    assert_eq!(stored.completed_tasks, 1);
     assert_eq!(stored.score, None);
     let results = fixture.repository.get_task_results(run.id).unwrap();
     assert_eq!(results.len(), 1);
@@ -1013,12 +1014,182 @@ async fn verifier_infrastructure_invalid_result_also_stops_later_tasks() {
     assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         fixture.repository.get_run(run.id).unwrap().unwrap().status,
-        RunStatus::Completed
+        RunStatus::Interrupted
     );
     assert_eq!(
         fixture.repository.get_task_results(run.id).unwrap()[0].outcome,
         TaskOutcome::Invalid
     );
+}
+
+#[tokio::test]
+async fn cli_resume_retries_the_invalid_task_before_continuing_the_pack() {
+    let fixture = Fixture::new(2);
+    let run = fixture.prepare();
+    let first_adapter = Arc::new(FakeAdapter::new(
+        TargetKind::CodexCli,
+        [AdapterStep::Infrastructure(FailureKind::AppInterrupted)],
+    ));
+    let (first_sender, _first_receiver) = mpsc::unbounded_channel();
+    fixture
+        .service
+        .execute(
+            run.id,
+            fixture.pack.clone(),
+            first_adapter,
+            Arc::new(FakeVerifier::new([])),
+            CancellationToken::new(),
+            first_sender,
+        )
+        .await
+        .unwrap();
+
+    let resumed = fixture
+        .service
+        .resume(
+            run.id,
+            run.target.clone(),
+            &fixture.pack,
+            environment(&fixture.pack),
+        )
+        .unwrap();
+    assert_eq!(resumed.status, RunStatus::Running);
+    assert_eq!(resumed.completed_tasks, 0);
+    assert!(
+        fixture
+            .repository
+            .get_task_results(run.id)
+            .unwrap()
+            .is_empty()
+    );
+
+    let retry_adapter = Arc::new(FakeAdapter::new(
+        TargetKind::CodexCli,
+        [
+            AdapterStep::Complete { duration_ms: 5 },
+            AdapterStep::Complete { duration_ms: 6 },
+        ],
+    ));
+    let retry_verifier = Arc::new(FakeVerifier::new([
+        VerifierStep::Grade(passed_grade(5)),
+        VerifierStep::Grade(passed_grade(6)),
+    ]));
+    let (retry_sender, retry_receiver) = mpsc::unbounded_channel();
+    fixture
+        .service
+        .execute(
+            run.id,
+            fixture.pack.clone(),
+            retry_adapter.clone(),
+            retry_verifier,
+            CancellationToken::new(),
+            retry_sender,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(retry_adapter.calls.load(Ordering::SeqCst), 2);
+    let stored = fixture.repository.get_run(run.id).unwrap().unwrap();
+    assert_eq!(stored.status, RunStatus::Completed);
+    assert_eq!(stored.completed_tasks, 2);
+    assert_eq!(
+        fixture
+            .repository
+            .get_task_results(run.id)
+            .unwrap()
+            .into_iter()
+            .map(|result| (result.task_id, result.outcome))
+            .collect::<Vec<_>>(),
+        vec![
+            ("task-1".into(), TaskOutcome::Passed),
+            ("task-2".into(), TaskOutcome::Passed),
+        ]
+    );
+    assert_eq!(
+        collect_events(retry_receiver)
+            .into_iter()
+            .map(|event| (event.kind, event.task_id, event.completed_tasks))
+            .collect::<Vec<_>>(),
+        vec![
+            (RunEventKind::TaskStarted, Some("task-1".into()), 0),
+            (RunEventKind::TaskFinished, Some("task-1".into()), 1),
+            (RunEventKind::TaskStarted, Some("task-2".into()), 1),
+            (RunEventKind::TaskFinished, Some("task-2".into()), 2),
+            (RunEventKind::RunFinished, None, 2),
+        ]
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn cli_retry_resume_rolls_back_marker_when_hostile_recovery_artifact_is_rejected() {
+    use std::process::Command;
+
+    let fixture = Fixture::new(2);
+    let run = fixture.prepare();
+    let adapter = Arc::new(FakeAdapter::new(
+        TargetKind::CodexCli,
+        [AdapterStep::Infrastructure(FailureKind::AppInterrupted)],
+    ));
+    let (sender, _receiver) = mpsc::unbounded_channel();
+    fixture
+        .service
+        .execute(
+            run.id,
+            fixture.pack.clone(),
+            adapter,
+            Arc::new(FakeVerifier::new([])),
+            CancellationToken::new(),
+            sender,
+        )
+        .await
+        .unwrap();
+    let before_run = fixture.repository.get_run(run.id).unwrap().unwrap();
+    let before_results = fixture.repository.get_task_results(run.id).unwrap();
+    assert_eq!(before_results.len(), 1);
+    assert_eq!(before_results[0].outcome, TaskOutcome::Invalid);
+
+    let outside = tempdir().unwrap();
+    let sentinel = outside.path().join("sentinel.txt");
+    fs::write(&sentinel, "must remain untouched").unwrap();
+    let run_root = fixture.artifact_root.join("runs").join(run.id.to_string());
+    fs::create_dir_all(&run_root).unwrap();
+    let hostile = run_root.join("hostile-reparse");
+    let status = Command::new("cmd")
+        .args([
+            "/C",
+            "mklink",
+            "/J",
+            hostile.to_str().unwrap(),
+            outside.path().to_str().unwrap(),
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    assert!(matches!(
+        fixture.service.resume(
+            run.id,
+            run.target.clone(),
+            &fixture.pack,
+            environment(&fixture.pack),
+        ),
+        Err(CliRunError::NotResumable)
+    ));
+
+    assert_eq!(
+        fixture.repository.get_run(run.id).unwrap().unwrap(),
+        before_run
+    );
+    assert_eq!(
+        fixture.repository.get_task_results(run.id).unwrap(),
+        before_results
+    );
+    assert_eq!(
+        fs::read_to_string(&sentinel).unwrap(),
+        "must remain untouched"
+    );
+    assert!(hostile.exists());
 }
 
 #[tokio::test]

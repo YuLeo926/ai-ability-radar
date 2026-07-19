@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 #[cfg(windows)]
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, RtlNtStatusToDosError};
 #[cfg(windows)]
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -163,9 +163,7 @@ impl ProcessRunner for TokioProcessRunner {
         };
 
         let (events, mut event_receiver) = mpsc::unbounded_channel();
-        let _stdout_capture =
-            tokio::spawn(capture_stream(stdout, OutputStream::Stdout, events.clone()));
-        let _stderr_capture = tokio::spawn(capture_stream(stderr, OutputStream::Stderr, events));
+        let captures = CaptureTasks::spawn(stdout, stderr, events);
         let timeout = tokio::time::sleep(spec.timeout);
         tokio::pin!(timeout);
         let mut job_poll = tokio::time::interval(JOB_POLL_INTERVAL);
@@ -180,9 +178,10 @@ impl ProcessRunner for TokioProcessRunner {
                 status = child.wait(), if exit_code.is_none() => {
                     exit_code = match status {
                         Ok(status) => Some(status.code()),
-                        Err(error) => return finish_with_error(
+                        Err(error) => return finish_with_capture_error(
                             &mut child,
                             &mut supervisor,
+                            captures,
                             ProcessError::Wait(error),
                         ).await,
                     };
@@ -191,26 +190,30 @@ impl ProcessRunner for TokioProcessRunner {
                     match event {
                         Some(CaptureEvent::Completed(OutputStream::Stdout, output)) => stdout = Some(output),
                         Some(CaptureEvent::Completed(OutputStream::Stderr, output)) => stderr = Some(output),
-                        Some(CaptureEvent::LimitExceeded(stream)) => return finish_with_error(
+                        Some(CaptureEvent::LimitExceeded(stream)) => return finish_with_capture_error(
                             &mut child,
                             &mut supervisor,
+                            captures,
                             ProcessError::OutputLimit { stream },
                         ).await,
-                        Some(CaptureEvent::Failed) | None => return finish_with_error(
+                        Some(CaptureEvent::Failed) | None => return finish_with_capture_error(
                             &mut child,
                             &mut supervisor,
+                            captures,
                             ProcessError::CaptureFailed,
                         ).await,
                     }
                 }
-                _ = cancellation.cancelled() => return finish_with_error(
+                _ = cancellation.cancelled() => return finish_with_capture_error(
                     &mut child,
                     &mut supervisor,
+                    captures,
                     ProcessError::Cancelled,
                 ).await,
-                _ = &mut timeout => return finish_with_error(
+                _ = &mut timeout => return finish_with_capture_error(
                     &mut child,
                     &mut supervisor,
+                    captures,
                     ProcessError::TimedOut,
                 ).await,
                 _ = job_poll.tick(), if exit_code.is_some() && stdout.is_some() && stderr.is_some() => {}
@@ -219,6 +222,7 @@ impl ProcessRunner for TokioProcessRunner {
             if exit_code.is_some() && stdout.is_some() && stderr.is_some() {
                 match supervisor.is_empty() {
                     Ok(true) => {
+                        captures.join().await?;
                         return Ok(ProcessOutput {
                             exit_code: exit_code.take().expect("checked above"),
                             stdout: stdout.take().expect("checked above"),
@@ -228,9 +232,10 @@ impl ProcessRunner for TokioProcessRunner {
                     }
                     Ok(false) => {}
                     Err(error) => {
-                        return finish_with_error(
+                        return finish_with_capture_error(
                             &mut child,
                             &mut supervisor,
+                            captures,
                             ProcessError::Supervision(error),
                         )
                         .await;
@@ -269,6 +274,38 @@ enum CaptureEvent {
     Completed(OutputStream, String),
     LimitExceeded(OutputStream),
     Failed,
+}
+
+struct CaptureTasks {
+    stdout: tokio::task::JoinHandle<()>,
+    stderr: tokio::task::JoinHandle<()>,
+}
+
+impl CaptureTasks {
+    fn spawn<O, E>(stdout: O, stderr: E, events: mpsc::UnboundedSender<CaptureEvent>) -> Self
+    where
+        O: AsyncRead + Unpin + Send + 'static,
+        E: AsyncRead + Unpin + Send + 'static,
+    {
+        Self {
+            stdout: tokio::spawn(capture_stream(stdout, OutputStream::Stdout, events.clone())),
+            stderr: tokio::spawn(capture_stream(stderr, OutputStream::Stderr, events)),
+        }
+    }
+
+    async fn join(self) -> Result<(), ProcessError> {
+        let (stdout, stderr) = tokio::join!(self.stdout, self.stderr);
+        if stdout.is_err() || stderr.is_err() {
+            return Err(ProcessError::CaptureFailed);
+        }
+        Ok(())
+    }
+
+    async fn abort_and_join(self) {
+        self.stdout.abort();
+        self.stderr.abort();
+        let _ = tokio::join!(self.stdout, self.stderr);
+    }
 }
 
 async fn capture_stream<R>(
@@ -310,6 +347,20 @@ async fn finish_with_error(
     error: ProcessError,
 ) -> Result<ProcessOutput, ProcessError> {
     match supervisor.terminate_and_confirm(child).await {
+        Ok(()) => Err(error),
+        Err(()) => Err(ProcessError::TerminationFailed),
+    }
+}
+
+async fn finish_with_capture_error(
+    child: &mut Child,
+    supervisor: &mut ProcessSupervisor,
+    captures: CaptureTasks,
+    error: ProcessError,
+) -> Result<ProcessOutput, ProcessError> {
+    let terminated = supervisor.terminate_and_confirm(child).await;
+    captures.abort_and_join().await;
+    match terminated {
         Ok(()) => Err(error),
         Err(()) => Err(ProcessError::TerminationFailed),
     }
@@ -417,10 +468,7 @@ impl WindowsJob {
             .raw_handle()
             .ok_or_else(|| std::io::Error::other("missing process handle"))?;
         let status = unsafe { NtResumeProcess(process as HANDLE) };
-        if status != 0 {
-            return Err(std::io::Error::from_raw_os_error(status));
-        }
-        Ok(())
+        ntstatus_to_io_result(status)
     }
 
     fn terminate(&self) -> std::io::Result<()> {
@@ -470,6 +518,16 @@ unsafe extern "system" {
     fn NtResumeProcess(process_handle: HANDLE) -> i32;
 }
 
+#[cfg(windows)]
+fn ntstatus_to_io_result(status: i32) -> std::io::Result<()> {
+    if status >= 0 {
+        return Ok(());
+    }
+    // SAFETY: RtlNtStatusToDosError is a pure conversion for the supplied NTSTATUS.
+    let win32_error = unsafe { RtlNtStatusToDosError(status) };
+    Err(std::io::Error::from_raw_os_error(win32_error as i32))
+}
+
 #[cfg(not(windows))]
 struct ProcessSupervisor;
 
@@ -501,4 +559,129 @@ impl ProcessSupervisor {
 
 fn elapsed_ms(started: Instant) -> Result<u64, ProcessError> {
     u64::try_from(started.elapsed().as_millis()).map_err(|_| ProcessError::DurationOverflow)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll};
+    use tokio::io::ReadBuf;
+
+    enum ReaderMode {
+        Pending,
+        Eof,
+        Failed,
+        Bytes { remaining: usize },
+    }
+
+    struct TrackedReader {
+        drops: Arc<AtomicUsize>,
+        mode: ReaderMode,
+    }
+
+    impl Drop for TrackedReader {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl AsyncRead for TrackedReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+            buffer: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            match &mut self.mode {
+                ReaderMode::Pending => Poll::Pending,
+                ReaderMode::Eof => Poll::Ready(Ok(())),
+                ReaderMode::Failed => {
+                    Poll::Ready(Err(io::Error::other("simulated capture failure")))
+                }
+                ReaderMode::Bytes { remaining } => {
+                    let read = (*remaining).min(buffer.remaining());
+                    let bytes = vec![b'x'; read];
+                    buffer.put_slice(&bytes);
+                    *remaining -= read;
+                    Poll::Ready(Ok(()))
+                }
+            }
+        }
+    }
+
+    fn reader(drops: &Arc<AtomicUsize>, mode: ReaderMode) -> TrackedReader {
+        TrackedReader {
+            drops: drops.clone(),
+            mode,
+        }
+    }
+
+    #[tokio::test]
+    async fn normal_capture_join_drops_both_readers() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let (events, _receiver) = mpsc::unbounded_channel();
+        let captures = CaptureTasks::spawn(
+            reader(&drops, ReaderMode::Eof),
+            reader(&drops, ReaderMode::Eof),
+            events,
+        );
+
+        captures.join().await.unwrap();
+
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn cancellation_or_timeout_abort_drops_both_pending_readers() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let (events, _receiver) = mpsc::unbounded_channel();
+        let captures = CaptureTasks::spawn(
+            reader(&drops, ReaderMode::Pending),
+            reader(&drops, ReaderMode::Pending),
+            events,
+        );
+
+        captures.abort_and_join().await;
+
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn capture_failure_and_output_limit_abort_drop_every_reader() {
+        for first in [
+            ReaderMode::Failed,
+            ReaderMode::Bytes {
+                remaining: MAX_CAPTURE_BYTES_PER_STREAM + 1,
+            },
+        ] {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let (events, mut receiver) = mpsc::unbounded_channel();
+            let captures = CaptureTasks::spawn(
+                reader(&drops, first),
+                reader(&drops, ReaderMode::Pending),
+                events,
+            );
+
+            let event = receiver.recv().await.unwrap();
+            assert!(matches!(
+                event,
+                CaptureEvent::Failed | CaptureEvent::LimitExceeded(OutputStream::Stdout)
+            ));
+            captures.abort_and_join().await;
+            assert_eq!(drops.load(Ordering::SeqCst), 2);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ntstatus_success_and_error_conversion_follow_windows_semantics() {
+        assert!(ntstatus_to_io_result(0).is_ok());
+        assert!(ntstatus_to_io_result(0x4000_0000).is_ok());
+
+        let error = ntstatus_to_io_result(0xC000_0022_u32 as i32).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(5));
+    }
 }

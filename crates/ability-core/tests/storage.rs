@@ -1,6 +1,6 @@
 use ability_core::{
     Category, EnvironmentFingerprint, RunMode, RunRecord, RunRepository, RunStatus, ScoreSummary,
-    StorageError, TargetKind, TargetSelection, TaskOutcome, TaskResult,
+    StorageError, TargetKind, TargetSelection, TaskOutcome, TaskResult, summarize_scores,
 };
 use chrono::{Duration, Utc};
 use std::collections::BTreeMap;
@@ -8,7 +8,7 @@ use tempfile::tempdir;
 use uuid::Uuid;
 
 fn sample_run() -> RunRecord {
-    RunRecord::new(
+    let mut run = RunRecord::new(
         TargetSelection {
             kind: TargetKind::ChatGptClient,
             reported_model: "user-selected".into(),
@@ -30,7 +30,9 @@ fn sample_run() -> RunRecord {
             scoring_rule_version: "ability-v1".into(),
             resumed: false,
         },
-    )
+    );
+    run.status = RunStatus::Running;
+    run
 }
 
 fn passing_result(run_id: Uuid, task_id: &str) -> TaskResult {
@@ -45,6 +47,48 @@ fn passing_result(run_id: Uuid, task_id: &str) -> TaskResult {
         answer_rel_path: Some("runs/a/answer.txt".into()),
         detail: "exact_json:pass".into(),
     }
+}
+
+fn invalid_infrastructure_result(run_id: Uuid, task_id: &str) -> TaskResult {
+    TaskResult {
+        run_id,
+        task_id: task_id.into(),
+        category: Category::InstructionFollowing,
+        outcome: TaskOutcome::Invalid,
+        score: None,
+        failure_kind: Some(ability_core::FailureKind::Network),
+        duration_ms: 250,
+        answer_rel_path: None,
+        detail: "network unavailable".into(),
+    }
+}
+
+fn complete_one_result_run(repository: &RunRepository, mut run: RunRecord) -> RunRecord {
+    run.status = RunStatus::Running;
+    run.total_tasks = 1;
+    run.completed_tasks = 0;
+    run.finished_at = None;
+    run.score = None;
+    repository.insert_run(&run).unwrap();
+    let result = passing_result(run.id, "instruction-1");
+    repository.save_task_result(&result).unwrap();
+    let score = summarize_scores(&[result], 1).unwrap();
+    repository.complete_run(run.id, Some(&score)).unwrap();
+    repository.get_run(run.id).unwrap().unwrap()
+}
+
+fn finish_run_without_score(
+    repository: &RunRepository,
+    mut run: RunRecord,
+    status: RunStatus,
+) -> RunRecord {
+    run.status = RunStatus::Running;
+    run.completed_tasks = 0;
+    run.finished_at = None;
+    run.score = None;
+    repository.insert_run(&run).unwrap();
+    repository.finish_without_score(run.id, status).unwrap();
+    repository.get_run(run.id).unwrap().unwrap()
 }
 
 #[test]
@@ -73,9 +117,10 @@ fn startup_marks_only_abandoned_running_runs_interrupted() {
     let repo = RunRepository::open(&dir.path().join("ability.db")).unwrap();
     let mut running = sample_run();
     running.status = RunStatus::Running;
-    let completed = sample_run();
+    let mut created = sample_run();
+    created.status = RunStatus::Created;
     repo.insert_run(&running).unwrap();
-    repo.insert_run(&completed).unwrap();
+    repo.insert_run(&created).unwrap();
 
     assert_eq!(repo.mark_running_as_interrupted().unwrap(), 1);
     assert_eq!(
@@ -83,21 +128,9 @@ fn startup_marks_only_abandoned_running_runs_interrupted() {
         RunStatus::Interrupted
     );
     assert_eq!(
-        repo.get_run(completed.id).unwrap().unwrap().status,
+        repo.get_run(created.id).unwrap().unwrap().status,
         RunStatus::Created
     );
-}
-
-#[test]
-fn status_updates_reject_unknown_runs() {
-    let dir = tempdir().unwrap();
-    let repo = RunRepository::open(&dir.path().join("ability.db")).unwrap();
-    let unknown_run = Uuid::new_v4();
-
-    assert!(matches!(
-        repo.set_run_status(unknown_run, RunStatus::Running),
-        Err(StorageError::RunNotFound(id)) if id == unknown_run
-    ));
 }
 
 #[test]
@@ -158,17 +191,22 @@ fn inserting_a_run_cannot_claim_completed_tasks_without_checkpoints() {
 fn completed_run_retains_score_and_finished_time_after_reopen() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("ability.db");
-    let run = sample_run();
+    let mut run = sample_run();
+    run.status = RunStatus::Running;
     let score = ScoreSummary {
-        ability_score: 87.5,
-        passed_tasks: 7,
+        ability_score: 100.0,
+        passed_tasks: 8,
         valid_tasks: 8,
         total_tasks: 8,
-        category_scores: BTreeMap::from([(Category::InstructionFollowing, 87.5)]),
+        category_scores: BTreeMap::from([(Category::InstructionFollowing, 100.0)]),
     };
     {
         let repo = RunRepository::open(&db_path).unwrap();
         repo.insert_run(&run).unwrap();
+        for index in 1..=run.total_tasks {
+            repo.save_task_result(&passing_result(run.id, &format!("instruction-{index}")))
+                .unwrap();
+        }
         repo.complete_run(run.id, Some(&score)).unwrap();
     }
 
@@ -180,6 +218,372 @@ fn completed_run_retains_score_and_finished_time_after_reopen() {
     assert_eq!(restored.status, RunStatus::Completed);
     assert!(restored.finished_at.is_some());
     assert_eq!(restored.score, Some(score));
+}
+
+#[test]
+fn complete_run_rejects_partial_evidence_without_mutating_the_running_run() {
+    let dir = tempdir().unwrap();
+    let repo = RunRepository::open(&dir.path().join("ability.db")).unwrap();
+    let mut run = sample_run();
+    run.status = RunStatus::Running;
+    run.total_tasks = 2;
+    repo.insert_run(&run).unwrap();
+    repo.save_task_result(&passing_result(run.id, "instruction-1"))
+        .unwrap();
+
+    assert!(matches!(
+        repo.complete_run(run.id, None),
+        Err(StorageError::InvalidData(message)) if message.contains("complete")
+    ));
+
+    let unchanged = repo.get_run(run.id).unwrap().unwrap();
+    assert_eq!(unchanged.status, RunStatus::Running);
+    assert_eq!(unchanged.completed_tasks, 1);
+    assert_eq!(unchanged.finished_at, None);
+    assert_eq!(unchanged.score, None);
+}
+
+#[test]
+fn complete_run_rejects_a_score_bound_to_a_different_task_total() {
+    let dir = tempdir().unwrap();
+    let repo = RunRepository::open(&dir.path().join("ability.db")).unwrap();
+    let mut run = sample_run();
+    run.status = RunStatus::Running;
+    run.total_tasks = 1;
+    repo.insert_run(&run).unwrap();
+    repo.save_task_result(&passing_result(run.id, "instruction-1"))
+        .unwrap();
+    let score = ScoreSummary {
+        ability_score: 100.0,
+        passed_tasks: 1,
+        valid_tasks: 1,
+        total_tasks: 2,
+        category_scores: BTreeMap::from([(Category::InstructionFollowing, 100.0)]),
+    };
+
+    assert!(matches!(
+        repo.complete_run(run.id, Some(&score)),
+        Err(StorageError::InvalidData(message)) if message.contains("total")
+    ));
+
+    let unchanged = repo.get_run(run.id).unwrap().unwrap();
+    assert_eq!(unchanged.status, RunStatus::Running);
+    assert_eq!(unchanged.finished_at, None);
+    assert_eq!(unchanged.score, None);
+}
+
+#[test]
+fn complete_run_rejects_missing_or_mismatched_canonical_score_evidence() {
+    for supplied_score in [
+        None,
+        Some(ScoreSummary {
+            ability_score: 50.0,
+            passed_tasks: 0,
+            valid_tasks: 1,
+            total_tasks: 1,
+            category_scores: BTreeMap::from([(Category::InstructionFollowing, 50.0)]),
+        }),
+    ] {
+        let dir = tempdir().unwrap();
+        let repo = RunRepository::open(&dir.path().join("ability.db")).unwrap();
+        let mut run = sample_run();
+        run.status = RunStatus::Running;
+        run.total_tasks = 1;
+        repo.insert_run(&run).unwrap();
+        repo.save_task_result(&passing_result(run.id, "instruction-1"))
+            .unwrap();
+
+        assert!(matches!(
+            repo.complete_run(run.id, supplied_score.as_ref()),
+            Err(StorageError::InvalidData(message)) if message.contains("score")
+        ));
+        let unchanged = repo.get_run(run.id).unwrap().unwrap();
+        assert_eq!(unchanged.status, RunStatus::Running);
+        assert_eq!(unchanged.finished_at, None);
+        assert_eq!(unchanged.score, None);
+    }
+}
+
+#[test]
+fn complete_run_accepts_full_all_invalid_evidence_with_no_score() {
+    let dir = tempdir().unwrap();
+    let repo = RunRepository::open(&dir.path().join("ability.db")).unwrap();
+    let mut run = sample_run();
+    run.status = RunStatus::Running;
+    run.total_tasks = 1;
+    repo.insert_run(&run).unwrap();
+    repo.save_task_result(&invalid_infrastructure_result(run.id, "instruction-1"))
+        .unwrap();
+
+    repo.complete_run(run.id, None).unwrap();
+
+    let completed = repo.get_run(run.id).unwrap().unwrap();
+    assert_eq!(completed.status, RunStatus::Completed);
+    assert_eq!(completed.completed_tasks, 1);
+    assert_eq!(completed.score, None);
+}
+
+#[test]
+fn complete_run_rejects_incoherent_full_evidence_without_mutation() {
+    let dir = tempdir().unwrap();
+    let repo = RunRepository::open(&dir.path().join("ability.db")).unwrap();
+    let mut run = sample_run();
+    run.status = RunStatus::Running;
+    run.total_tasks = 1;
+    repo.insert_run(&run).unwrap();
+    let mut incoherent = passing_result(run.id, "instruction-1");
+    incoherent.score = Some(50.0);
+    repo.save_task_result(&incoherent).unwrap();
+    let before_run = repo.get_run(run.id).unwrap().unwrap();
+    let before_results = repo.get_task_results(run.id).unwrap();
+
+    assert!(matches!(
+        repo.complete_run(run.id, None),
+        Err(StorageError::InvalidData(message)) if message.contains("evidence")
+    ));
+
+    assert_eq!(repo.get_run(run.id).unwrap().unwrap(), before_run);
+    assert_eq!(repo.get_task_results(run.id).unwrap(), before_results);
+}
+
+#[test]
+fn completed_run_rejects_checkpoint_replacement_without_mutation() {
+    let dir = tempdir().unwrap();
+    let repo = RunRepository::open(&dir.path().join("ability.db")).unwrap();
+    let mut run = sample_run();
+    run.status = RunStatus::Running;
+    run.total_tasks = 1;
+    repo.insert_run(&run).unwrap();
+    repo.save_task_result(&passing_result(run.id, "instruction-1"))
+        .unwrap();
+    let score = ScoreSummary {
+        ability_score: 100.0,
+        passed_tasks: 1,
+        valid_tasks: 1,
+        total_tasks: 1,
+        category_scores: BTreeMap::from([(Category::InstructionFollowing, 100.0)]),
+    };
+    repo.complete_run(run.id, Some(&score)).unwrap();
+    let before_run = repo.get_run(run.id).unwrap().unwrap();
+    let before_results = repo.get_task_results(run.id).unwrap();
+    let mut replacement = passing_result(run.id, "instruction-1");
+    replacement.detail = "forbidden replacement".into();
+
+    assert!(matches!(
+        repo.save_task_result(&replacement),
+        Err(StorageError::InvalidData(message)) if message.contains("running")
+    ));
+
+    assert_eq!(repo.get_run(run.id).unwrap().unwrap(), before_run);
+    assert_eq!(repo.get_task_results(run.id).unwrap(), before_results);
+}
+
+#[test]
+fn insert_run_rejects_every_terminal_state() {
+    for status in [
+        RunStatus::Completed,
+        RunStatus::Cancelled,
+        RunStatus::Interrupted,
+    ] {
+        let dir = tempdir().unwrap();
+        let repo = RunRepository::open(&dir.path().join("ability.db")).unwrap();
+        let mut run = sample_run();
+        run.status = status;
+        run.finished_at = Some(Utc::now());
+
+        assert!(matches!(
+            repo.insert_run(&run),
+            Err(StorageError::InvalidData(message)) if message.contains("new run")
+        ));
+        assert!(repo.get_run(run.id).unwrap().is_none());
+    }
+}
+
+#[test]
+fn retry_marker_removal_rejects_a_valid_completed_checkpoint() {
+    let dir = tempdir().unwrap();
+    let repo = RunRepository::open(&dir.path().join("ability.db")).unwrap();
+    let mut run = sample_run();
+    run.status = RunStatus::Running;
+    let checkpoint = passing_result(run.id, "instruction-1");
+    repo.insert_run(&run).unwrap();
+    repo.save_task_result(&checkpoint).unwrap();
+    repo.finish_without_score(run.id, RunStatus::Interrupted)
+        .unwrap();
+
+    assert!(matches!(
+        repo.resume_run_retrying_exact_marker(
+            run.id,
+            &run.target,
+            &checkpoint,
+            |_, _| panic!("a valid checkpoint must not be exposed as a retry candidate"),
+        ),
+        Err(StorageError::InvalidData(message)) if message.contains("invalid")
+    ));
+    assert_eq!(repo.get_task_results(run.id).unwrap(), vec![checkpoint]);
+    assert_eq!(repo.get_run(run.id).unwrap().unwrap().completed_tasks, 1);
+}
+
+#[test]
+fn retry_resume_rolls_back_marker_removal_when_candidate_validation_fails() {
+    let dir = tempdir().unwrap();
+    let repo = RunRepository::open(&dir.path().join("ability.db")).unwrap();
+    let mut run = sample_run();
+    run.total_tasks = 2;
+    let checkpoint = passing_result(run.id, "instruction-1");
+    let marker = invalid_infrastructure_result(run.id, "instruction-2");
+    repo.insert_run(&run).unwrap();
+    repo.save_task_result(&checkpoint).unwrap();
+    repo.save_task_result(&marker).unwrap();
+    repo.finish_without_score(run.id, RunStatus::Interrupted)
+        .unwrap();
+    let before_run = repo.get_run(run.id).unwrap().unwrap();
+    let before_results = repo.get_task_results(run.id).unwrap();
+
+    assert!(matches!(
+        repo.resume_run_retrying_exact_marker(
+            run.id,
+            &run.target,
+            &marker,
+            |candidate, results| {
+                assert_eq!(candidate.completed_tasks, 1);
+                assert_eq!(results, std::slice::from_ref(&checkpoint));
+                Err(StorageError::InvalidData(
+                    "injected recovery validation failure".into(),
+                ))
+            },
+        ),
+        Err(StorageError::InvalidData(message))
+            if message == "injected recovery validation failure"
+    ));
+
+    assert_eq!(repo.get_run(run.id).unwrap().unwrap(), before_run);
+    assert_eq!(repo.get_task_results(run.id).unwrap(), before_results);
+}
+
+#[test]
+fn retry_resume_atomically_deletes_exact_marker_and_restores_running() {
+    let dir = tempdir().unwrap();
+    let repo = RunRepository::open(&dir.path().join("ability.db")).unwrap();
+    let mut run = sample_run();
+    run.total_tasks = 2;
+    let checkpoint = passing_result(run.id, "instruction-1");
+    let marker = invalid_infrastructure_result(run.id, "instruction-2");
+    repo.insert_run(&run).unwrap();
+    repo.save_task_result(&checkpoint).unwrap();
+    repo.save_task_result(&marker).unwrap();
+    repo.finish_without_score(run.id, RunStatus::Interrupted)
+        .unwrap();
+
+    let resumed = repo
+        .resume_run_retrying_exact_marker(run.id, &run.target, &marker, |candidate, results| {
+            assert_eq!(candidate.completed_tasks, 1);
+            assert_eq!(results, std::slice::from_ref(&checkpoint));
+            Ok(())
+        })
+        .unwrap();
+
+    assert_eq!(resumed.status, RunStatus::Running);
+    assert_eq!(resumed.completed_tasks, 1);
+    assert!(resumed.finished_at.is_none());
+    assert!(resumed.score.is_none());
+    assert!(resumed.environment.resumed);
+    assert_eq!(repo.get_run(run.id).unwrap().unwrap(), resumed);
+    assert_eq!(repo.get_task_results(run.id).unwrap(), vec![checkpoint]);
+}
+
+#[test]
+fn retry_resume_rolls_back_exact_marker_when_post_delete_run_update_fails() {
+    let dir = tempdir().unwrap();
+    let database = dir.path().join("ability.db");
+    let repo = RunRepository::open(&database).unwrap();
+    let mut run = sample_run();
+    run.total_tasks = 2;
+    let checkpoint = passing_result(run.id, "instruction-1");
+    let marker = invalid_infrastructure_result(run.id, "instruction-2");
+    repo.insert_run(&run).unwrap();
+    repo.save_task_result(&checkpoint).unwrap();
+    repo.save_task_result(&marker).unwrap();
+    repo.finish_without_score(run.id, RunStatus::Interrupted)
+        .unwrap();
+    let before_run = repo.get_run(run.id).unwrap().unwrap();
+    let before_results = repo.get_task_results(run.id).unwrap();
+
+    let trigger_connection = rusqlite::Connection::open(&database).unwrap();
+    trigger_connection
+        .execute_batch(&format!(
+            "CREATE TRIGGER fail_retry_resume_update
+             BEFORE UPDATE OF status_json, completed_tasks ON runs
+             WHEN OLD.id = '{}'
+             BEGIN
+               SELECT RAISE(ABORT, 'injected post-delete run update failure');
+             END;",
+            run.id
+        ))
+        .unwrap();
+
+    assert!(
+        repo.resume_run_retrying_exact_marker(
+            run.id,
+            &run.target,
+            &marker,
+            |candidate, results| {
+                assert_eq!(candidate.completed_tasks, 1);
+                assert_eq!(results, std::slice::from_ref(&checkpoint));
+                Ok(())
+            },
+        )
+        .is_err()
+    );
+    assert_eq!(repo.get_run(run.id).unwrap().unwrap(), before_run);
+    assert_eq!(repo.get_task_results(run.id).unwrap(), before_results);
+
+    trigger_connection
+        .execute_batch("DROP TRIGGER fail_retry_resume_update;")
+        .unwrap();
+    let resumed = repo
+        .resume_run_retrying_exact_marker(run.id, &run.target, &marker, |_, _| Ok(()))
+        .unwrap();
+    assert_eq!(resumed.status, RunStatus::Running);
+    assert_eq!(resumed.completed_tasks, 1);
+    assert_eq!(repo.get_task_results(run.id).unwrap(), vec![checkpoint]);
+}
+
+#[test]
+fn marker_free_resume_exposes_persisted_count_mismatch_to_validation() {
+    let dir = tempdir().unwrap();
+    let database = dir.path().join("ability.db");
+    let repo = RunRepository::open(&database).unwrap();
+    let mut run = sample_run();
+    run.total_tasks = 2;
+    let checkpoint = passing_result(run.id, "instruction-1");
+    repo.insert_run(&run).unwrap();
+    repo.save_task_result(&checkpoint).unwrap();
+    repo.finish_without_score(run.id, RunStatus::Interrupted)
+        .unwrap();
+    rusqlite::Connection::open(&database)
+        .unwrap()
+        .execute(
+            "UPDATE runs SET completed_tasks=2 WHERE id=?1",
+            [run.id.to_string()],
+        )
+        .unwrap();
+    let before = repo.get_run(run.id).unwrap().unwrap();
+
+    assert!(matches!(
+        repo.resume_run(run.id, &run.target, |candidate, results| {
+            if usize::try_from(candidate.completed_tasks).ok() != Some(results.len()) {
+                return Err(StorageError::InvalidData(
+                    "persisted completed count mismatch".into(),
+                ));
+            }
+            Ok(())
+        }),
+        Err(StorageError::InvalidData(message))
+            if message == "persisted completed count mismatch"
+    ));
+    assert_eq!(repo.get_run(run.id).unwrap().unwrap(), before);
+    assert_eq!(repo.get_task_results(run.id).unwrap(), vec![checkpoint]);
 }
 
 #[test]
@@ -232,18 +636,11 @@ fn invalid_numeric_or_path_values_are_rejected_before_persistence() {
 }
 
 #[test]
-fn finish_without_score_terminalizes_only_running_runs_and_clears_score() {
+fn finish_without_score_terminalizes_only_running_runs_without_inventing_score() {
     let dir = tempdir().unwrap();
     let repo = RunRepository::open(&dir.path().join("ability.db")).unwrap();
     let mut run = sample_run();
     run.status = RunStatus::Running;
-    run.score = Some(ScoreSummary {
-        ability_score: 100.0,
-        passed_tasks: 1,
-        valid_tasks: 1,
-        total_tasks: 8,
-        category_scores: BTreeMap::from([(Category::InstructionFollowing, 100.0)]),
-    });
     repo.insert_run(&run).unwrap();
 
     repo.finish_without_score(run.id, RunStatus::Cancelled)
@@ -277,7 +674,7 @@ fn finish_without_score_rejects_invalid_status_missing_and_non_running_runs() {
         Err(StorageError::RunNotFound(id)) if id == missing
     ));
 
-    repo.set_run_status(running.id, RunStatus::Completed)
+    repo.finish_without_score(running.id, RunStatus::Cancelled)
         .unwrap();
     assert!(matches!(
         repo.finish_without_score(running.id, RunStatus::Interrupted),
@@ -285,7 +682,7 @@ fn finish_without_score_rejects_invalid_status_missing_and_non_running_runs() {
     ));
     assert_eq!(
         repo.get_run(running.id).unwrap().unwrap().status,
-        RunStatus::Completed
+        RunStatus::Cancelled
     );
 }
 
@@ -327,12 +724,7 @@ fn delete_one_is_transactional_idempotent_and_cleans_orphan_identity_rows() {
     let directory = tempdir().unwrap();
     let database = directory.path().join("ability.db");
     let repository = RunRepository::open(&database).unwrap();
-    let mut run = sample_run();
-    run.status = RunStatus::Completed;
-    repository.insert_run(&run).unwrap();
-    repository
-        .save_task_result(&passing_result(run.id, "instruction-1"))
-        .unwrap();
+    let run = complete_one_result_run(&repository, sample_run());
 
     assert!(repository.delete_run(run.id).unwrap());
     assert!(!repository.delete_run(run.id).unwrap());
@@ -376,14 +768,10 @@ fn destructive_repository_operations_reject_running_runs_without_partial_changes
 fn target_history_deletion_binds_the_exact_reviewed_run_snapshot() {
     let directory = tempdir().unwrap();
     let repository = RunRepository::open(&directory.path().join("ability.db")).unwrap();
-    let mut reviewed = sample_run();
-    reviewed.status = RunStatus::Interrupted;
-    repository.insert_run(&reviewed).unwrap();
+    let reviewed = finish_run_without_score(&repository, sample_run(), RunStatus::Interrupted);
     let reviewed_ids = vec![reviewed.id];
 
-    let mut newly_created = sample_run();
-    newly_created.status = RunStatus::Interrupted;
-    repository.insert_run(&newly_created).unwrap();
+    let newly_created = finish_run_without_score(&repository, sample_run(), RunStatus::Interrupted);
 
     assert!(matches!(
         repository.delete_target_history(TargetKind::ChatGptClient, &reviewed_ids),
@@ -414,12 +802,8 @@ fn injected_target_delete_failure_rolls_back_every_database_row() {
     let directory = tempdir().unwrap();
     let database = directory.path().join("ability.db");
     let repository = RunRepository::open(&database).unwrap();
-    let mut first = sample_run();
-    first.status = RunStatus::Interrupted;
-    let mut second = sample_run();
-    second.status = RunStatus::Interrupted;
-    repository.insert_run(&first).unwrap();
-    repository.insert_run(&second).unwrap();
+    let first = finish_run_without_score(&repository, sample_run(), RunStatus::Interrupted);
+    let second = finish_run_without_score(&repository, sample_run(), RunStatus::Interrupted);
     let connection = rusqlite::Connection::open(&database).unwrap();
     connection
         .execute_batch(&format!(
@@ -449,9 +833,8 @@ fn repository_keeps_sqlite_secure_delete_enabled() {
     let repository = RunRepository::open(&database).unwrap();
     let sentinel = "SECURE_DELETE_SENTINEL_7f1d2f977fbc4c63".repeat(8);
     let mut run = sample_run();
-    run.status = RunStatus::Interrupted;
     run.target.reported_model = sentinel.clone();
-    repository.insert_run(&run).unwrap();
+    let run = finish_run_without_score(&repository, run, RunStatus::Interrupted);
     assert!(repository.delete_run(run.id).unwrap());
     drop(repository);
 
@@ -506,35 +889,43 @@ fn retention_policy_defaults_to_forever_and_rejects_every_unsupported_value() {
 #[test]
 fn retention_candidates_require_terminal_status_real_finished_time_and_inclusive_boundary() {
     let directory = tempdir().unwrap();
-    let repository = RunRepository::open(&directory.path().join("ability.db")).unwrap();
+    let database = directory.path().join("ability.db");
+    let repository = RunRepository::open(&database).unwrap();
     repository.set_raw_retention_days(Some(7)).unwrap();
-    let now = chrono::DateTime::parse_from_rfc3339("2026-07-19T12:00:00Z")
-        .unwrap()
-        .with_timezone(&Utc);
-    let cutoff = now - Duration::days(7);
 
-    let mut boundary = sample_run();
-    boundary.status = RunStatus::Completed;
-    boundary.finished_at = Some(cutoff);
-    repository.insert_run(&boundary).unwrap();
+    let older_cancelled = finish_run_without_score(&repository, sample_run(), RunStatus::Cancelled);
+    let boundary = complete_one_result_run(&repository, sample_run());
+    let cutoff = boundary.finished_at.unwrap();
+    let now = cutoff + Duration::days(7);
 
-    let mut older_cancelled = sample_run();
-    older_cancelled.status = RunStatus::Cancelled;
-    older_cancelled.finished_at = Some(cutoff - Duration::seconds(1));
-    repository.insert_run(&older_cancelled).unwrap();
+    let mut created = sample_run();
+    created.status = RunStatus::Created;
+    repository.insert_run(&created).unwrap();
+    let running = sample_run();
+    repository.insert_run(&running).unwrap();
+    let _interrupted = finish_run_without_score(&repository, sample_run(), RunStatus::Interrupted);
 
-    for (status, finished_at) in [
-        (RunStatus::Created, Some(cutoff - Duration::days(1))),
-        (RunStatus::Running, Some(cutoff - Duration::days(1))),
-        (RunStatus::Interrupted, Some(cutoff - Duration::days(1))),
-        (RunStatus::Completed, None),
-        (RunStatus::Cancelled, Some(now + Duration::days(1))),
-    ] {
-        let mut ineligible = sample_run();
-        ineligible.status = status;
-        ineligible.finished_at = finished_at;
-        repository.insert_run(&ineligible).unwrap();
-    }
+    // Deliberately corrupt only read-path fixtures that cannot arise through the
+    // lifecycle API: a completed row without finished_at and a future terminal time.
+    let completed_without_time = complete_one_result_run(&repository, sample_run());
+    let cancelled_in_future =
+        finish_run_without_score(&repository, sample_run(), RunStatus::Cancelled);
+    let connection = rusqlite::Connection::open(database).unwrap();
+    connection
+        .execute(
+            "UPDATE runs SET finished_at=NULL WHERE id=?1",
+            [completed_without_time.id.to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE runs SET finished_at=?2 WHERE id=?1",
+            rusqlite::params![
+                cancelled_in_future.id.to_string(),
+                (now + Duration::days(1)).to_rfc3339()
+            ],
+        )
+        .unwrap();
 
     let candidates = repository.retention_candidates(now).unwrap();
     assert_eq!(
@@ -557,16 +948,8 @@ fn retention_reference_cleanup_rechecks_the_exact_candidate_and_current_policy_a
     let database = directory.path().join("ability.db");
     let repository = RunRepository::open(&database).unwrap();
     repository.set_raw_retention_days(Some(7)).unwrap();
-    let now = chrono::DateTime::parse_from_rfc3339("2026-07-19T12:00:00Z")
-        .unwrap()
-        .with_timezone(&Utc);
-    let mut run = sample_run();
-    run.status = RunStatus::Completed;
-    run.finished_at = Some(now - Duration::days(8));
-    repository.insert_run(&run).unwrap();
-    repository
-        .save_task_result(&passing_result(run.id, "instruction-1"))
-        .unwrap();
+    let run = complete_one_result_run(&repository, sample_run());
+    let now = run.finished_at.unwrap() + Duration::days(8);
     let candidate = repository.retention_candidates(now).unwrap().remove(0);
 
     repository.set_raw_retention_days(Some(30)).unwrap();
@@ -612,7 +995,7 @@ fn retention_reference_cleanup_rechecks_the_exact_candidate_and_current_policy_a
     let retained_run = repository.get_run(run.id).unwrap().unwrap();
     assert_eq!(retained_run.status, RunStatus::Completed);
     assert_eq!(retained_run.finished_at, run.finished_at);
-    assert!(retained_run.score.is_none());
+    assert_eq!(retained_run.score, run.score);
     let retained_result = repository.get_task_results(run.id).unwrap().remove(0);
     assert_eq!(retained_result.score, Some(100.0));
     assert_eq!(retained_result.answer_rel_path, None);

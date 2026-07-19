@@ -3,6 +3,7 @@ import {
   fireEvent,
   render,
   screen,
+  waitFor,
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -25,6 +26,7 @@ import { ManualRunPage } from "./ManualRunPage";
 import { ResultPage } from "./ResultPage";
 
 const RUN_ID = "6c8cce50-bbf3-4bc5-890d-1f3316222a46";
+const UNTRUSTED_RUN_ID = "d857ee26-0c55-47a1-a8e9-4077e2884920";
 const ANSWER_LIMIT_BYTES = 256 * 1024;
 const originalClipboard = Object.getOwnPropertyDescriptor(
   navigator,
@@ -91,9 +93,10 @@ function fakeBackend(overrides: Partial<Backend> = {}): Backend {
     getBootstrap: vi.fn(async () => {
       throw new Error("unused fake getBootstrap");
     }),
-    startManualRun: vi.fn(async (input) =>
-      makeRun(input.target.kind),
-    ),
+    startManualRun: vi.fn(async (input) => ({
+      ...makeRun(input.target.kind),
+      target: input.target,
+    })),
     nextManualStep: vi.fn(async () => makeStep(1)),
     submitManualAnswer: vi.fn(async (input) => makeResult(input.taskId)),
     startCliRun: vi.fn(async () => {
@@ -106,6 +109,7 @@ function fakeBackend(overrides: Partial<Backend> = {}): Backend {
       throw new Error("unused fake resumeCliRun");
     }),
     cancelRun: vi.fn(async () => false),
+    interruptManualRun: vi.fn(async () => false),
     listRuns: vi.fn(async () => []),
     getRunDetail: vi.fn(async () => null),
     exportPublicReport: vi.fn(async () => null),
@@ -169,6 +173,47 @@ test("resume preview shows the persisted target snapshot before continuing it ex
   ).not.toBeInTheDocument();
 });
 
+test("a resumed run returned after unmount is interrupted exactly without reading a step", async () => {
+  const user = userEvent.setup();
+  const preview = makeRun("chat_gpt_client");
+  preview.status = "interrupted";
+  const resumed = makeRun("chat_gpt_client");
+  resumed.environment.resumed = true;
+  const resumeDeferred = deferred<RunRecord>();
+  const resumeManualRun = vi.fn<Backend["resumeManualRun"]>(
+    () => resumeDeferred.promise,
+  );
+  const interruptManualRun = vi.fn(async () => true);
+  const nextManualStep = vi.fn(async () => makeStep(1));
+  const backend = fakeBackend({
+    getRunDetail: vi.fn(async () => ({ run: preview, taskResults: [] })),
+    resumeManualRun,
+    interruptManualRun,
+    nextManualStep,
+  });
+  const { router } = renderWizard(
+    backend,
+    `/manual/chat_gpt_client?resume=${RUN_ID}`,
+  );
+
+  await user.click(
+    await screen.findByRole("button", { name: "继续剩余题目" }),
+  );
+  expect(resumeManualRun).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    await router.navigate("/");
+  });
+  await act(async () => {
+    resumeDeferred.resolve(resumed);
+    await resumeDeferred.promise;
+  });
+
+  await waitFor(() => expect(interruptManualRun).toHaveBeenCalledTimes(1));
+  expect(interruptManualRun).toHaveBeenCalledWith(RUN_ID);
+  expect(backend.cancelRun).not.toHaveBeenCalled();
+  expect(nextManualStep).not.toHaveBeenCalled();
+});
+
 test("same-family route mismatch is rejected from the preview without a resume call", async () => {
   const stored = makeRun("claude_client");
   stored.status = "interrupted";
@@ -189,21 +234,56 @@ test("same-family route mismatch is rejected from the preview without a resume c
 });
 
 test.each([
-  ["model", { reportedModel: "changed-model" }],
-  ["reasoning effort", { reasoningEffort: "low" }],
-])(
-  "manual recovery rejects a returned same-kind run with changed %s",
-  async (_field, targetChange) => {
+  [
+    "model",
+    (preview: RunRecord) => ({
+      ...makeRun("chat_gpt_client"),
+      environment: { ...makeRun().environment, resumed: true },
+      target: { ...preview.target, reportedModel: "changed-model" },
+    }),
+  ],
+  [
+    "reasoning effort",
+    (preview: RunRecord) => ({
+      ...makeRun("chat_gpt_client"),
+      environment: { ...makeRun().environment, resumed: true },
+      target: { ...preview.target, reasoningEffort: "low" as const },
+    }),
+  ],
+  [
+    "status",
+    (preview: RunRecord) => ({
+      ...makeRun("chat_gpt_client"),
+      status: "interrupted" as const,
+      environment: { ...makeRun().environment, resumed: true },
+      target: preview.target,
+    }),
+  ],
+  [
+    "id",
+    (preview: RunRecord) => ({
+      ...makeRun("chat_gpt_client"),
+      id: UNTRUSTED_RUN_ID,
+      environment: { ...makeRun().environment, resumed: true },
+      target: preview.target,
+    }),
+  ],
+  [
+    "unsafe response",
+    () => ({ id: UNTRUSTED_RUN_ID, status: "running" }) as RunRecord,
+  ],
+] satisfies Array<[string, (preview: RunRecord) => RunRecord]>)(
+  "manual recovery rejects a returned run with changed or invalid %s and interrupts only the known input run",
+  async (_field, response) => {
     const user = userEvent.setup();
     const preview = makeRun("chat_gpt_client");
     preview.status = "interrupted";
     preview.target.reasoningEffort = "high";
-    const changed = makeRun("chat_gpt_client");
-    changed.environment.resumed = true;
-    changed.target = { ...preview.target, ...targetChange };
+    const interruptManualRun = vi.fn(async () => true);
     const backend = fakeBackend({
       getRunDetail: vi.fn(async () => ({ run: preview, taskResults: [] })),
-      resumeManualRun: vi.fn(async () => changed),
+      resumeManualRun: vi.fn(async () => response(preview)),
+      interruptManualRun,
     });
 
     renderWizard(backend, `/manual/chat_gpt_client?resume=${RUN_ID}`);
@@ -214,6 +294,10 @@ test.each([
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "原体检配置或本地检查点已经变化",
     );
+    await waitFor(() => expect(interruptManualRun).toHaveBeenCalledTimes(1));
+    expect(interruptManualRun).toHaveBeenCalledWith(RUN_ID);
+    expect(interruptManualRun).not.toHaveBeenCalledWith(UNTRUSTED_RUN_ID);
+    expect(backend.cancelRun).not.toHaveBeenCalled();
     expect(backend.nextManualStep).not.toHaveBeenCalled();
   },
 );
@@ -241,6 +325,12 @@ test("resume failure never exposes backend paths and does not create a replaceme
   );
   expect(document.body.textContent).not.toContain("Alice");
   expect(startManualRun).not.toHaveBeenCalled();
+  await waitFor(() =>
+    expect(backend.interruptManualRun).toHaveBeenCalledTimes(1),
+  );
+  expect(backend.interruptManualRun).toHaveBeenCalledWith(RUN_ID);
+  expect(backend.cancelRun).not.toHaveBeenCalled();
+  expect(backend.nextManualStep).not.toHaveBeenCalled();
 });
 
 function renderWizard(
@@ -647,6 +737,252 @@ test("navigates after the final checkpoint and announces completion", async () =
     await screen.findByRole("heading", { name: "本次客观结果" }),
   ).toBeInTheDocument();
   expect(screen.getByText("100.0")).toBeInTheDocument();
+  expect(backend.cancelRun).not.toHaveBeenCalled();
+});
+
+test("explicit manual cancellation requires confirmation and navigates only after success", async () => {
+  const user = userEvent.setup();
+  const cancelRun = vi.fn(async () => true);
+  const backend = fakeBackend({ cancelRun });
+  const { router } = renderWizard(backend);
+  await completeSetup(user);
+  await user.click(screen.getByRole("button", { name: "开始快速体检" }));
+  await screen.findByText("只输出第 1 题答案");
+
+  await user.click(screen.getByRole("button", { name: "取消本次体检" }));
+  expect(cancelRun).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("button", { name: "确认取消" }));
+
+  await waitFor(() => expect(cancelRun).toHaveBeenCalledTimes(1));
+  expect(cancelRun).toHaveBeenCalledWith(RUN_ID);
+  expect(backend.interruptManualRun).not.toHaveBeenCalled();
+  expect(router.state.location.pathname).toBe(`/results/${RUN_ID}`);
+});
+
+test("manual cancellation failure stays on the task and reports an error", async () => {
+  const user = userEvent.setup();
+  const backend = fakeBackend({
+    cancelRun: vi.fn(async () => false),
+  });
+  const { router } = renderWizard(backend);
+  await completeSetup(user);
+  await user.click(screen.getByRole("button", { name: "开始快速体检" }));
+  await screen.findByText("只输出第 1 题答案");
+
+  await user.click(screen.getByRole("button", { name: "取消本次体检" }));
+  await user.click(screen.getByRole("button", { name: "确认取消" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("无法取消");
+  expect(router.state.location.pathname).toBe("/manual/chat_gpt_client");
+});
+
+test("a rejected pending explicit cancel retries exact interruption after unmount", async () => {
+  const user = userEvent.setup();
+  const cancelDeferred = deferred<boolean>();
+  const cancelRun = vi.fn(() => cancelDeferred.promise);
+  const interruptManualRun = vi
+    .fn<Backend["interruptManualRun"]>()
+    .mockRejectedValueOnce(new Error("run operation is busy"))
+    .mockResolvedValueOnce(true);
+  const backend = fakeBackend({ cancelRun, interruptManualRun });
+  const { router } = renderWizard(backend);
+  await completeSetup(user);
+  await user.click(screen.getByRole("button", { name: "开始快速体检" }));
+  await screen.findByText("只输出第 1 题答案");
+  await user.click(screen.getByRole("button", { name: "取消本次体检" }));
+  await user.click(screen.getByRole("button", { name: "确认取消" }));
+  expect(cancelRun).toHaveBeenCalledWith(RUN_ID);
+
+  await act(async () => {
+    await router.navigate("/");
+  });
+  await waitFor(() => expect(interruptManualRun).toHaveBeenCalledTimes(1));
+  await act(async () => {
+    cancelDeferred.reject(new Error("cancel failed"));
+    await cancelDeferred.promise.catch(() => undefined);
+  });
+
+  await waitFor(() => expect(interruptManualRun).toHaveBeenCalledTimes(2));
+  expect(interruptManualRun.mock.calls).toEqual([[RUN_ID], [RUN_ID]]);
+  expect(cancelRun).toHaveBeenCalledTimes(1);
+});
+
+test("a successful pending explicit cancel does not retry interruption after unmount", async () => {
+  const user = userEvent.setup();
+  const cancelDeferred = deferred<boolean>();
+  const cancelRun = vi.fn(() => cancelDeferred.promise);
+  const interruptManualRun = vi
+    .fn<Backend["interruptManualRun"]>()
+    .mockRejectedValueOnce(new Error("run operation is busy"));
+  const backend = fakeBackend({ cancelRun, interruptManualRun });
+  const { router } = renderWizard(backend);
+  await completeSetup(user);
+  await user.click(screen.getByRole("button", { name: "开始快速体检" }));
+  await screen.findByText("只输出第 1 题答案");
+  await user.click(screen.getByRole("button", { name: "取消本次体检" }));
+  await user.click(screen.getByRole("button", { name: "确认取消" }));
+
+  await act(async () => {
+    await router.navigate("/");
+  });
+  await waitFor(() => expect(interruptManualRun).toHaveBeenCalledTimes(1));
+  await act(async () => {
+    cancelDeferred.resolve(true);
+    await cancelDeferred.promise;
+  });
+
+  expect(interruptManualRun).toHaveBeenCalledTimes(1);
+  expect(cancelRun).toHaveBeenCalledTimes(1);
+});
+
+test("a false pending explicit cancel retries exact interruption after unmount", async () => {
+  const user = userEvent.setup();
+  const cancelDeferred = deferred<boolean>();
+  const cancelRun = vi.fn(() => cancelDeferred.promise);
+  const interruptManualRun = vi
+    .fn<Backend["interruptManualRun"]>()
+    .mockRejectedValueOnce(new Error("run operation is busy"))
+    .mockResolvedValueOnce(true);
+  const backend = fakeBackend({ cancelRun, interruptManualRun });
+  const { router } = renderWizard(backend);
+  await completeSetup(user);
+  await user.click(screen.getByRole("button", { name: "开始快速体检" }));
+  await screen.findByText("只输出第 1 题答案");
+  await user.click(screen.getByRole("button", { name: "取消本次体检" }));
+  await user.click(screen.getByRole("button", { name: "确认取消" }));
+
+  await act(async () => {
+    await router.navigate("/");
+  });
+  await waitFor(() => expect(interruptManualRun).toHaveBeenCalledTimes(1));
+  await act(async () => {
+    cancelDeferred.resolve(false);
+    await cancelDeferred.promise;
+  });
+
+  await waitFor(() => expect(interruptManualRun).toHaveBeenCalledTimes(2));
+  expect(interruptManualRun.mock.calls).toEqual([[RUN_ID], [RUN_ID]]);
+  expect(cancelRun).toHaveBeenCalledTimes(1);
+  expect(cancelRun).toHaveBeenCalledWith(RUN_ID);
+});
+
+test("leaving an active manual run best-effort interrupts only that exact run", async () => {
+  const user = userEvent.setup();
+  const interruptManualRun = vi.fn(async () => true);
+  const backend = fakeBackend({ interruptManualRun });
+  const { router } = renderWizard(backend);
+  await completeSetup(user);
+  await user.click(screen.getByRole("button", { name: "开始快速体检" }));
+  await screen.findByText("只输出第 1 题答案");
+
+  await act(async () => {
+    await router.navigate("/");
+  });
+
+  await waitFor(() => expect(interruptManualRun).toHaveBeenCalledTimes(1));
+  expect(interruptManualRun).toHaveBeenCalledWith(RUN_ID);
+  expect(backend.cancelRun).not.toHaveBeenCalled();
+});
+
+test("best-effort unmount cleanup safely swallows interrupt rejection", async () => {
+  const user = userEvent.setup();
+  const interruptManualRun = vi.fn(async () => {
+    throw new Error("simulated interrupt failure");
+  });
+  const backend = fakeBackend({ interruptManualRun });
+  const { router } = renderWizard(backend);
+  await completeSetup(user);
+  await user.click(screen.getByRole("button", { name: "开始快速体检" }));
+  await screen.findByText("只输出第 1 题答案");
+
+  await act(async () => {
+    await router.navigate("/");
+  });
+
+  await waitFor(() =>
+    expect(interruptManualRun).toHaveBeenCalledWith(RUN_ID),
+  );
+  expect(backend.cancelRun).not.toHaveBeenCalled();
+  expect(
+    screen.getByRole("heading", { name: "选择要体检的 AI" }),
+  ).toBeInTheDocument();
+});
+
+test("a pending non-final submit retries exact interruption after its run claim settles", async () => {
+  const user = userEvent.setup();
+  const submitDeferred = deferred<TaskResult>();
+  const interruptManualRun = vi
+    .fn<Backend["interruptManualRun"]>()
+    .mockRejectedValueOnce(new Error("run operation is busy"))
+    .mockResolvedValueOnce(true);
+  const nextManualStep = vi.fn(async () => makeStep(1));
+  const backend = fakeBackend({
+    interruptManualRun,
+    nextManualStep,
+    submitManualAnswer: vi.fn(() => submitDeferred.promise),
+  });
+  const { router } = renderWizard(backend);
+  await completeSetup(user);
+  await user.click(screen.getByRole("button", { name: "开始快速体检" }));
+  await user.type(
+    await screen.findByLabelText("粘贴 AI 的完整回答"),
+    "非最终题回答",
+  );
+  await user.click(
+    screen.getByRole("button", { name: "提交并进入下一题" }),
+  );
+
+  await act(async () => {
+    await router.navigate("/");
+  });
+  await waitFor(() => expect(interruptManualRun).toHaveBeenCalledTimes(1));
+  await act(async () => {
+    submitDeferred.resolve(makeResult());
+    await submitDeferred.promise;
+  });
+
+  await waitFor(() => expect(interruptManualRun).toHaveBeenCalledTimes(2));
+  expect(interruptManualRun.mock.calls).toEqual([[RUN_ID], [RUN_ID]]);
+  expect(backend.cancelRun).not.toHaveBeenCalled();
+  expect(nextManualStep).toHaveBeenCalledTimes(1);
+});
+
+test("a pending next-step read retries exact interruption after it settles", async () => {
+  const user = userEvent.setup();
+  const nextDeferred = deferred<ManualStep>();
+  const nextManualStep = vi
+    .fn<Backend["nextManualStep"]>()
+    .mockResolvedValueOnce(makeStep(1))
+    .mockImplementationOnce(() => nextDeferred.promise);
+  const interruptManualRun = vi
+    .fn<Backend["interruptManualRun"]>()
+    .mockRejectedValueOnce(new Error("run operation is busy"))
+    .mockResolvedValueOnce(true);
+  const backend = fakeBackend({ interruptManualRun, nextManualStep });
+  const { router } = renderWizard(backend);
+  await completeSetup(user);
+  await user.click(screen.getByRole("button", { name: "开始快速体检" }));
+  await user.type(
+    await screen.findByLabelText("粘贴 AI 的完整回答"),
+    "非最终题回答",
+  );
+  await user.click(
+    screen.getByRole("button", { name: "提交并进入下一题" }),
+  );
+  expect(nextManualStep).toHaveBeenCalledTimes(2);
+
+  await act(async () => {
+    await router.navigate("/");
+  });
+  await waitFor(() => expect(interruptManualRun).toHaveBeenCalledTimes(1));
+  await act(async () => {
+    nextDeferred.resolve(makeStep(2));
+    await nextDeferred.promise;
+  });
+
+  await waitFor(() => expect(interruptManualRun).toHaveBeenCalledTimes(2));
+  expect(interruptManualRun.mock.calls).toEqual([[RUN_ID], [RUN_ID]]);
+  expect(backend.cancelRun).not.toHaveBeenCalled();
 });
 
 test("suppresses double starts and submits while each operation is pending", async () => {
@@ -690,14 +1026,96 @@ test("suppresses double starts and submits while each operation is pending", asy
   });
 });
 
-test("resets on a valid target change and ignores stale async completion", async () => {
+test("an invalid start response never interrupts or advances an untrusted returned run id", async () => {
+  const user = userEvent.setup();
+  const invalid = makeRun("chat_gpt_client");
+  invalid.id = UNTRUSTED_RUN_ID;
+  invalid.status = "interrupted";
+  const interruptManualRun = vi.fn(async () => true);
+  const backend = fakeBackend({
+    startManualRun: vi.fn(async () => invalid),
+    interruptManualRun,
+  });
+  renderWizard(backend);
+  await completeSetup(user);
+  await user.click(screen.getByRole("button"));
+
+  expect(await screen.findByRole("alert")).toBeInTheDocument();
+  expect(interruptManualRun).not.toHaveBeenCalled();
+  expect(backend.cancelRun).not.toHaveBeenCalled();
+  expect(backend.nextManualStep).not.toHaveBeenCalled();
+});
+
+test.each([
+  [
+    "mismatched target",
+    () => makeRun("claude_client"),
+  ],
+  [
+    "non-quick mode",
+    () => ({ ...makeRun(), mode: "deep" as const }),
+  ],
+  [
+    "progressed running state",
+    () => ({ ...makeRun(), completedTasks: 1 }),
+  ],
+  [
+    "terminal metadata",
+    () => ({ ...makeRun(), finishedAt: "2026-07-19T00:00:00Z" }),
+  ],
+  [
+    "non-running status",
+    () => ({ ...makeRun(), status: "interrupted" as const }),
+  ],
+  [
+    "resumed environment",
+    () => ({
+      ...makeRun(),
+      environment: { ...makeRun().environment, resumed: true },
+    }),
+  ],
+  [
+    "unsafe shape",
+    () => ({ id: UNTRUSTED_RUN_ID, status: "running" }) as RunRecord,
+  ],
+] satisfies Array<[string, () => RunRecord]>)(
+  "an unmounted start response with %s never interrupts its returned id",
+  async (_case, makeResponse) => {
+    const user = userEvent.setup();
+    const startDeferred = deferred<RunRecord>();
+    const response = makeResponse();
+    response.id = UNTRUSTED_RUN_ID;
+    const interruptManualRun = vi.fn(async () => true);
+    const backend = fakeBackend({
+      startManualRun: vi.fn(() => startDeferred.promise),
+      interruptManualRun,
+    });
+    const { router } = renderWizard(backend);
+    await completeSetup(user);
+    await user.click(screen.getByRole("button", { name: "开始快速体检" }));
+    await act(async () => {
+      await router.navigate("/");
+    });
+    await act(async () => {
+      startDeferred.resolve(response);
+      await startDeferred.promise;
+    });
+
+    expect(interruptManualRun).not.toHaveBeenCalled();
+    expect(backend.cancelRun).not.toHaveBeenCalled();
+    expect(backend.nextManualStep).not.toHaveBeenCalled();
+  },
+);
+
+test("a valid matching start returned after navigation is interrupted exactly", async () => {
   const user = userEvent.setup();
   const startDeferred = deferred<RunRecord>();
   const start = vi
     .fn<Backend["startManualRun"]>()
     .mockImplementationOnce(() => startDeferred.promise)
     .mockResolvedValueOnce(makeRun("claude_client"));
-  const backend = fakeBackend({ startManualRun: start });
+  const interruptManualRun = vi.fn(async () => true);
+  const backend = fakeBackend({ startManualRun: start, interruptManualRun });
   const { router } = renderWizard(backend);
 
   await completeSetup(user, "GPT-5");
@@ -720,6 +1138,9 @@ test("resets on a valid target change and ignores stale async completion", async
     screen.getByRole("heading", { name: "Claude 客户端快速体检" }),
   ).toBeInTheDocument();
   expect(backend.nextManualStep).not.toHaveBeenCalled();
+  expect(interruptManualRun).toHaveBeenCalledTimes(1);
+  expect(interruptManualRun).toHaveBeenCalledWith(RUN_ID);
+  expect(backend.cancelRun).not.toHaveBeenCalled();
 
   await completeSetup(user, "Claude Sonnet");
   await user.click(screen.getByRole("button", { name: "开始快速体检" }));

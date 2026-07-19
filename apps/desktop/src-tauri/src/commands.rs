@@ -354,6 +354,7 @@ pub fn next_manual_step(
 ) -> Result<Option<ManualStep>, String> {
     next_manual_step_for(
         &state.manual_runs,
+        &state.run_operations,
         &state.local_data_gate,
         parse_run_id(&run_id)?,
     )
@@ -361,12 +362,16 @@ pub fn next_manual_step(
 
 fn next_manual_step_for(
     service: &ManualRunService,
+    operations: &RunOperationRegistry,
     gate: &LocalDataGate,
     run_id: Uuid,
 ) -> Result<Option<ManualStep>, String> {
     let _local_data = gate
         .claim_mutating()
         .map_err(|_| "本地数据正在备份，请稍后重试。".to_string())?;
+    let _operation = operations
+        .claim([run_id])
+        .map_err(|_| "这次体检正在恢复、运行或清理数据，请勿重复操作。".to_string())?;
     service.next_step(run_id).map_err(|error| error.to_string())
 }
 
@@ -375,17 +380,32 @@ pub fn submit_manual_answer(
     state: State<'_, AppState>,
     input: SubmitAnswerInput,
 ) -> Result<TaskResultDto, String> {
-    let _local_data = state
-        .local_data_gate
+    submit_manual_answer_for(
+        &state.manual_runs,
+        &state.run_operations,
+        &state.local_data_gate,
+        parse_run_id(&input.run_id)?,
+        validate_task_id(&input.task_id)?,
+        &input.answer,
+    )
+}
+
+fn submit_manual_answer_for(
+    service: &ManualRunService,
+    operations: &RunOperationRegistry,
+    gate: &LocalDataGate,
+    run_id: Uuid,
+    task_id: &str,
+    answer: &str,
+) -> Result<TaskResultDto, String> {
+    let _local_data = gate
         .claim_mutating()
         .map_err(|_| "本地数据正在备份，请稍后重试。".to_string())?;
-    let result = state
-        .manual_runs
-        .submit_answer(
-            parse_run_id(&input.run_id)?,
-            validate_task_id(&input.task_id)?,
-            &input.answer,
-        )
+    let _operation = operations
+        .claim([run_id])
+        .map_err(|_| "这次体检正在恢复、运行或清理数据，请勿重复操作。".to_string())?;
+    let result = service
+        .submit_answer(run_id, task_id, answer)
         .map_err(|error| error.to_string())?;
     TaskResultDto::try_from(result)
 }
@@ -580,11 +600,61 @@ fn finish_background(
 
 #[tauri::command]
 pub fn cancel_run(state: State<'_, AppState>, run_id: String) -> Result<bool, String> {
-    let _local_data = state
-        .local_data_gate
+    cancel_run_for(
+        &state.cancellations,
+        &state.manual_runs,
+        &state.run_operations,
+        &state.local_data_gate,
+        parse_run_id(&run_id)?,
+    )
+}
+
+fn cancel_run_for(
+    cancellations: &CancellationRegistry,
+    manual_runs: &ManualRunService,
+    operations: &RunOperationRegistry,
+    gate: &LocalDataGate,
+    run_id: Uuid,
+) -> Result<bool, String> {
+    let _local_data = gate
         .claim_mutating()
         .map_err(|_| "本地数据正在备份，请稍后重试。".to_string())?;
-    Ok(state.cancellations.cancel(parse_run_id(&run_id)?))
+    if cancellations.cancel(run_id) {
+        return Ok(true);
+    }
+    let _operation = operations
+        .claim([run_id])
+        .map_err(|_| "这次体检正在恢复、运行或清理数据，请勿重复操作。".to_string())?;
+    manual_runs
+        .cancel(run_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn interrupt_manual_run(state: State<'_, AppState>, run_id: String) -> Result<bool, String> {
+    interrupt_manual_run_for(
+        &state.manual_runs,
+        &state.run_operations,
+        &state.local_data_gate,
+        parse_run_id(&run_id)?,
+    )
+}
+
+fn interrupt_manual_run_for(
+    manual_runs: &ManualRunService,
+    operations: &RunOperationRegistry,
+    gate: &LocalDataGate,
+    run_id: Uuid,
+) -> Result<bool, String> {
+    let _local_data = gate
+        .claim_mutating()
+        .map_err(|_| "local data is busy".to_string())?;
+    let _operation = operations
+        .claim([run_id])
+        .map_err(|_| "run operation is busy".to_string())?;
+    manual_runs
+        .interrupt(run_id)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -2101,9 +2171,9 @@ mod tests {
         TargetAvailability,
     };
     use ability_core::{
-        Category, EnvironmentFingerprint, FailureKind, LoadedPack, ManualRunService, PackLoader,
-        RunMode, RunRecord, RunRepository, RunStatus, TargetKind, TargetSelection, TaskOutcome,
-        TaskResult,
+        summarize_scores, Category, EnvironmentFingerprint, FailureKind, LoadedPack,
+        ManualRunService, PackLoader, RunMode, RunRecord, RunRepository, RunStatus, TargetKind,
+        TargetSelection, TaskOutcome, TaskResult,
     };
     use std::collections::BTreeMap;
     use std::path::Path;
@@ -2749,10 +2819,226 @@ mod tests {
         let gate = crate::app_state::LocalDataGate::default();
         let backup = gate.claim_exclusive().unwrap();
 
-        let error = next_manual_step_for(&service, &gate, Uuid::new_v4()).unwrap_err();
+        let error = next_manual_step_for(
+            &service,
+            &RunOperationRegistry::default(),
+            &gate,
+            Uuid::new_v4(),
+        )
+        .unwrap_err();
 
         assert_eq!(error, "本地数据正在备份，请稍后重试。");
         drop(backup);
+    }
+
+    #[test]
+    fn manual_cancel_uses_the_exact_run_claim_and_respects_the_backup_gate() {
+        let directory = tempdir().unwrap();
+        let repository =
+            Arc::new(RunRepository::open(&directory.path().join("ability.db")).unwrap());
+        let pack = Arc::new(
+            PackLoader::load(
+                &Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../../benchmark-packs/client-quick-v1"),
+            )
+            .unwrap(),
+        );
+        let service = ManualRunService::new(repository.clone(), directory.path().join("artifacts"));
+        let run = service
+            .start(
+                pack.clone(),
+                TargetSelection {
+                    kind: TargetKind::ChatGptClient,
+                    reported_model: "GPT-5".into(),
+                    reasoning_effort: None,
+                },
+                RunMode::Quick,
+                environment(&pack, None, None),
+            )
+            .unwrap();
+        let cancellations = CancellationRegistry::default();
+        let operations = RunOperationRegistry::default();
+        let gate = LocalDataGate::default();
+
+        let operation = operations.claim([run.id]).unwrap();
+        assert!(cancel_run_for(&cancellations, &service, &operations, &gate, run.id).is_err());
+        assert_eq!(
+            repository.get_run(run.id).unwrap().unwrap().status,
+            RunStatus::Running
+        );
+        drop(operation);
+
+        let backup = gate.claim_exclusive().unwrap();
+        assert!(cancel_run_for(&cancellations, &service, &operations, &gate, run.id).is_err());
+        assert_eq!(
+            repository.get_run(run.id).unwrap().unwrap().status,
+            RunStatus::Running
+        );
+        drop(backup);
+
+        assert!(cancel_run_for(&cancellations, &service, &operations, &gate, run.id).unwrap());
+        assert_eq!(
+            repository.get_run(run.id).unwrap().unwrap().status,
+            RunStatus::Cancelled
+        );
+        assert!(!repository.has_running_runs().unwrap());
+        assert!(matches!(
+            service.resume(
+                run.id,
+                run.target.clone(),
+                pack.clone(),
+                environment(&pack, None, None),
+            ),
+            Err(ability_core::RunServiceError::NotResumable(_))
+        ));
+        assert_eq!(
+            repository.get_run(run.id).unwrap().unwrap().status,
+            RunStatus::Cancelled
+        );
+        #[cfg(windows)]
+        {
+            let output = tempdir().unwrap();
+            let destination = output.path().join("post-cancel-backup.zip");
+            assert!(export_full_backup_to_selected_path(
+                &repository,
+                &ArtifactStore::new(directory.path().join("artifacts")),
+                &operations,
+                &gate,
+                directory.path(),
+                Some(destination.clone()),
+                chrono::Utc::now(),
+            )
+            .unwrap());
+            assert!(destination.exists());
+        }
+    }
+
+    #[test]
+    fn manual_interrupt_uses_the_exact_run_claim_and_preserves_recovery() {
+        let directory = tempdir().unwrap();
+        let repository =
+            Arc::new(RunRepository::open(&directory.path().join("ability.db")).unwrap());
+        let pack = Arc::new(
+            PackLoader::load(
+                &Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../../benchmark-packs/client-quick-v1"),
+            )
+            .unwrap(),
+        );
+        let service = ManualRunService::new(repository.clone(), directory.path().join("artifacts"));
+        let run = service
+            .start(
+                pack.clone(),
+                TargetSelection {
+                    kind: TargetKind::ChatGptClient,
+                    reported_model: "GPT-5".into(),
+                    reasoning_effort: None,
+                },
+                RunMode::Quick,
+                environment(&pack, None, None),
+            )
+            .unwrap();
+        let operations = RunOperationRegistry::default();
+        let gate = LocalDataGate::default();
+
+        let operation = operations.claim([run.id]).unwrap();
+        assert!(interrupt_manual_run_for(&service, &operations, &gate, run.id).is_err());
+        assert_eq!(
+            repository.get_run(run.id).unwrap().unwrap().status,
+            RunStatus::Running
+        );
+        drop(operation);
+
+        let backup = gate.claim_exclusive().unwrap();
+        assert!(interrupt_manual_run_for(&service, &operations, &gate, run.id).is_err());
+        assert_eq!(
+            repository.get_run(run.id).unwrap().unwrap().status,
+            RunStatus::Running
+        );
+        drop(backup);
+
+        assert!(interrupt_manual_run_for(&service, &operations, &gate, run.id).unwrap());
+        assert_eq!(
+            repository.get_run(run.id).unwrap().unwrap().status,
+            RunStatus::Interrupted
+        );
+        assert!(!repository.has_running_runs().unwrap());
+        assert!(service
+            .resume(
+                run.id,
+                run.target,
+                pack.clone(),
+                environment(&pack, None, None),
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn cli_cancel_signals_only_the_exact_registered_token() {
+        let directory = tempdir().unwrap();
+        let repository =
+            Arc::new(RunRepository::open(&directory.path().join("ability.db")).unwrap());
+        let service = ManualRunService::new(repository, directory.path().join("artifacts"));
+        let cancellations = CancellationRegistry::default();
+        let selected = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let selected_token = CancellationToken::new();
+        let other_token = CancellationToken::new();
+        let _selected = cancellations
+            .register(selected, selected_token.clone())
+            .unwrap();
+        let _other = cancellations.register(other, other_token.clone()).unwrap();
+
+        assert!(cancel_run_for(
+            &cancellations,
+            &service,
+            &RunOperationRegistry::default(),
+            &LocalDataGate::default(),
+            selected,
+        )
+        .unwrap());
+        assert!(selected_token.is_cancelled());
+        assert!(!other_token.is_cancelled());
+    }
+
+    #[test]
+    fn manual_submit_respects_the_exact_run_operation_claim() {
+        let directory = tempdir().unwrap();
+        let repository =
+            Arc::new(RunRepository::open(&directory.path().join("ability.db")).unwrap());
+        let pack = Arc::new(
+            PackLoader::load(
+                &Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../../benchmark-packs/client-quick-v1"),
+            )
+            .unwrap(),
+        );
+        let service = ManualRunService::new(repository.clone(), directory.path().join("artifacts"));
+        let run = service
+            .start(
+                pack.clone(),
+                TargetSelection {
+                    kind: TargetKind::ChatGptClient,
+                    reported_model: "GPT-5".into(),
+                    reasoning_effort: None,
+                },
+                RunMode::Quick,
+                environment(&pack, None, None),
+            )
+            .unwrap();
+        let operations = RunOperationRegistry::default();
+        let _delete = operations.claim([run.id]).unwrap();
+
+        assert!(submit_manual_answer_for(
+            &service,
+            &operations,
+            &LocalDataGate::default(),
+            run.id,
+            &pack.tasks[0].definition.id,
+            "answer",
+        )
+        .is_err());
+        assert!(repository.get_task_results(run.id).unwrap().is_empty());
     }
 
     #[test]
@@ -3458,7 +3744,28 @@ mod tests {
         run.status = RunStatus::Running;
         repository.insert_run(&run).unwrap();
         if status == RunStatus::Completed {
-            repository.complete_run(run.id, None).unwrap();
+            let results = pack
+                .tasks
+                .iter()
+                .map(|task| TaskResult {
+                    run_id: run.id,
+                    task_id: task.definition.id.clone(),
+                    category: task.definition.category,
+                    outcome: TaskOutcome::Passed,
+                    score: Some(100.0),
+                    failure_kind: None,
+                    duration_ms: 1,
+                    answer_rel_path: None,
+                    detail: "coherent completed fixture".into(),
+                })
+                .collect::<Vec<_>>();
+            for result in &results {
+                repository.save_task_result(result).unwrap();
+            }
+            let score = summarize_scores(&results, run.total_tasks).unwrap();
+            repository.complete_run(run.id, Some(&score)).unwrap();
+        } else {
+            assert_eq!(status, RunStatus::Running);
         }
         repository.get_run(run.id).unwrap().unwrap()
     }
