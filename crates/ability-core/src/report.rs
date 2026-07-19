@@ -262,18 +262,31 @@ pub fn validate_public_report(report: &PublicReport) -> Result<(), ReportError> 
     Ok(())
 }
 
+fn reasoning_effort_display(kind: TargetKind, value: Option<&str>) -> &str {
+    match (kind, value) {
+        (_, None | Some("")) => "\u{672a}\u{8bb0}\u{5f55}",
+        (TargetKind::ChatGptClient, Some("low")) => "\u{8f7b}\u{5ea6}",
+        (_, Some("none")) => "\u{65e0}",
+        (_, Some("minimal")) => "\u{6700}\u{5c0f}",
+        (_, Some("low")) => "\u{4f4e}",
+        (_, Some("medium")) => "\u{4e2d}",
+        (_, Some("high")) => "\u{9ad8}",
+        (_, Some("xhigh")) => "\u{6781}\u{9ad8}",
+        (_, Some("max")) => "\u{6700}\u{9ad8}",
+        (_, Some("ultra")) => "Ultra",
+        (_, Some(value)) => value,
+    }
+}
+
 pub fn render_public_report_html(report: &PublicReport) -> Result<String, ReportError> {
     validate_public_report(report)?;
     let embedded_json = script_safe_json(&serde_json::to_string(report)?);
     let target = html_escape(target_kind_name(report.target.kind));
     let model = html_escape(&report.target.reported_model);
-    let effort = html_escape(
-        report
-            .target
-            .reasoning_effort
-            .as_deref()
-            .unwrap_or("未记录"),
-    );
+    let effort = html_escape(reasoning_effort_display(
+        report.target.kind,
+        report.target.reasoning_effort.as_deref(),
+    ));
     let score = report
         .result
         .ability_score

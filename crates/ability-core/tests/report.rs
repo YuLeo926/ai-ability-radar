@@ -347,6 +347,44 @@ fn html_is_fully_offline_and_escapes_visible_and_embedded_json_text() {
 }
 
 #[test]
+fn html_report_translates_known_efforts_but_json_stays_canonical() {
+    let (mut run, tasks) = sample_evidence("GPT-5.6");
+    run.target.kind = TargetKind::ChatGptClient;
+    run.target.reasoning_effort = Some("xhigh".into());
+
+    let report = build_public_report(&run, &tasks).unwrap();
+    assert_eq!(report.target.reasoning_effort.as_deref(), Some("xhigh"));
+    let html = render_public_report_html(&report).unwrap();
+    assert!(html.contains("\u{63a8}\u{7406}\u{6863}\u{4f4d}\u{ff1a}\u{6781}\u{9ad8}"));
+
+    run.target.kind = TargetKind::ChatGptClient;
+    run.target.reasoning_effort = Some("low".into());
+    let report = build_public_report(&run, &tasks).unwrap();
+    assert!(
+        render_public_report_html(&report)
+            .unwrap()
+            .contains("\u{63a8}\u{7406}\u{6863}\u{4f4d}\u{ff1a}\u{8f7b}\u{5ea6}")
+    );
+}
+
+#[test]
+fn html_report_preserves_and_escapes_custom_effort_labels() {
+    let (mut run, tasks) = sample_evidence("Claude");
+    run.target.kind = TargetKind::ClaudeClient;
+    run.target.reasoning_effort = Some("<\u{6269}\u{5c55}\u{601d}\u{8003}>".into());
+
+    let report = build_public_report(&run, &tasks).unwrap();
+    let html = render_public_report_html(&report).unwrap();
+    assert!(html.contains(
+        "\u{63a8}\u{7406}\u{6863}\u{4f4d}\u{ff1a}&lt;\u{6269}\u{5c55}\u{601d}\u{8003}&gt;"
+    ));
+    assert!(
+        !html
+            .contains("\u{63a8}\u{7406}\u{6863}\u{4f4d}\u{ff1a}<\u{6269}\u{5c55}\u{601d}\u{8003}>")
+    );
+}
+
+#[test]
 fn report_builder_rejects_incoherent_completed_evidence() {
     let (run, tasks) = sample_evidence("CLI current");
 

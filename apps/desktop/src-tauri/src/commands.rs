@@ -52,6 +52,63 @@ struct PreparedCliRun {
 const SAFE_BACKGROUND_ERROR: &str =
     "CLI 运行被中断；本次不会作为能力失败计分，请查看本地记录后重试。";
 
+const KNOWN_REASONING_EFFORTS: &[&str] = &[
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+];
+
+fn normalize_reasoning_effort(
+    value: Option<String>,
+    family: StartFamily,
+) -> Result<Option<String>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.chars().any(char::is_control) {
+        return Err("\u{63a8}\u{7406}\u{6863}\u{4f4d}\u{4e0d}\u{80fd}\u{5305}\u{542b}\u{63a7}\u{5236}\u{5b57}\u{7b26}".into());
+    }
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let canonical = trimmed.to_ascii_lowercase();
+    if KNOWN_REASONING_EFFORTS.contains(&canonical.as_str()) {
+        return Ok(Some(canonical));
+    }
+
+    match family {
+        StartFamily::Manual => {
+            if trimmed.chars().count() > 40 {
+                return Err("\u{81ea}\u{5b9a}\u{4e49}\u{63a8}\u{7406}\u{6863}\u{4f4d}\u{5fc5}\u{987b}\u{662f} 1\u{2013}40 \u{4e2a}\u{53ef}\u{89c1}\u{5b57}\u{7b26}".into());
+            }
+            Ok(Some(trimmed.to_owned()))
+        }
+        StartFamily::Cli => {
+            if canonical.len() > 32
+                || !canonical
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            {
+                return Err(
+                    "CLI \u{63a8}\u{7406}\u{6863}\u{4f4d}\u{53ea}\u{80fd}\u{5305}\u{542b} 1\u{2013}32 \u{4e2a} ASCII \u{5b57}\u{6bcd}\u{3001}\u{6570}\u{5b57}\u{3001}\u{4e0b}\u{5212}\u{7ebf}\u{6216}\u{8fde}\u{5b57}\u{7b26}"
+                        .into(),
+                );
+            }
+            Ok(Some(canonical))
+        }
+    }
+}
+
+fn validate_stored_reasoning_effort(
+    value: Option<String>,
+    family: StartFamily,
+) -> Result<Option<String>, String> {
+    let normalized = normalize_reasoning_effort(value.clone(), family)?;
+    if normalized != value {
+        return Err("\u{6062}\u{590d}\u{76ee}\u{6807}\u{5305}\u{542b}\u{672a}\u{89c4}\u{8303}\u{5316}\u{7684}\u{63a8}\u{7406}\u{6863}\u{4f4d}\u{3002}".into());
+    }
+    Ok(normalized)
+}
+
 fn validate_start(input: StartRunInput, family: StartFamily) -> Result<ValidatedStart, String> {
     if input.mode != RunMode::Quick {
         return Err("当前版本只支持快速体检；深度体检尚未实现".into());
@@ -91,25 +148,7 @@ fn validate_start(input: StartRunInput, family: StartFamily) -> Result<Validated
         );
     }
 
-    if input
-        .target
-        .reasoning_effort
-        .as_ref()
-        .is_some_and(|value| value.chars().any(char::is_control))
-    {
-        return Err("推理档位不能包含控制字符".into());
-    }
-    let reasoning_effort = input
-        .target
-        .reasoning_effort
-        .map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| !value.is_empty());
-    if reasoning_effort
-        .as_deref()
-        .is_some_and(|value| !matches!(value, "low" | "medium" | "high"))
-    {
-        return Err("首版推理档位只能是 low、medium 或 high".into());
-    }
+    let reasoning_effort = normalize_reasoning_effort(input.target.reasoning_effort, family)?;
 
     Ok(ValidatedStart {
         target: TargetSelection {
@@ -157,15 +196,11 @@ fn validate_resume_target(
     if family == StartFamily::Cli && !safe_cli_model(&input.reported_model) {
         return Err("恢复目标包含无效的 CLI 模型名称。".into());
     }
-    if input.reasoning_effort.as_deref().is_some_and(|value| {
-        !matches!(value, "low" | "medium" | "high") || value.chars().any(char::is_control)
-    }) {
-        return Err("恢复目标包含无效的推理档位。".into());
-    }
+    let reasoning_effort = validate_stored_reasoning_effort(input.reasoning_effort, family)?;
     Ok(TargetSelection {
         kind: input.kind,
         reported_model: input.reported_model,
-        reasoning_effort: input.reasoning_effort,
+        reasoning_effort,
     })
 }
 
@@ -2268,6 +2303,130 @@ mod tests {
     }
 
     #[test]
+    fn manual_reasoning_accepts_all_known_values_and_preserves_custom_labels() {
+        for value in [
+            "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+        ] {
+            let padded = format!(" {value} ");
+            let start = validate_start(
+                start_input(
+                    TargetKind::ChatGptClient,
+                    "GPT-5.6",
+                    Some(&padded),
+                    RunMode::Quick,
+                ),
+                StartFamily::Manual,
+            )
+            .unwrap();
+            assert_eq!(start.target.reasoning_effort.as_deref(), Some(value));
+        }
+
+        let custom = validate_start(
+            start_input(
+                TargetKind::ClaudeClient,
+                "Claude",
+                Some("  \u{6269}\u{5c55}\u{601d}\u{8003}\u{ff08}\u{5b9e}\u{9a8c}\u{ff09} "),
+                RunMode::Quick,
+            ),
+            StartFamily::Manual,
+        )
+        .unwrap();
+        assert_eq!(
+            custom.target.reasoning_effort.as_deref(),
+            Some("\u{6269}\u{5c55}\u{601d}\u{8003}\u{ff08}\u{5b9e}\u{9a8c}\u{ff09}")
+        );
+    }
+
+    #[test]
+    fn cli_reasoning_accepts_known_and_safe_custom_tokens() {
+        for value in [
+            "none",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra",
+            "frontier_2",
+            "deep-preview",
+        ] {
+            let padded = format!(" {value} ");
+            let start = validate_start(
+                start_input(
+                    TargetKind::CodexCli,
+                    "default",
+                    Some(&padded),
+                    RunMode::Quick,
+                ),
+                StartFamily::Cli,
+            )
+            .unwrap();
+            assert_eq!(start.target.reasoning_effort.as_deref(), Some(value));
+        }
+    }
+
+    #[test]
+    fn reasoning_rejects_control_overflow_and_unsafe_cli_values() {
+        let manual_overflow = "x".repeat(41);
+        for value in ["bad\nvalue".to_owned(), manual_overflow] {
+            assert!(validate_start(
+                start_input(
+                    TargetKind::ChatGptClient,
+                    "GPT",
+                    Some(&value),
+                    RunMode::Quick,
+                ),
+                StartFamily::Manual,
+            )
+            .is_err());
+        }
+
+        let cli_overflow = "a".repeat(33);
+        for value in [
+            "\u{6781}\u{9ad8}",
+            "high;calc",
+            "high value",
+            cli_overflow.as_str(),
+        ] {
+            assert!(validate_start(
+                start_input(TargetKind::CodexCli, "default", Some(value), RunMode::Quick,),
+                StartFamily::Cli,
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn resume_requires_the_already_normalized_family_specific_value() {
+        let valid = validate_resume_target(
+            ResumeTargetSelectionInput {
+                kind: TargetKind::ClaudeClient,
+                reported_model: "Claude".into(),
+                reasoning_effort: Some("\u{6269}\u{5c55}\u{601d}\u{8003}".into()),
+            },
+            StartFamily::Manual,
+        )
+        .unwrap();
+        assert_eq!(
+            valid.reasoning_effort.as_deref(),
+            Some("\u{6269}\u{5c55}\u{601d}\u{8003}")
+        );
+
+        for value in [" XHIGH ", "high;calc"] {
+            assert!(validate_resume_target(
+                ResumeTargetSelectionInput {
+                    kind: TargetKind::CodexCli,
+                    reported_model: "default".into(),
+                    reasoning_effort: Some(value.into()),
+                },
+                StartFamily::Cli,
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
     fn target_family_mode_and_unsafe_values_are_rejected() {
         assert!(validate_start(
             start_input(TargetKind::CodexCli, "default", None, RunMode::Quick,),
@@ -2306,7 +2465,7 @@ mod tests {
                 "{model:?} should be rejected"
             );
         }
-        for effort in ["ultra", "high\n", "médiúm"] {
+        for effort in ["high\n", "médiúm"] {
             assert!(validate_start(
                 start_input(
                     TargetKind::ClaudeCode,
