@@ -1,0 +1,99 @@
+name: windows-release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions: {}
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - name: Check out tagged revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify release tag
+        shell: pwsh
+        run: |
+          $tag = $env:RELEASE_TAG
+          if ($tag -cnotmatch '^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
+            throw "Release tag must be a strict vMAJOR.MINOR.PATCH semantic version."
+          }
+          $config = Get-Content apps/desktop/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          if ("v$($config.version)" -cne $tag) {
+            throw "Release tag does not exactly match the Tauri application version."
+          }
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+          cache: npm
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # reviewed master
+        with:
+          toolchain: stable
+          components: clippy,rustfmt
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Validate repository contracts
+        run: npm run validate:repository
+      - name: Check Rust formatting
+        run: cargo fmt --all --check
+      - name: Lint Rust
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test Rust
+        run: cargo test --workspace --all-targets --locked
+      - name: Test frontend
+        run: npm test
+      - name: Build unsigned draft prerelease
+        id: tauri
+        uses: tauri-apps/tauri-action@944946e3e4cac6603d1fe8f514171e9ecd3c78aa # v1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          projectPath: apps/desktop
+          tauriScript: npm run tauri --
+          tagName: ${{ env.RELEASE_TAG }}
+          releaseName: AI 能力雷达 ${{ env.RELEASE_TAG }}
+          releaseBody: |
+            Windows 10/11 x64 v0.2 预览版。
+
+            **警告：安装程序未签名。** Windows SmartScreen 可能显示风险提示。
+            核心数据默认只保存在本机；真实 CLI 测试消耗运行者自己的订阅用量。
+            下载后请使用随发布提供的 SHA256SUMS.txt 校验安装程序。
+          releaseDraft: true
+          prerelease: true
+          uploadUpdaterJson: false
+          uploadUpdaterSignatures: false
+      - name: Generate SHA-256 checksums
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem target/release/bundle -Recurse -File |
+            Where-Object { $_.Extension -in ".exe", ".msi" } |
+            Sort-Object FullName
+          if (-not $files) {
+            throw "No Windows installer was produced; refusing to publish an empty checksum file."
+          }
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
+            "$hash  $($file.Name)"
+          }
+          Set-Content -LiteralPath SHA256SUMS.txt -Value $lines -Encoding utf8NoBOM
+      - name: Upload checksums to the draft prerelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload $env:RELEASE_TAG SHA256SUMS.txt --clobber

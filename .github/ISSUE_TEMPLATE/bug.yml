@@ -1,0 +1,84 @@
+name: Bug 报告
+description: 提交不含私密数据的可复现故障
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请只提供脱敏信息。**不要粘贴原始回答、原始日志、令牌/token、登录输出、用户名、设备名或绝对路径。**
+        安全漏洞请改用仓库 Security Advisory 的私密 “Report a vulnerability” 入口。
+  - type: input
+    id: app-version
+    attributes:
+      label: 应用版本
+      placeholder: 例如 0.2.0
+    validations:
+      required: true
+  - type: input
+    id: windows-version
+    attributes:
+      label: Windows 版本
+      placeholder: 例如 Windows 11 24H2 x64
+    validations:
+      required: true
+  - type: dropdown
+    id: target
+    attributes:
+      label: 目标类型
+      options:
+        - ChatGPT 客户端
+        - Claude 客户端
+        - Codex CLI
+        - Claude Code
+        - 本地数据/导出
+        - 安装或启动
+    validations:
+      required: true
+  - type: input
+    id: pack-version
+    attributes:
+      label: 题包版本
+      description: 不涉及题包时填写“不适用”
+      placeholder: 例如 client-quick 1.0.0
+    validations:
+      required: true
+  - type: dropdown
+    id: error-category
+    attributes:
+      label: 脱敏错误类别
+      description: 请选择类别，不要粘贴原始错误或日志
+      options:
+        - CLI 未找到
+        - 未登录/认证失效
+        - Node.js 不支持
+        - 配额/速率限制
+        - 网络
+        - agent budget
+        - verifier/infrastructure
+        - 中断/恢复
+        - 本地数据/导出
+        - 安装/SmartScreen
+        - UI/无障碍
+        - 其他脱敏类别
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 最小复现步骤
+      description: 请删除所有原文、日志、凭据和本地路径
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为与实际行为
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: 隐私确认
+      options:
+        - label: 我已确认本报告不含原始日志、回答、令牌、凭据、用户名、设备名或绝对路径
+          required: true

@@ -683,7 +683,7 @@ mod tests {
             EnvironmentFingerprint {
                 os_family: "windows".into(),
                 os_version: "test".into(),
-                app_version: "0.1.0".into(),
+                app_version: "0.2.0".into(),
                 cli_version: None,
                 verifier_runtime_version: None,
                 suite_id: client_pack.manifest.id.clone(),
@@ -735,7 +735,7 @@ mod tests {
             EnvironmentFingerprint {
                 os_family: "windows".into(),
                 os_version: "test".into(),
-                app_version: "0.1.0".into(),
+                app_version: "0.2.0".into(),
                 cli_version: None,
                 verifier_runtime_version: None,
                 suite_id: client_pack.manifest.id.clone(),

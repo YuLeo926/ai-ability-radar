@@ -3445,7 +3445,7 @@ mod tests {
             EnvironmentFingerprint {
                 os_family: "windows".into(),
                 os_version: "test".into(),
-                app_version: "0.1.0".into(),
+                app_version: "0.2.0".into(),
                 cli_version: Some("fake-cli".into()),
                 verifier_runtime_version: Some("v22.0.0".into()),
                 suite_id: pack.manifest.id.clone(),

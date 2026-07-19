@@ -1,0 +1,62 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+          cache: npm
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # reviewed master
+        with:
+          toolchain: stable
+          components: clippy,rustfmt
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Validate repository contracts
+        run: npm run validate:repository
+      - name: Audit committed dependency lockfiles
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo audit
+          npm audit --audit-level=high
+      - name: Check Rust formatting
+        run: cargo fmt --all --check
+      - name: Lint Rust
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test Rust
+        run: cargo test --workspace --all-targets --locked
+      - name: Test frontend
+        run: npm test
+      - name: Build frontend
+        run: npm run build
+      - name: Prove Windows desktop NSIS bundle
+        run: npm run tauri -- build --debug --bundles nsis
+      - name: Upload exact debug installer
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ability-radar-windows-debug-nsis
+          path: target/debug/bundle/nsis/ability-radar_0.2.0_x64-setup.exe
+          if-no-files-found: error
+          retention-days: 7

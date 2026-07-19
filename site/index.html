@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'self'; img-src 'none'; font-src 'none'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"
+  >
+  <meta
+    name="description"
+    content="AI 能力雷达：在本机记录 ChatGPT、Claude、Codex CLI 与 Claude Code 对固定客观任务的表现。"
+  >
+  <title>AI 能力雷达 · Windows v0.2 预览</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f4f7fb;
+      --surface: #ffffff;
+      --text: #152033;
+      --subtle: #5e6a7d;
+      --border: #ccd6e4;
+      --brand: #176b68;
+      --brand-strong: #0f514f;
+      --warning: #8a5200;
+      --shadow: 0 18px 50px rgb(31 49 76 / 10%);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; background: var(--bg); }
+    body {
+      margin: 0;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 88% 0, rgb(23 107 104 / 14%), transparent 30rem),
+        var(--bg);
+      font: 400 16px/1.65 "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+    }
+    a { color: var(--brand-strong); }
+    .skip {
+      position: fixed;
+      top: 8px;
+      left: 8px;
+      z-index: 5;
+      padding: .6rem .9rem;
+      transform: translateY(-160%);
+      background: var(--surface);
+    }
+    .skip:focus { transform: none; }
+    header, main, footer { width: min(1080px, calc(100% - 32px)); margin: auto; }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: 1.25rem 0;
+    }
+    nav { display: flex; flex-wrap: wrap; gap: 1rem; }
+    .brand { color: var(--text); font-weight: 850; text-decoration: none; }
+    main { padding: 4rem 0; }
+    .hero { max-width: 840px; padding: 3rem 0 4rem; }
+    .eyebrow {
+      color: var(--brand-strong);
+      font-weight: 800;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    h1 {
+      margin: 0 0 1.25rem;
+      font-size: clamp(2.6rem, 8vw, 5.6rem);
+      line-height: 1;
+      letter-spacing: -.055em;
+    }
+    h2 { margin-top: 0; line-height: 1.2; }
+    .lead { max-width: 68ch; color: var(--subtle); font-size: 1.18rem; }
+    .actions { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1.75rem; }
+    .button {
+      display: inline-flex;
+      min-height: 44px;
+      align-items: center;
+      padding: .7rem 1rem;
+      border: 1px solid var(--brand);
+      border-radius: 10px;
+      background: var(--brand);
+      color: #fff;
+      font-weight: 750;
+      text-decoration: none;
+    }
+    .button.secondary { background: transparent; color: var(--brand-strong); }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 1rem;
+      margin: 1.5rem 0 4rem;
+    }
+    .card, .notice {
+      padding: 1.5rem;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+    .card p, .notice p { color: var(--subtle); }
+    .notice { margin: 1.5rem 0 4rem; border-left: 7px solid var(--warning); }
+    .facts { padding-left: 1.2rem; }
+    .facts li { margin: .65rem 0; }
+    footer {
+      padding: 2rem 0 3rem;
+      border-top: 1px solid var(--border);
+      color: var(--subtle);
+    }
+    footer nav { margin-bottom: .75rem; }
+    :focus-visible { outline: 3px solid #316bd8; outline-offset: 3px; }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0b1220;
+        --surface: #111b2d;
+        --text: #edf4ff;
+        --subtle: #aab8cb;
+        --border: #33445f;
+        --brand: #69d3c6;
+        --brand-strong: #9ae6dc;
+        --warning: #f1bc5b;
+        --shadow: 0 22px 60px rgb(0 0 0 / 28%);
+      }
+      .button { color: #071817; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip" href="#content">跳到主要内容</a>
+  <header>
+    <a class="brand" href="./">AI 能力雷达</a>
+    <nav aria-label="主导航">
+      <a href="#how">怎么测</a>
+      <a href="#privacy">隐私</a>
+      <a id="source-nav" href="./">源代码</a>
+    </nav>
+  </header>
+  <main id="content">
+    <section class="hero">
+      <p class="eyebrow">Windows 本地工具 · v0.2 预览</p>
+      <h1>把主观怀疑变成可复核的任务记录</h1>
+      <p class="lead">
+        所谓“降智检测”在这里仅指：用固定、客观评分的快速题包记录一次表现，并在条件一致时查看历史。
+        它能说明这次题包通过了什么，不能测量 IQ、解释模型内部变化，也不生成“降智”或退化裁决与置信度。
+      </p>
+      <div class="actions">
+        <a class="button" id="release-link" href="./">下载 Windows 预览版</a>
+        <a class="button secondary" id="source-link" href="./">查看源代码</a>
+      </div>
+    </section>
+
+    <section id="how" aria-labelledby="how-title">
+      <p class="eyebrow">两条独立测试线</p>
+      <h2 id="how-title">客户端复制粘贴与自动 CLI 测试不混比</h2>
+      <div class="grid">
+        <article class="card">
+          <h3>ChatGPT / Claude 客户端</h3>
+          <p>
+            在全新对话中逐题复制 8 道快速题，再把原始回答粘回应用。题包包含 3 道指令遵循、
+            3 道逻辑与 2 道代码审查题；人工复制粘贴时间计入本轨时长。
+          </p>
+        </article>
+        <article class="card">
+          <h3>Codex CLI / Claude Code</h3>
+          <p>
+            在各自临时目录完成 2 个原创 JavaScript 微型项目，并由本地允许列表验证器评分。
+            仅 CLI 任务要求 Node.js 22/24 LTS；进程与验证器时间合并记录。
+          </p>
+        </article>
+        <article class="card">
+          <h3>结果能怎么读</h3>
+          <p>
+            类别等权分数只描述当前题包。目标、报告模型、推理档位、题包、系统、工具版本和
+            clean/resumed 状态不同都会分开存储；两条测试线的时长不能互相比较。
+          </p>
+        </article>
+      </div>
+    </section>
+
+    <section aria-labelledby="cost-title">
+      <p class="eyebrow">谁支付测试费用</p>
+      <h2 id="cost-title">运行者承担自己的订阅用量</h2>
+      <div class="notice">
+        <p>
+          普通 GitHub CI 只运行假 CLI，不消耗任何 AI 订阅。个人电脑上的真实 CLI 测试会把用量
+          计入运行者自己的账号；维护者不提供共享凭据，也不代付。GitHub 托管 runner 的计费则
+          按仓库所有者的 GitHub 计划执行，与 AI 订阅分开。
+        </p>
+      </div>
+    </section>
+
+    <section id="privacy" aria-labelledby="privacy-title">
+      <p class="eyebrow">本地优先</p>
+      <h2 id="privacy-title">应用不收凭据，也没有默认上传</h2>
+      <ul class="facts">
+        <li>应用没有遥测、后台上传、分析、广告、Cookie 或公共排行榜。</li>
+        <li>应用不读取或保存 ChatGPT、Claude、Codex 或 GitHub 登录凭据。</li>
+        <li>原始回答、CLI 日志和历史默认保存在本机；公开报告使用字段允许列表。</li>
+        <li>真实测试的提示词与临时代码仍会发送给所选 AI 服务，并受该服务政策约束。</li>
+        <li>完整本地备份含原文且不加密，导出前应用会再次明确提醒。</li>
+      </ul>
+    </section>
+
+    <section aria-labelledby="support-title">
+      <p class="eyebrow">首发范围</p>
+      <h2 id="support-title">Windows 10/11 x64</h2>
+      <p class="lead">
+        v0.2 公开预览只提供 Windows 10/11 x64 安装程序。预览安装程序未签名，SmartScreen
+        可能显示风险提示；下载后请对照发布页中的 SHA-256 校验值。自动更新在本阶段禁用。
+      </p>
+    </section>
+  </main>
+  <footer>
+    <nav aria-label="文档">
+      <a href="docs/methodology.md">方法说明</a>
+      <a href="docs/privacy.md">隐私说明</a>
+      <a href="docs/security.md">安全说明</a>
+      <a href="docs/troubleshooting.md">故障排查</a>
+      <a id="footer-source" href="./">源代码</a>
+      <a id="footer-release" href="./">最新发布</a>
+    </nav>
+    <small>无 Cookie · 无统计脚本 · 无外部字体、脚本、图片或自动网络请求</small>
+  </footer>
+  <script>
+    const owner = location.hostname.split(".")[0];
+    const [projectPath] = location.pathname.split("/").filter(Boolean);
+    const repository = projectPath || `${owner}.github.io`;
+    const repositoryUrl = `https://github.com/${owner}/${repository}`;
+    const releaseUrl = `${repositoryUrl}/releases/tag/v0.2.0`;
+    for (const id of ["source-nav", "source-link", "footer-source"]) {
+      document.querySelector(`#${id}`).href = repositoryUrl;
+    }
+    for (const id of ["release-link", "footer-release"]) {
+      document.querySelector(`#${id}`).href = releaseUrl;
+    }
+  </script>
+</body>
+</html>

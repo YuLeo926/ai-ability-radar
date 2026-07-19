@@ -33,7 +33,7 @@ fn run(status: RunStatus, target: TargetKind, finished_at: Option<DateTime<Utc>>
         EnvironmentFingerprint {
             os_family: "windows".into(),
             os_version: "test".into(),
-            app_version: "0.1.0".into(),
+            app_version: "0.2.0".into(),
             cli_version: None,
             verifier_runtime_version: None,
             suite_id: "test-suite".into(),
@@ -178,7 +178,7 @@ fn full_backup_has_exact_unique_safe_entries_manifest_and_readable_snapshot() {
         &mut snapshot,
         &mut archive,
         now(),
-        "0.1.0",
+        "0.2.0",
     )
     .unwrap();
     if let Some(path) = std::env::var_os("ABILITY_RADAR_TEST_ZIP_OUT") {
@@ -209,7 +209,7 @@ fn full_backup_has_exact_unique_safe_entries_manifest_and_readable_snapshot() {
         serde_json::json!({
             "schemaVersion": 1,
             "createdAt": "2026-07-19T12:00:00Z",
-            "appVersion": "0.1.0",
+            "appVersion": "0.2.0",
             "containsRawAnswersAndLogs": true,
             "encrypted": false
         })
@@ -268,7 +268,7 @@ fn full_backup_propagates_stream_failure_without_creating_internal_archive_files
         &mut snapshot,
         &mut writer,
         now(),
-        "0.1.0",
+        "0.2.0",
     )
     .is_err());
     drop(snapshot);
