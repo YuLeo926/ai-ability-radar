@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import type {
   Backend,
   Bootstrap,
+  DataSettings,
   ManualStep,
   RunDetail,
   RunErrorEvent,
@@ -38,6 +39,11 @@ export const tauriBackend: Backend = {
     invoke<number>("delete_target_history", {
       input: { target, expectedRunIds },
     }),
+  getDataSettings: () => invoke<DataSettings>("get_data_settings"),
+  setRawRetention: (rawRetentionDays) =>
+    invoke<number>("set_raw_retention", { input: { rawRetentionDays } }),
+  exportFullBackup: (input) =>
+    invoke<boolean>("export_full_backup", { input }),
   onRunEvent: async (listener) =>
     listen<RunEvent>("run://event", ({ payload }) => listener(payload)),
   onRunError: async (listener) =>

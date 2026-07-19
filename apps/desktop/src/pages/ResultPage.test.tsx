@@ -177,6 +177,12 @@ function makeBackend(
     deleteRawArtifacts: async () => undefined,
     deleteRun: async () => false,
     deleteTargetHistory: async () => 0,
+    getDataSettings: async () => ({
+      rawRetentionDays: null,
+      cleanupPending: false,
+    }),
+    setRawRetention: async () => 0,
+    exportFullBackup: async () => false,
     onRunEvent: async () => () => undefined,
     onRunError: async () => () => undefined,
   };

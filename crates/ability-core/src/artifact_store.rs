@@ -1,7 +1,45 @@
-use crate::TargetKind;
+use crate::{BackupRunBinding, TargetKind};
+use std::fs::File;
+use std::io::{self, Read};
 use std::path::PathBuf;
 use thiserror::Error;
 use uuid::Uuid;
+
+pub fn canonical_windows_zip_name(name: &str) -> Option<String> {
+    if name.is_empty()
+        || name.starts_with(['/', '\\'])
+        || name.contains('\\')
+        || name.contains(':')
+        || name.chars().any(char::is_control)
+    {
+        return None;
+    }
+    let mut canonical = Vec::new();
+    for component in name.split('/') {
+        if component.is_empty()
+            || matches!(component, "." | "..")
+            || component.ends_with(['.', ' '])
+        {
+            return None;
+        }
+        let basename = component
+            .split_once('.')
+            .map_or(component, |(basename, _)| basename);
+        let device = basename.to_ascii_uppercase();
+        if matches!(device.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+            || device.strip_prefix("COM").is_some_and(|suffix| {
+                matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+            })
+            || device.strip_prefix("LPT").is_some_and(|suffix| {
+                matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+            })
+        {
+            return None;
+        }
+        canonical.push(component.to_lowercase());
+    }
+    Some(canonical.join("/"))
+}
 
 #[derive(Debug, Error)]
 pub enum ArtifactStoreError {
@@ -17,6 +55,23 @@ pub enum ArtifactStoreError {
 
 pub struct ArtifactStore {
     root: PathBuf,
+}
+
+pub struct ArtifactBackupFile {
+    zip_name: String,
+    file: File,
+}
+
+impl ArtifactBackupFile {
+    pub fn zip_name(&self) -> &str {
+        &self.zip_name
+    }
+}
+
+impl Read for ArtifactBackupFile {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.file.read(buffer)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +105,14 @@ impl ArtifactStore {
         windows::prepare_recovery(&self.root, run_id, target, pack_task_ids, checkpoints)
     }
 
+    #[cfg(windows)]
+    pub fn open_backup_files(
+        &self,
+        expected_runs: &[BackupRunBinding],
+    ) -> Result<Vec<ArtifactBackupFile>, ArtifactStoreError> {
+        windows::open_backup_files(&self.root, expected_runs)
+    }
+
     #[cfg(not(windows))]
     pub fn delete_run_artifacts(
         &self,
@@ -69,12 +132,23 @@ impl ArtifactStore {
     ) -> Result<(), ArtifactStoreError> {
         Err(ArtifactStoreError::UnsupportedPlatform)
     }
+
+    #[cfg(not(windows))]
+    pub fn open_backup_files(
+        &self,
+        _expected_runs: &[BackupRunBinding],
+    ) -> Result<Vec<ArtifactBackupFile>, ArtifactStoreError> {
+        Err(ArtifactStoreError::UnsupportedPlatform)
+    }
 }
 
 #[cfg(windows)]
 mod windows {
-    use super::{ArtifactStoreError, RecoveryArtifactCheckpoint};
-    use crate::TargetKind;
+    use super::{
+        ArtifactBackupFile, ArtifactStoreError, RecoveryArtifactCheckpoint,
+        canonical_windows_zip_name,
+    };
+    use crate::{BackupRunBinding, TargetKind};
     use std::collections::{HashMap, HashSet};
     use std::ffi::{OsStr, OsString};
     use std::fs::File;
@@ -99,16 +173,21 @@ mod windows {
         BY_HANDLE_FILE_INFORMATION, CreateFileW, DELETE, FILE_ATTRIBUTE_DIRECTORY,
         FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
         FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_BOTH_DIR_INFO, FILE_LIST_DIRECTORY,
-        FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
-        FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo, GetFileInformationByHandle,
-        GetFileInformationByHandleEx, OPEN_EXISTING, SYNCHRONIZE,
+        FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
+        FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo, GetDriveTypeW,
+        GetFileInformationByHandle, GetFileInformationByHandleEx, OPEN_EXISTING, SYNCHRONIZE,
     };
     use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+    use windows_sys::Win32::System::WindowsProgramming::{
+        DRIVE_CDROM, DRIVE_FIXED, DRIVE_NO_ROOT_DIR, DRIVE_RAMDISK, DRIVE_REMOTE, DRIVE_REMOVABLE,
+        DRIVE_UNKNOWN,
+    };
 
     const DIRECTORY_ACCESS: u32 =
         FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE;
     const DELETABLE_DIRECTORY_ACCESS: u32 = DIRECTORY_ACCESS | DELETE;
     const DELETABLE_FILE_ACCESS: u32 = FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE;
+    const BACKUP_FILE_ACCESS: u32 = FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
     const SAFE_SHARING: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
 
     #[derive(Clone, Copy)]
@@ -123,6 +202,30 @@ mod windows {
     enum HandleKind {
         File,
         Directory,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum SourceDrive {
+        Allowed,
+        Denied,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct VolumeAuthority {
+        drive: u8,
+        volume_serial_number: u32,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct HandleSnapshot {
+        attributes: u32,
+        volume_serial_number: u32,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    struct FileIdentity {
+        volume_serial_number: u32,
+        file_index: u64,
     }
 
     enum OpenedChild {
@@ -157,11 +260,15 @@ mod windows {
         F: FnOnce(),
     {
         let (drive, components) = local_drive_components(root)?;
-        let Some(root_handle) = open_existing_chain(drive, &components)? else {
+        let Some((root_handle, authority)) = open_existing_chain(drive, &components)? else {
             return Ok(false);
         };
-        let Some(runs_handle) =
-            open_optional_directory(&root_handle, OsStr::new("runs"), DIRECTORY_ACCESS)?
+        let Some(runs_handle) = open_optional_directory(
+            &root_handle,
+            OsStr::new("runs"),
+            DIRECTORY_ACCESS,
+            authority,
+        )?
         else {
             return Ok(false);
         };
@@ -170,13 +277,14 @@ mod windows {
             &runs_handle,
             OsStr::new(&run_name),
             DELETABLE_DIRECTORY_ACCESS,
+            authority,
         )?
         else {
             return Ok(false);
         };
-        preflight_tree(&run_handle, policy)?;
+        preflight_tree(&run_handle, policy, authority)?;
         after_preflight();
-        delete_tree(&run_handle, policy)?;
+        delete_tree(&run_handle, policy, authority)?;
         delete_handle(&run_handle).map_err(map_io)?;
         drop(run_handle);
         drop(runs_handle);
@@ -212,25 +320,143 @@ mod windows {
         }
 
         let (drive, components) = local_drive_components(root)?;
-        let Some(root_handle) = open_existing_chain(drive, &components)? else {
+        let Some((root_handle, authority)) = open_existing_chain(drive, &components)? else {
             return Ok(());
         };
-        let Some(runs_handle) =
-            open_optional_directory(&root_handle, OsStr::new("runs"), DIRECTORY_ACCESS)?
+        let Some(runs_handle) = open_optional_directory(
+            &root_handle,
+            OsStr::new("runs"),
+            DIRECTORY_ACCESS,
+            authority,
+        )?
         else {
             return Ok(());
         };
         let run_name = run_id.to_string();
-        let Some(run_handle) =
-            open_optional_directory(&runs_handle, OsStr::new(&run_name), DIRECTORY_ACCESS)?
+        let Some(run_handle) = open_optional_directory(
+            &runs_handle,
+            OsStr::new(&run_name),
+            DIRECTORY_ACCESS,
+            authority,
+        )?
         else {
             return Ok(());
         };
         match root_policy(target)? {
-            TreePolicy::ManualRoot => reconcile_manual(&run_handle, &pack_ids, &completed),
-            TreePolicy::CliRoot => reconcile_cli(&run_handle, &pack_ids, &completed),
+            TreePolicy::ManualRoot => {
+                reconcile_manual(&run_handle, &pack_ids, &completed, authority)
+            }
+            TreePolicy::CliRoot => reconcile_cli(&run_handle, &pack_ids, &completed, authority),
             TreePolicy::Logs | TreePolicy::Workspaces => unreachable!("target root policy"),
         }
+    }
+
+    pub fn open_backup_files(
+        root: &Path,
+        expected_runs: &[BackupRunBinding],
+    ) -> Result<Vec<ArtifactBackupFile>, ArtifactStoreError> {
+        let mut expected = HashMap::with_capacity(expected_runs.len());
+        for binding in expected_runs {
+            if expected.insert(binding.id, binding.target).is_some() {
+                return Err(ArtifactStoreError::UnexpectedEntry);
+            }
+        }
+        let (drive, components) = local_drive_components(root)?;
+        let Some((root_handle, authority)) = open_existing_chain(drive, &components)? else {
+            return Ok(Vec::new());
+        };
+        for name in list_safe_directory(&root_handle)? {
+            validate_name(&name)?;
+            if name != OsStr::new("runs") {
+                return Err(ArtifactStoreError::UnexpectedEntry);
+            }
+        }
+        let Some(runs_handle) = open_optional_directory(
+            &root_handle,
+            OsStr::new("runs"),
+            DIRECTORY_ACCESS,
+            authority,
+        )?
+        else {
+            return Ok(Vec::new());
+        };
+
+        let mut files = Vec::new();
+        let mut zip_names = HashSet::new();
+        let mut file_identities = HashSet::new();
+        for name in list_safe_directory(&runs_handle)? {
+            validate_name(&name)?;
+            let value = name.to_str().ok_or(ArtifactStoreError::UnexpectedEntry)?;
+            let run_id = Uuid::parse_str(value).map_err(|_| ArtifactStoreError::UnexpectedEntry)?;
+            if run_id.to_string() != value {
+                return Err(ArtifactStoreError::UnexpectedEntry);
+            }
+            let target = expected
+                .get(&run_id)
+                .copied()
+                .ok_or(ArtifactStoreError::UnexpectedEntry)?;
+            let run_handle =
+                open_optional_directory(&runs_handle, &name, DIRECTORY_ACCESS, authority)?
+                    .ok_or(ArtifactStoreError::UnexpectedEntry)?;
+            let mut components = vec!["artifacts".to_owned(), "runs".to_owned(), value.to_owned()];
+            collect_backup_tree(
+                &run_handle,
+                root_policy(target)?,
+                &mut components,
+                &mut zip_names,
+                &mut file_identities,
+                &mut files,
+                authority,
+            )?;
+        }
+        files.sort_by(|left, right| left.zip_name.cmp(&right.zip_name));
+        Ok(files)
+    }
+
+    fn collect_backup_tree(
+        directory: &File,
+        policy: TreePolicy,
+        components: &mut Vec<String>,
+        zip_names: &mut HashSet<String>,
+        file_identities: &mut HashSet<FileIdentity>,
+        files: &mut Vec<ArtifactBackupFile>,
+        authority: VolumeAuthority,
+    ) -> Result<(), ArtifactStoreError> {
+        for name in list_safe_directory(directory)? {
+            validate_name(&name)?;
+            let value = name
+                .to_str()
+                .ok_or(ArtifactStoreError::UnexpectedEntry)?
+                .to_owned();
+            let child = open_child_for_backup(directory, &name, authority)?;
+            let child_policy = classify(policy, &name, child.kind())?;
+            components.push(value);
+            match child {
+                OpenedChild::Directory(child) => {
+                    collect_backup_tree(
+                        &child,
+                        child_policy,
+                        components,
+                        zip_names,
+                        file_identities,
+                        files,
+                        authority,
+                    )?;
+                }
+                OpenedChild::File(file) => {
+                    let zip_name = components.join("/");
+                    let canonical_zip_name = canonical_windows_zip_name(&zip_name)
+                        .ok_or(ArtifactStoreError::UnexpectedEntry)?;
+                    let identity = file_identity(&file, authority).map_err(map_io)?;
+                    if !zip_names.insert(canonical_zip_name) || !file_identities.insert(identity) {
+                        return Err(ArtifactStoreError::UnexpectedEntry);
+                    }
+                    files.push(ArtifactBackupFile { zip_name, file });
+                }
+            }
+            components.pop();
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -246,26 +472,34 @@ mod windows {
         delete_run_inner(root, run_id, root_policy(target)?, hook)
     }
 
-    fn preflight_tree(directory: &File, policy: TreePolicy) -> Result<(), ArtifactStoreError> {
-        for name in list_directory(directory).map_err(map_io)? {
+    fn preflight_tree(
+        directory: &File,
+        policy: TreePolicy,
+        authority: VolumeAuthority,
+    ) -> Result<(), ArtifactStoreError> {
+        for name in list_safe_directory(directory)? {
             validate_name(&name)?;
-            let child = open_child(directory, &name, false)?;
+            let child = open_child(directory, &name, false, authority)?;
             let child_policy = classify(policy, &name, child.kind())?;
             if let OpenedChild::Directory(child) = child {
-                preflight_tree(&child, child_policy)?;
+                preflight_tree(&child, child_policy, authority)?;
             }
         }
         Ok(())
     }
 
-    fn delete_tree(directory: &File, policy: TreePolicy) -> Result<(), ArtifactStoreError> {
-        for name in list_directory(directory).map_err(map_io)? {
+    fn delete_tree(
+        directory: &File,
+        policy: TreePolicy,
+        authority: VolumeAuthority,
+    ) -> Result<(), ArtifactStoreError> {
+        for name in list_safe_directory(directory)? {
             validate_name(&name)?;
-            let child = open_child(directory, &name, true)?;
+            let child = open_child(directory, &name, true, authority)?;
             let child_policy = classify(policy, &name, child.kind())?;
             match child {
                 OpenedChild::Directory(child) => {
-                    delete_tree(&child, child_policy)?;
+                    delete_tree(&child, child_policy, authority)?;
                     delete_handle(&child).map_err(map_io)?;
                 }
                 OpenedChild::File(child) => delete_handle(&child).map_err(map_io)?,
@@ -312,8 +546,9 @@ mod windows {
         directory: &File,
         pack_ids: &HashSet<&str>,
         completed: &HashMap<&str, bool>,
+        authority: VolumeAuthority,
     ) -> Result<(), ArtifactStoreError> {
-        for name in list_directory(directory).map_err(map_io)? {
+        for name in list_safe_directory(directory)? {
             validate_name(&name)?;
             let value = name.to_str().ok_or(ArtifactStoreError::UnexpectedEntry)?;
             let (task_id, preserve) = if let Some(task_id) = value.strip_suffix(".txt") {
@@ -337,7 +572,7 @@ mod windows {
                 (task_id, false)
             };
             let _ = task_id;
-            match open_child(directory, &name, !preserve)? {
+            match open_child(directory, &name, !preserve, authority)? {
                 OpenedChild::File(child) if !preserve => delete_handle(&child).map_err(map_io)?,
                 OpenedChild::File(_) => {}
                 OpenedChild::Directory(_) => return Err(ArtifactStoreError::UnexpectedEntry),
@@ -350,16 +585,17 @@ mod windows {
         directory: &File,
         pack_ids: &HashSet<&str>,
         completed: &HashMap<&str, bool>,
+        authority: VolumeAuthority,
     ) -> Result<(), ArtifactStoreError> {
-        for name in list_directory(directory).map_err(map_io)? {
+        for name in list_safe_directory(directory)? {
             validate_name(&name)?;
             let value = name.to_str().ok_or(ArtifactStoreError::UnexpectedEntry)?;
-            match (value, open_child(directory, &name, false)?) {
+            match (value, open_child(directory, &name, false, authority)?) {
                 ("logs", OpenedChild::Directory(logs)) => {
-                    reconcile_logs(&logs, pack_ids, completed)?;
+                    reconcile_logs(&logs, pack_ids, completed, authority)?;
                 }
                 ("workspaces", OpenedChild::Directory(workspaces)) => {
-                    reconcile_workspaces(&workspaces, pack_ids, completed)?;
+                    reconcile_workspaces(&workspaces, pack_ids, completed, authority)?;
                 }
                 _ => return Err(ArtifactStoreError::UnexpectedEntry),
             }
@@ -371,8 +607,9 @@ mod windows {
         directory: &File,
         pack_ids: &HashSet<&str>,
         completed: &HashMap<&str, bool>,
+        authority: VolumeAuthority,
     ) -> Result<(), ArtifactStoreError> {
-        for name in list_directory(directory).map_err(map_io)? {
+        for name in list_safe_directory(directory)? {
             validate_name(&name)?;
             let value = name.to_str().ok_or(ArtifactStoreError::UnexpectedEntry)?;
             let Some(task_id) = value.strip_suffix(".log") else {
@@ -382,14 +619,14 @@ mod windows {
                 return Err(ArtifactStoreError::UnexpectedEntry);
             }
             match completed.get(task_id) {
-                Some(true) => match open_child(directory, &name, false)? {
+                Some(true) => match open_child(directory, &name, false, authority)? {
                     OpenedChild::File(_) => {}
                     OpenedChild::Directory(_) => {
                         return Err(ArtifactStoreError::UnexpectedEntry);
                     }
                 },
                 Some(false) => return Err(ArtifactStoreError::UnexpectedEntry),
-                None => match open_child(directory, &name, true)? {
+                None => match open_child(directory, &name, true, authority)? {
                     OpenedChild::File(child) => delete_handle(&child).map_err(map_io)?,
                     OpenedChild::Directory(_) => {
                         return Err(ArtifactStoreError::UnexpectedEntry);
@@ -404,20 +641,23 @@ mod windows {
         directory: &File,
         pack_ids: &HashSet<&str>,
         completed: &HashMap<&str, bool>,
+        authority: VolumeAuthority,
     ) -> Result<(), ArtifactStoreError> {
-        for name in list_directory(directory).map_err(map_io)? {
+        for name in list_safe_directory(directory)? {
             validate_name(&name)?;
             let task_id = name.to_str().ok_or(ArtifactStoreError::UnexpectedEntry)?;
             if !pack_ids.contains(task_id) {
                 return Err(ArtifactStoreError::UnexpectedEntry);
             }
             let deleting = !completed.contains_key(task_id);
-            if let OpenedChild::Directory(child) = open_child(directory, &name, deleting)? {
+            if let OpenedChild::Directory(child) =
+                open_child(directory, &name, deleting, authority)?
+            {
                 if deleting {
-                    delete_tree(&child, TreePolicy::Workspaces)?;
+                    delete_tree(&child, TreePolicy::Workspaces, authority)?;
                     delete_handle(&child).map_err(map_io)?;
                 } else {
-                    preflight_tree(&child, TreePolicy::Workspaces)?;
+                    preflight_tree(&child, TreePolicy::Workspaces, authority)?;
                 }
             } else {
                 return Err(ArtifactStoreError::UnexpectedEntry);
@@ -432,6 +672,7 @@ mod windows {
             || matches!(value, "." | "..")
             || value.contains(['/', '\\', ':'])
             || value.chars().any(char::is_control)
+            || canonical_windows_zip_name(value).is_none()
         {
             return Err(ArtifactStoreError::UnexpectedEntry);
         }
@@ -490,15 +731,24 @@ mod windows {
     fn open_existing_chain(
         drive: u8,
         components: &[OsString],
-    ) -> Result<Option<File>, ArtifactStoreError> {
+    ) -> Result<Option<(File, VolumeAuthority)>, ArtifactStoreError> {
+        require_allowed_source_drive(drive)?;
         let mut current = open_drive_root(drive).map_err(map_io)?;
+        let root = inspect_handle(&current).map_err(map_io)?;
+        let authority = VolumeAuthority {
+            drive: drive.to_ascii_uppercase(),
+            volume_serial_number: root.volume_serial_number,
+        };
+        validate_handle_snapshot(root, authority).map_err(map_io)?;
         for component in components {
-            let Some(next) = open_optional_directory(&current, component, DIRECTORY_ACCESS)? else {
+            let Some(next) =
+                open_optional_directory(&current, component, DIRECTORY_ACCESS, authority)?
+            else {
                 return Ok(None);
             };
             current = next;
         }
-        Ok(Some(current))
+        Ok(Some((current, authority)))
     }
 
     fn open_drive_root(drive: u8) -> io::Result<File> {
@@ -519,14 +769,33 @@ mod windows {
             return Err(io::Error::last_os_error());
         }
         let file = unsafe { File::from_raw_handle(handle as RawHandle) };
-        reject_reparse_handle(&file)?;
         Ok(file)
+    }
+
+    fn classify_source_drive(raw: u32) -> SourceDrive {
+        match raw {
+            DRIVE_FIXED | DRIVE_REMOVABLE | DRIVE_RAMDISK => SourceDrive::Allowed,
+            DRIVE_REMOTE | DRIVE_UNKNOWN | DRIVE_NO_ROOT_DIR | DRIVE_CDROM => SourceDrive::Denied,
+            _ => SourceDrive::Denied,
+        }
+    }
+
+    fn require_allowed_source_drive(drive: u8) -> Result<(), ArtifactStoreError> {
+        let root = PathBuf::from(format!("{}:\\", char::from(drive)));
+        let wide = wide(root.as_os_str());
+        let drive_type = unsafe { GetDriveTypeW(wide.as_ptr()) };
+        if classify_source_drive(drive_type) == SourceDrive::Allowed {
+            Ok(())
+        } else {
+            Err(ArtifactStoreError::UnsafeLayout)
+        }
     }
 
     fn open_optional_directory(
         parent: &File,
         name: &OsStr,
         access: u32,
+        authority: VolumeAuthority,
     ) -> Result<Option<File>, ArtifactStoreError> {
         match open_relative(
             parent,
@@ -536,7 +805,11 @@ mod windows {
             SAFE_SHARING,
         ) {
             Ok(file) => {
-                reject_reparse_handle(&file).map_err(map_io)?;
+                let snapshot = inspect_handle(&file).map_err(map_io)?;
+                validate_handle_snapshot(snapshot, authority).map_err(map_io)?;
+                if handle_kind(snapshot) != HandleKind::Directory {
+                    return Err(ArtifactStoreError::UnexpectedEntry);
+                }
                 Ok(Some(file))
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -548,6 +821,7 @@ mod windows {
         parent: &File,
         name: &OsStr,
         deletable: bool,
+        authority: VolumeAuthority,
     ) -> Result<OpenedChild, ArtifactStoreError> {
         let directory_access = if deletable {
             DELETABLE_DIRECTORY_ACCESS
@@ -562,7 +836,9 @@ mod windows {
             SAFE_SHARING,
         ) {
             Ok(file) => {
-                if handle_kind(&file).map_err(map_io)? != HandleKind::Directory {
+                let snapshot = inspect_handle(&file).map_err(map_io)?;
+                validate_handle_snapshot(snapshot, authority).map_err(map_io)?;
+                if handle_kind(snapshot) != HandleKind::Directory {
                     return Err(ArtifactStoreError::UnexpectedEntry);
                 }
                 Ok(OpenedChild::Directory(file))
@@ -583,7 +859,50 @@ mod windows {
                     SAFE_SHARING,
                 )
                 .map_err(map_io)?;
-                if handle_kind(&file).map_err(map_io)? != HandleKind::File {
+                let snapshot = inspect_handle(&file).map_err(map_io)?;
+                validate_handle_snapshot(snapshot, authority).map_err(map_io)?;
+                if handle_kind(snapshot) != HandleKind::File {
+                    return Err(ArtifactStoreError::UnexpectedEntry);
+                }
+                Ok(OpenedChild::File(file))
+            }
+        }
+    }
+
+    fn open_child_for_backup(
+        parent: &File,
+        name: &OsStr,
+        authority: VolumeAuthority,
+    ) -> Result<OpenedChild, ArtifactStoreError> {
+        match open_relative(
+            parent,
+            name,
+            DIRECTORY_ACCESS,
+            FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+            SAFE_SHARING,
+        ) {
+            Ok(file) => {
+                let snapshot = inspect_handle(&file).map_err(map_io)?;
+                validate_handle_snapshot(snapshot, authority).map_err(map_io)?;
+                if handle_kind(snapshot) != HandleKind::Directory {
+                    return Err(ArtifactStoreError::UnexpectedEntry);
+                }
+                Ok(OpenedChild::Directory(file))
+            }
+            Err(_) => {
+                let file = open_relative(
+                    parent,
+                    name,
+                    BACKUP_FILE_ACCESS,
+                    FILE_NON_DIRECTORY_FILE
+                        | FILE_OPEN_REPARSE_POINT
+                        | FILE_SYNCHRONOUS_IO_NONALERT,
+                    SAFE_SHARING,
+                )
+                .map_err(map_io)?;
+                let snapshot = inspect_handle(&file).map_err(map_io)?;
+                validate_handle_snapshot(snapshot, authority).map_err(map_io)?;
+                if handle_kind(snapshot) != HandleKind::File {
                     return Err(ArtifactStoreError::UnexpectedEntry);
                 }
                 Ok(OpenedChild::File(file))
@@ -675,6 +994,21 @@ mod windows {
         Ok(names)
     }
 
+    fn list_safe_directory(directory: &File) -> Result<Vec<OsString>, ArtifactStoreError> {
+        let names = list_directory(directory).map_err(map_io)?;
+        let mut canonical = HashSet::with_capacity(names.len());
+        for name in &names {
+            validate_name(name)?;
+            let value = name.to_str().ok_or(ArtifactStoreError::UnexpectedEntry)?;
+            let key =
+                canonical_windows_zip_name(value).ok_or(ArtifactStoreError::UnexpectedEntry)?;
+            if !canonical.insert(key) {
+                return Err(ArtifactStoreError::UnexpectedEntry);
+            }
+        }
+        Ok(names)
+    }
+
     fn invalid_directory_information() -> io::Error {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -727,25 +1061,61 @@ mod windows {
         Ok(unsafe { File::from_raw_handle(handle as RawHandle) })
     }
 
-    fn handle_kind(file: &File) -> io::Result<HandleKind> {
+    fn inspect_handle(file: &File) -> io::Result<HandleSnapshot> {
         let mut information = unsafe { zeroed::<BY_HANDLE_FILE_INFORMATION>() };
         if unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut information) } == 0 {
             return Err(io::Error::last_os_error());
         }
-        if information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "reparse point"));
-        }
-        Ok(
-            if information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
-                HandleKind::Directory
-            } else {
-                HandleKind::File
-            },
-        )
+        Ok(HandleSnapshot {
+            attributes: information.dwFileAttributes,
+            volume_serial_number: information.dwVolumeSerialNumber,
+        })
     }
 
-    fn reject_reparse_handle(file: &File) -> io::Result<()> {
-        handle_kind(file).map(|_| ())
+    fn validate_handle_snapshot(
+        snapshot: HandleSnapshot,
+        authority: VolumeAuthority,
+    ) -> io::Result<()> {
+        let _ = authority.drive;
+        if snapshot.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || snapshot.volume_serial_number != authority.volume_serial_number
+        {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "reparse point"));
+        }
+        Ok(())
+    }
+
+    fn handle_kind(snapshot: HandleSnapshot) -> HandleKind {
+        if snapshot.attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+            HandleKind::Directory
+        } else {
+            HandleKind::File
+        }
+    }
+
+    fn file_identity(file: &File, authority: VolumeAuthority) -> io::Result<FileIdentity> {
+        let mut information = unsafe { zeroed::<BY_HANDLE_FILE_INFORMATION>() };
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut information) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        validate_handle_snapshot(
+            HandleSnapshot {
+                attributes: information.dwFileAttributes,
+                volume_serial_number: information.dwVolumeSerialNumber,
+            },
+            authority,
+        )?;
+        if information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "backup entry is not an ordinary file",
+            ));
+        }
+        Ok(FileIdentity {
+            volume_serial_number: information.dwVolumeSerialNumber,
+            file_index: (u64::from(information.nFileIndexHigh) << 32)
+                | u64::from(information.nFileIndexLow),
+        })
     }
 
     fn delete_handle(file: &File) -> io::Result<()> {
@@ -803,6 +1173,71 @@ mod windows {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
         use tempfile::tempdir;
+
+        #[test]
+        fn source_drive_allowlist_accepts_only_fixed_removable_and_ramdisk() {
+            assert_eq!(classify_source_drive(DRIVE_FIXED), SourceDrive::Allowed);
+            assert_eq!(classify_source_drive(DRIVE_REMOVABLE), SourceDrive::Allowed);
+            assert_eq!(classify_source_drive(DRIVE_RAMDISK), SourceDrive::Allowed);
+            for denied in [
+                DRIVE_REMOTE,
+                DRIVE_UNKNOWN,
+                DRIVE_NO_ROOT_DIR,
+                DRIVE_CDROM,
+                u32::MAX,
+            ] {
+                assert_eq!(classify_source_drive(denied), SourceDrive::Denied);
+            }
+        }
+
+        #[test]
+        fn source_handle_authority_rejects_reparse_and_cross_volume_handles() {
+            let authority = VolumeAuthority {
+                drive: b'C',
+                volume_serial_number: 91,
+            };
+            assert!(
+                validate_handle_snapshot(
+                    HandleSnapshot {
+                        attributes: FILE_ATTRIBUTE_NORMAL,
+                        volume_serial_number: 91,
+                    },
+                    authority,
+                )
+                .is_ok()
+            );
+            assert!(
+                validate_handle_snapshot(
+                    HandleSnapshot {
+                        attributes: FILE_ATTRIBUTE_REPARSE_POINT,
+                        volume_serial_number: 91,
+                    },
+                    authority,
+                )
+                .is_err()
+            );
+            assert!(
+                validate_handle_snapshot(
+                    HandleSnapshot {
+                        attributes: FILE_ATTRIBUTE_NORMAL,
+                        volume_serial_number: 92,
+                    },
+                    authority,
+                )
+                .is_err()
+            );
+        }
+
+        #[test]
+        fn windows_zip_component_key_rejects_device_and_trailing_names_and_folds_case() {
+            assert!(canonical_windows_zip_name("artifacts/runs/id/CON.txt").is_none());
+            assert!(canonical_windows_zip_name("artifacts/runs/id/answer.txt.").is_none());
+            assert!(canonical_windows_zip_name("artifacts/runs/id/answer.txt ").is_none());
+            assert_eq!(
+                canonical_windows_zip_name("artifacts/runs/id/Answer.TXT"),
+                canonical_windows_zip_name("artifacts/runs/id/answer.txt")
+            );
+        }
 
         #[test]
         fn retained_run_handle_blocks_a_preflight_to_delete_junction_swap() {

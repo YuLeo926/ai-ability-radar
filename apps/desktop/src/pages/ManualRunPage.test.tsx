@@ -112,6 +112,12 @@ function fakeBackend(overrides: Partial<Backend> = {}): Backend {
     deleteRawArtifacts: vi.fn(async () => undefined),
     deleteRun: vi.fn(async () => false),
     deleteTargetHistory: vi.fn(async () => 0),
+    getDataSettings: vi.fn(async () => ({
+      rawRetentionDays: null,
+      cleanupPending: false,
+    })),
+    setRawRetention: vi.fn(async () => 0),
+    exportFullBackup: vi.fn(async () => false),
     onRunEvent: vi.fn(async () => () => undefined),
     onRunError: vi.fn(async () => () => undefined),
     ...overrides,

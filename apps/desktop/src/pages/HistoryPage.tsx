@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { useBackend } from "../api/BackendContext";
 import { isSafeRunRecordList } from "../api/runtimeValidation";
 import type {
+  DataSettings,
   RunRecord,
   RunStatus,
   TargetKind,
@@ -179,6 +180,300 @@ function resumePath(run: RunRecord): string {
       ? "manual"
       : "cli";
   return `/${route}/${run.target.kind}?resume=${encodeURIComponent(run.id)}`;
+}
+
+function validDataSettings(value: DataSettings): boolean {
+  return (
+    (value.rawRetentionDays === null ||
+      [7, 30, 90].includes(value.rawRetentionDays)) &&
+    typeof value.cleanupPending === "boolean"
+  );
+}
+
+function retentionValue(value: number | null): string {
+  return value === null ? "forever" : String(value);
+}
+
+const BACKUP_CLEANUP_INCOMPLETE =
+  "备份未完成，临时私密数据可能尚未清理；请关闭应用并联系支持。";
+
+function backupFailureMessage(error: unknown): string {
+  const message =
+    typeof error === "string"
+      ? error
+      : error instanceof Error
+        ? error.message
+        : "";
+  return message === BACKUP_CLEANUP_INCOMPLETE
+    ? BACKUP_CLEANUP_INCOMPLETE
+    : "无法完成本地备份，请稍后重试。";
+}
+
+function LocalDataControls() {
+  const backend = useBackend();
+  const mounted = useRef(false);
+  const settingsGeneration = useRef(0);
+  const operationGeneration = useRef(0);
+  const retentionInFlight = useRef(false);
+  const backupInFlight = useRef(false);
+  const [settings, setSettings] = useState<DataSettings | null>(null);
+  const [settingsError, setSettingsError] = useState(false);
+  const [pendingRetention, setPendingRetention] = useState<number | null>(null);
+  const [confirmRetention, setConfirmRetention] = useState(false);
+  const [retentionBusy, setRetentionBusy] = useState(false);
+  const [retentionMessage, setRetentionMessage] = useState("");
+  const [backupAcknowledged, setBackupAcknowledged] = useState(false);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupMessage, setBackupMessage] = useState("");
+
+  async function loadSettings(): Promise<DataSettings | null> {
+    const generation = ++settingsGeneration.current;
+    try {
+      const loaded = await backend.getDataSettings();
+      if (
+        !mounted.current ||
+        generation !== settingsGeneration.current ||
+        !validDataSettings(loaded)
+      ) {
+        if (
+          mounted.current &&
+          generation === settingsGeneration.current &&
+          !validDataSettings(loaded)
+        ) {
+          setSettingsError(true);
+        }
+        return null;
+      }
+      setSettings(loaded);
+      setPendingRetention(loaded.rawRetentionDays);
+      setSettingsError(false);
+      return loaded;
+    } catch {
+      if (mounted.current && generation === settingsGeneration.current) {
+        setSettingsError(true);
+      }
+      return null;
+    }
+  }
+
+  useEffect(() => {
+    mounted.current = true;
+    void loadSettings();
+    return () => {
+      mounted.current = false;
+      settingsGeneration.current += 1;
+      operationGeneration.current += 1;
+      retentionInFlight.current = false;
+      backupInFlight.current = false;
+    };
+  }, [backend]);
+
+  const shortening =
+    settings !== null &&
+    pendingRetention !== null &&
+    (settings.rawRetentionDays === null ||
+      pendingRetention < settings.rawRetentionDays);
+  const changed =
+    settings !== null && pendingRetention !== settings.rawRetentionDays;
+
+  async function applyRetention() {
+    if (
+      !changed ||
+      retentionInFlight.current ||
+      backupInFlight.current
+    ) {
+      return;
+    }
+    if (shortening && !confirmRetention) {
+      setConfirmRetention(true);
+      return;
+    }
+    const generation = ++operationGeneration.current;
+    retentionInFlight.current = true;
+    setRetentionBusy(true);
+    setConfirmRetention(false);
+    setRetentionMessage("");
+    try {
+      await backend.setRawRetention(pendingRetention);
+      const effective = await loadSettings();
+      if (!mounted.current || generation !== operationGeneration.current) return;
+      setRetentionMessage(
+        effective?.cleanupPending
+          ? "保留期限已生效，但原始数据清理尚未完成；稍后可重试。"
+          : "原始数据保留期限已更新。",
+      );
+    } catch {
+      const effective = await loadSettings();
+      if (!mounted.current || generation !== operationGeneration.current) return;
+      setRetentionMessage(
+        effective?.cleanupPending
+          ? "保留期限已生效，但原始数据清理尚未完成；稍后可重试。"
+          : "无法完成本地数据设置操作，请稍后重试。",
+      );
+    } finally {
+      retentionInFlight.current = false;
+      if (mounted.current && generation === operationGeneration.current) {
+        setRetentionBusy(false);
+      }
+    }
+  }
+
+  async function exportBackup() {
+    if (
+      !backupAcknowledged ||
+      backupInFlight.current ||
+      retentionInFlight.current
+    ) {
+      return;
+    }
+    const generation = ++operationGeneration.current;
+    backupInFlight.current = true;
+    setBackupBusy(true);
+    setBackupMessage("");
+    try {
+      const exported = await backend.exportFullBackup({
+        acknowledgedUnencryptedRawData: true,
+      });
+      if (!mounted.current || generation !== operationGeneration.current) return;
+      if (exported) setBackupMessage("完整本地备份已导出。");
+    } catch (error) {
+      if (mounted.current && generation === operationGeneration.current) {
+        setBackupMessage(backupFailureMessage(error));
+      }
+    } finally {
+      backupInFlight.current = false;
+      if (mounted.current && generation === operationGeneration.current) {
+        setBackupBusy(false);
+      }
+    }
+  }
+
+  return (
+    <section
+      aria-labelledby="local-data-title"
+      className="data-management local-data-management"
+    >
+      <p className="section-kicker">仅保存在本机</p>
+      <h2 id="local-data-title">本地数据</h2>
+      <p>
+        到期只删除原始回答、CLI 日志和工作区副本；体检记录、任务证据、分数与摘要会保留。
+      </p>
+      {settingsError ? (
+        <p role="alert">暂时无法读取本地数据设置，请稍后重试。</p>
+      ) : null}
+      {settings ? (
+        <>
+          <p className="data-status">
+            当前生效：{settings.rawRetentionDays === null
+              ? "永久保留"
+              : `${settings.rawRetentionDays} 天`}
+          </p>
+          <label className="local-data-field">
+            <span>原始数据保留期限</span>
+            <select
+              aria-label="原始数据保留期限"
+              disabled={retentionBusy || backupBusy}
+              onChange={(event) => {
+                const value = event.currentTarget.value;
+                setPendingRetention(
+                  value === "forever" ? null : Number(value),
+                );
+                setConfirmRetention(false);
+                setRetentionMessage("");
+              }}
+              value={retentionValue(pendingRetention)}
+            >
+              <option value="forever">永久（默认）</option>
+              <option value="90">90 天</option>
+              <option value="30">30 天</option>
+              <option value="7">7 天</option>
+            </select>
+          </label>
+          <button
+            className="evidence-button"
+            disabled={!changed || retentionBusy || backupBusy}
+            onClick={() => void applyRetention()}
+            type="button"
+          >
+            {retentionBusy ? "正在应用…" : "应用保留期限"}
+          </button>
+          {confirmRetention ? (
+            <section
+              aria-label="确认缩短原始数据保留期限"
+              className="inline-confirmation"
+              role="group"
+            >
+              <h3>确认缩短保留期限？</h3>
+              <p>
+                应用后会立即尝试清理已经到期的原始回答和日志，但不会删除分数或体检证据。
+              </p>
+              <div className="inline-confirmation-actions">
+                <button
+                  className="evidence-button secondary"
+                  disabled={retentionBusy || backupBusy}
+                  onClick={() => setConfirmRetention(false)}
+                  type="button"
+                >
+                  取消
+                </button>
+                <button
+                  className="evidence-button danger"
+                  disabled={retentionBusy || backupBusy}
+                  onClick={() => void applyRetention()}
+                  type="button"
+                >
+                  确认应用并清理过期原始数据
+                </button>
+              </div>
+            </section>
+          ) : null}
+          {settings.cleanupPending && !retentionMessage ? (
+            <p className="data-status">
+              保留期限已生效，但原始数据清理尚未完成；稍后可重试。
+            </p>
+          ) : null}
+          {retentionMessage ? (
+            <p className="data-status" role="status">
+              {retentionMessage}
+            </p>
+          ) : null}
+        </>
+      ) : null}
+
+      <div className="local-backup">
+        <h3>完整本地备份</h3>
+        <p>备份由原生保存窗口选择位置，ZIP 未加密，且不会上传。</p>
+        <label className="report-confirmation">
+          <input
+            checked={backupAcknowledged}
+            disabled={backupBusy || retentionBusy}
+            onChange={(event) => {
+              setBackupAcknowledged(event.currentTarget.checked);
+              setBackupMessage("");
+            }}
+            type="checkbox"
+          />
+          <span>我知道此 ZIP 未加密，并包含原始回答和日志</span>
+        </label>
+        <button
+          className="evidence-button"
+          disabled={!backupAcknowledged || backupBusy || retentionBusy}
+          onClick={() => void exportBackup()}
+          type="button"
+        >
+          {backupBusy ? "正在准备备份…" : "导出完整本地备份"}
+        </button>
+        {backupMessage ? (
+          <p
+            className="data-status"
+            role={backupMessage === "完整本地备份已导出。" ? "status" : "alert"}
+          >
+            {backupMessage}
+          </p>
+        ) : null}
+      </div>
+    </section>
+  );
 }
 
 function HistorySeries({
@@ -509,8 +804,11 @@ export function HistoryPage() {
 
   if (groups.length === 0) {
     return (
-      <main className="evidence-page evidence-state">
-        <section aria-labelledby="history-empty-title">
+      <main className="evidence-page history-page">
+        <section
+          aria-labelledby="history-empty-title"
+          className="history-empty-state"
+        >
           <p className="eyebrow">仅保存在本机</p>
           <h1 id="history-empty-title">还没有体检记录</h1>
           <p>完成一次客户端或 CLI 快速体检后，客观结果会出现在这里。</p>
@@ -518,6 +816,7 @@ export function HistoryPage() {
             开始第一次体检
           </Link>
         </section>
+        <LocalDataControls />
       </main>
     );
   }
@@ -535,6 +834,8 @@ export function HistoryPage() {
           本页不跨系列合并分数，也不根据少量记录推断能力变化。
         </p>
       </header>
+
+      <LocalDataControls />
 
       <div className="history-series-list">
         {groups.map((group, index) => (

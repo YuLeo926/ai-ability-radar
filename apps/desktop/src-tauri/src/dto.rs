@@ -88,6 +88,53 @@ pub struct DeleteTargetHistoryInput {
     pub expected_run_ids: Vec<String>,
 }
 
+fn deserialize_required_retention<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<u32>::deserialize(deserializer)?;
+    if matches!(value, None | Some(7 | 30 | 90)) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(
+            "raw retention must be forever, 7, 30, or 90",
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetRetentionInput {
+    #[serde(deserialize_with = "deserialize_required_retention")]
+    pub raw_retention_days: Option<u32>,
+}
+
+fn deserialize_true<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match bool::deserialize(deserializer)? {
+        true => Ok(true),
+        false => Err(serde::de::Error::custom(
+            "unencrypted raw-data acknowledgement must be true",
+        )),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FullBackupInput {
+    #[serde(deserialize_with = "deserialize_true")]
+    pub acknowledged_unencrypted_raw_data: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataSettingsDto {
+    pub raw_retention_days: Option<u32>,
+    pub cleanup_pending: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunDetailDto {
@@ -333,5 +380,51 @@ mod tests {
             "path": "C:/Users/Alice"
         }))
         .is_err());
+    }
+
+    #[test]
+    fn retention_input_requires_one_nullable_allowlisted_field_and_nothing_else() {
+        for (wire, expected) in [
+            (json!({"rawRetentionDays": null}), None),
+            (json!({"rawRetentionDays": 7}), Some(7)),
+            (json!({"rawRetentionDays": 30}), Some(30)),
+            (json!({"rawRetentionDays": 90}), Some(90)),
+        ] {
+            let input: SetRetentionInput = serde_json::from_value(wire).unwrap();
+            assert_eq!(input.raw_retention_days, expected);
+        }
+        for invalid in [
+            json!({}),
+            json!({"rawRetentionDays": 8}),
+            json!({"rawRetentionDays": 4294967296_u64}),
+            json!({"rawRetentionDays": "7"}),
+            json!({"rawRetentionDays": null, "path": "C:/private"}),
+        ] {
+            assert!(
+                serde_json::from_value::<SetRetentionInput>(invalid.clone()).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn full_backup_input_requires_exact_true_acknowledgement_and_accepts_no_path() {
+        let accepted: FullBackupInput = serde_json::from_value(json!({
+            "acknowledgedUnencryptedRawData": true
+        }))
+        .unwrap();
+        assert!(accepted.acknowledged_unencrypted_raw_data);
+        for invalid in [
+            json!({}),
+            json!({"acknowledgedUnencryptedRawData": null}),
+            json!({"acknowledgedUnencryptedRawData": "true"}),
+            json!({"acknowledgedUnencryptedRawData": false}),
+            json!({
+                "acknowledgedUnencryptedRawData": true,
+                "destination": "C:/private/backup.zip"
+            }),
+        ] {
+            assert!(serde_json::from_value::<FullBackupInput>(invalid).is_err());
+        }
     }
 }

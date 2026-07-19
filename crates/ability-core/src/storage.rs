@@ -24,10 +24,24 @@ pub struct RunRepository {
     connection: Mutex<Connection>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetentionCandidate {
+    pub id: Uuid,
+    pub target: TargetSelection,
+    pub finished_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct BackupRunBinding {
+    pub id: Uuid,
+    pub target: TargetKind,
+}
+
 impl RunRepository {
     pub fn open(path: &Path) -> Result<Self, StorageError> {
         let connection = Connection::open(path)?;
         connection.execute_batch(include_str!("../migrations/0001_init.sql"))?;
+        connection.execute_batch(include_str!("../migrations/0002_settings.sql"))?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -287,6 +301,201 @@ impl RunRepository {
             .map_err(StorageError::from)
     }
 
+    pub fn has_running_runs(&self) -> Result<bool, StorageError> {
+        let running = serde_json::to_string(&RunStatus::Running)?;
+        let count: i64 = self.connection.lock().query_row(
+            "SELECT COUNT(*) FROM runs WHERE status_json=?1",
+            [running],
+            |row| row.get(0),
+        )?;
+        Ok(count != 0)
+    }
+
+    pub fn raw_retention_days(&self) -> Result<Option<u32>, StorageError> {
+        raw_retention_days_from(&self.connection.lock())
+    }
+
+    pub fn set_raw_retention_days(&self, days: Option<u32>) -> Result<(), StorageError> {
+        validate_raw_retention_days(days)?;
+        self.connection.lock().execute(
+            "INSERT INTO settings(key,value_json)
+             VALUES ('raw_retention_days',?1)
+             ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json",
+            [serde_json::to_string(&days)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn retention_candidates(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<RetentionCandidate>, StorageError> {
+        let connection = self.connection.lock();
+        let Some(days) = raw_retention_days_from(&connection)? else {
+            return Ok(Vec::new());
+        };
+        let cutoff = now - chrono::Duration::days(i64::from(days));
+        let completed = serde_json::to_string(&RunStatus::Completed)?;
+        let cancelled = serde_json::to_string(&RunStatus::Cancelled)?;
+        let mut statement = connection.prepare(
+            "SELECT id,target_json,finished_at FROM runs
+             WHERE status_json IN (?1,?2) AND finished_at IS NOT NULL",
+        )?;
+        let rows = statement.query_map(params![completed, cancelled], |row| {
+            let id: String = row.get(0)?;
+            let target: String = row.get(1)?;
+            let finished_at: String = row.get(2)?;
+            Ok(RetentionCandidate {
+                id: Uuid::parse_str(&id).map_err(to_sql_error)?,
+                target: serde_json::from_str(&target).map_err(to_sql_error)?,
+                finished_at: DateTime::parse_from_rfc3339(&finished_at)
+                    .map_err(to_sql_error)?
+                    .with_timezone(&Utc),
+            })
+        })?;
+        let mut candidates = rows.collect::<Result<Vec<_>, _>>()?;
+        candidates.retain(|candidate| candidate.finished_at <= cutoff);
+        candidates.sort_by(|left, right| {
+            left.finished_at
+                .cmp(&right.finished_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(candidates)
+    }
+
+    pub fn clear_retention_candidate(
+        &self,
+        candidate: &RetentionCandidate,
+        now: DateTime<Utc>,
+    ) -> Result<usize, StorageError> {
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let days = raw_retention_days_from(&transaction)?.ok_or_else(|| {
+            StorageError::InvalidData("raw retention policy no longer expires data".into())
+        })?;
+        let current: Option<(String, String, Option<String>)> = transaction
+            .query_row(
+                "SELECT target_json,status_json,finished_at FROM runs WHERE id=?1",
+                [candidate.id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let (target_json, status_json, finished_at) =
+            current.ok_or(StorageError::RunNotFound(candidate.id))?;
+        let target: TargetSelection = serde_json::from_str(&target_json)?;
+        let status: RunStatus = serde_json::from_str(&status_json)?;
+        let finished_at = finished_at
+            .ok_or_else(|| StorageError::InvalidData("retention candidate is unfinished".into()))
+            .and_then(|value| {
+                DateTime::parse_from_rfc3339(&value)
+                    .map(|value| value.with_timezone(&Utc))
+                    .map_err(StorageError::from)
+            })?;
+        let cutoff = now - chrono::Duration::days(i64::from(days));
+        if target != candidate.target
+            || finished_at != candidate.finished_at
+            || !matches!(status, RunStatus::Completed | RunStatus::Cancelled)
+            || finished_at > cutoff
+        {
+            return Err(StorageError::InvalidData(
+                "retention candidate changed before cleanup".into(),
+            ));
+        }
+        let changed = transaction.execute(
+            "UPDATE task_results SET answer_rel_path=NULL
+             WHERE run_id=?1 AND answer_rel_path IS NOT NULL",
+            [candidate.id.to_string()],
+        )?;
+        transaction.commit()?;
+        Ok(changed)
+    }
+
+    pub fn snapshot_to_backup_file(
+        &self,
+        snapshot_path: &Path,
+    ) -> Result<Vec<BackupRunBinding>, StorageError> {
+        let source = self.connection.lock();
+        let mut snapshot = Connection::open(snapshot_path)?;
+        snapshot.execute_batch("PRAGMA journal_mode=OFF; PRAGMA temp_store=MEMORY;")?;
+        {
+            let backup = rusqlite::backup::Backup::new(&source, &mut snapshot)?;
+            backup.run_to_completion(128, std::time::Duration::from_millis(1), None)?;
+        }
+        let mut statement = snapshot.prepare("SELECT id,target_json FROM runs ORDER BY id ASC")?;
+        let rows = statement.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let parsed = Uuid::parse_str(&id).map_err(to_sql_error)?;
+            if parsed.to_string() != id {
+                return Err(to_sql_error(StorageError::InvalidData(
+                    "stored run UUID is not canonical".into(),
+                )));
+            }
+            let target_json: String = row.get(1)?;
+            let target =
+                serde_json::from_str::<TargetSelection>(&target_json).map_err(to_sql_error)?;
+            Ok(BackupRunBinding {
+                id: parsed,
+                target: target.kind,
+            })
+        })?;
+        let runs = rows.collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        Ok(runs)
+    }
+
+    pub fn record_publication(
+        &self,
+        report_id: Uuid,
+        run_id: Uuid,
+        report_sha256: &str,
+        destination_kind: &str,
+    ) -> Result<(), StorageError> {
+        self.record_publication_at(
+            report_id,
+            run_id,
+            report_sha256,
+            destination_kind,
+            Utc::now(),
+        )
+    }
+
+    pub fn record_publication_at(
+        &self,
+        report_id: Uuid,
+        run_id: Uuid,
+        report_sha256: &str,
+        destination_kind: &str,
+        exported_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        if report_sha256.len() != 64
+            || !report_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(StorageError::InvalidData(
+                "publication report hash must be lowercase SHA-256 hex".into(),
+            ));
+        }
+        if destination_kind != "local_html" {
+            return Err(StorageError::InvalidData(
+                "publication destination kind is unsupported".into(),
+            ));
+        }
+        self.connection.lock().execute(
+            "INSERT INTO publications(
+               report_id,run_id,exported_at,report_sha256,destination_kind
+             ) VALUES (?1,?2,?3,?4,?5)",
+            params![
+                report_id.to_string(),
+                run_id.to_string(),
+                exported_at.to_rfc3339(),
+                report_sha256,
+                destination_kind,
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn mark_running_as_interrupted(&self) -> Result<usize, StorageError> {
         self.connection
             .lock()
@@ -483,6 +692,30 @@ fn reject_active_delete(status: RunStatus) -> Result<(), StorageError> {
         ))
     } else {
         Ok(())
+    }
+}
+
+fn raw_retention_days_from(connection: &Connection) -> Result<Option<u32>, StorageError> {
+    let value: String = connection
+        .query_row(
+            "SELECT value_json FROM settings WHERE key='raw_retention_days'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| StorageError::InvalidData("raw retention setting is missing".into()))?;
+    let days = serde_json::from_str::<Option<u32>>(&value)?;
+    validate_raw_retention_days(days)?;
+    Ok(days)
+}
+
+fn validate_raw_retention_days(days: Option<u32>) -> Result<(), StorageError> {
+    if matches!(days, None | Some(7 | 30 | 90)) {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidData(
+            "raw retention days must be forever, 7, 30, or 90".into(),
+        ))
     }
 }
 

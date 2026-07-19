@@ -20,12 +20,14 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 ability-core = { path = "../../../crates/ability-core" }
 ability-adapters = { path = "../../../crates/ability-adapters" }
+chrono = { version = "0.4", features = ["serde"] }
 os_info = "3"
 parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
+thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 tokio-util = "0.7"
 uuid = { version = "1", features = ["serde", "v4"] }

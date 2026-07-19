@@ -1,12 +1,17 @@
 mod app_state;
 mod commands;
+mod data_management;
 mod dto;
+
+#[cfg(test)]
+mod data_management_tests;
 
 use app_state::AppState;
 use commands::{
-    cancel_run, delete_raw_artifacts, delete_run, delete_target_history, export_public_report,
-    get_bootstrap, get_run_detail, list_runs, next_manual_step, resume_cli_run, resume_manual_run,
-    start_cli_run, start_manual_run, submit_manual_answer,
+    cancel_run, delete_raw_artifacts, delete_run, delete_target_history, export_full_backup,
+    export_public_report, get_bootstrap, get_data_settings, get_run_detail, list_runs,
+    next_manual_step, resume_cli_run, resume_manual_run, set_raw_retention, start_cli_run,
+    start_manual_run, submit_manual_answer,
 };
 use tauri::Manager;
 
@@ -27,6 +32,9 @@ macro_rules! command_inventory {
             delete_raw_artifacts,
             delete_run,
             delete_target_history,
+            get_data_settings,
+            set_raw_retention,
+            export_full_backup,
         )
     };
 }
@@ -85,6 +93,9 @@ mod tests {
                 "delete_raw_artifacts",
                 "delete_run",
                 "delete_target_history",
+                "get_data_settings",
+                "set_raw_retention",
+                "export_full_backup",
             ]
         );
     }
@@ -133,5 +144,34 @@ mod tests {
         assert!(!cargo.contains("tauri-plugin-fs"));
         assert!(!capability.to_string().contains("dialog:"));
         assert!(!capability.to_string().contains("fs:"));
+    }
+
+    #[test]
+    fn cross_platform_backup_path_resolves_only_paired_cfg_helpers() {
+        let source = include_str!("commands.rs");
+        assert!(source.contains("#[cfg(windows)]\nfn write_full_backup_to_destination("));
+        assert!(source.contains("#[cfg(not(windows))]\nfn write_full_backup_to_destination("));
+        let export_body = source
+            .split("fn export_full_backup_to_selected_path(")
+            .nth(1)
+            .unwrap()
+            .split("fn validate_backup_destination(")
+            .next()
+            .unwrap();
+        assert!(export_body.contains("write_full_backup_to_destination("));
+        assert!(!export_body.contains("windows_report_file"));
+
+        let non_windows_helper = source
+            .split("#[cfg(not(windows))]\nfn write_full_backup_to_destination(")
+            .nth(1)
+            .unwrap()
+            .split("#[cfg(windows)]\nfn write_new_backup")
+            .next()
+            .unwrap();
+        assert!(non_windows_helper.contains("当前版本仅支持在 Windows 上安全导出完整备份。"));
+        assert!(!non_windows_helper.contains("windows_report_file"));
+        assert!(!non_windows_helper.contains("create_full_backup"));
+        assert!(!non_windows_helper.contains("snapshot"));
+        assert!(!non_windows_helper.contains("std::fs"));
     }
 }

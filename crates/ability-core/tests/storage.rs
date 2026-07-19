@@ -462,3 +462,260 @@ fn repository_keeps_sqlite_secure_delete_enabled() {
             .any(|window| window == sentinel.as_bytes())
     );
 }
+
+#[test]
+fn retention_policy_defaults_to_forever_and_rejects_every_unsupported_value() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("ability.db");
+    let repository = RunRepository::open(&database).unwrap();
+
+    assert_eq!(repository.raw_retention_days().unwrap(), None);
+    for accepted in [None, Some(7), Some(30), Some(90)] {
+        repository.set_raw_retention_days(accepted).unwrap();
+        assert_eq!(repository.raw_retention_days().unwrap(), accepted);
+    }
+    for rejected in [
+        Some(0),
+        Some(1),
+        Some(8),
+        Some(89),
+        Some(91),
+        Some(u32::MAX),
+    ] {
+        assert!(matches!(
+            repository.set_raw_retention_days(rejected),
+            Err(StorageError::InvalidData(_))
+        ));
+    }
+
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    for corrupt in ["{}", "\"7\"", "7.0", "4294967296", "91"] {
+        connection
+            .execute(
+                "UPDATE settings SET value_json=?1 WHERE key='raw_retention_days'",
+                [corrupt],
+            )
+            .unwrap();
+        assert!(
+            repository.raw_retention_days().is_err(),
+            "{corrupt:?} must fail closed"
+        );
+    }
+}
+
+#[test]
+fn retention_candidates_require_terminal_status_real_finished_time_and_inclusive_boundary() {
+    let directory = tempdir().unwrap();
+    let repository = RunRepository::open(&directory.path().join("ability.db")).unwrap();
+    repository.set_raw_retention_days(Some(7)).unwrap();
+    let now = chrono::DateTime::parse_from_rfc3339("2026-07-19T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let cutoff = now - Duration::days(7);
+
+    let mut boundary = sample_run();
+    boundary.status = RunStatus::Completed;
+    boundary.finished_at = Some(cutoff);
+    repository.insert_run(&boundary).unwrap();
+
+    let mut older_cancelled = sample_run();
+    older_cancelled.status = RunStatus::Cancelled;
+    older_cancelled.finished_at = Some(cutoff - Duration::seconds(1));
+    repository.insert_run(&older_cancelled).unwrap();
+
+    for (status, finished_at) in [
+        (RunStatus::Created, Some(cutoff - Duration::days(1))),
+        (RunStatus::Running, Some(cutoff - Duration::days(1))),
+        (RunStatus::Interrupted, Some(cutoff - Duration::days(1))),
+        (RunStatus::Completed, None),
+        (RunStatus::Cancelled, Some(now + Duration::days(1))),
+    ] {
+        let mut ineligible = sample_run();
+        ineligible.status = status;
+        ineligible.finished_at = finished_at;
+        repository.insert_run(&ineligible).unwrap();
+    }
+
+    let candidates = repository.retention_candidates(now).unwrap();
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|candidate| candidate.id)
+            .collect::<Vec<_>>(),
+        vec![older_cancelled.id, boundary.id]
+    );
+    assert_eq!(candidates[0].target.kind, older_cancelled.target.kind);
+    assert_eq!(candidates[1].finished_at, cutoff);
+
+    repository.set_raw_retention_days(None).unwrap();
+    assert!(repository.retention_candidates(now).unwrap().is_empty());
+}
+
+#[test]
+fn retention_reference_cleanup_rechecks_the_exact_candidate_and_current_policy_atomically() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("ability.db");
+    let repository = RunRepository::open(&database).unwrap();
+    repository.set_raw_retention_days(Some(7)).unwrap();
+    let now = chrono::DateTime::parse_from_rfc3339("2026-07-19T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let mut run = sample_run();
+    run.status = RunStatus::Completed;
+    run.finished_at = Some(now - Duration::days(8));
+    repository.insert_run(&run).unwrap();
+    repository
+        .save_task_result(&passing_result(run.id, "instruction-1"))
+        .unwrap();
+    let candidate = repository.retention_candidates(now).unwrap().remove(0);
+
+    repository.set_raw_retention_days(Some(30)).unwrap();
+    assert!(
+        repository
+            .clear_retention_candidate(&candidate, now)
+            .is_err()
+    );
+    assert!(
+        repository.get_task_results(run.id).unwrap()[0]
+            .answer_rel_path
+            .is_some()
+    );
+
+    repository.set_raw_retention_days(Some(7)).unwrap();
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_retention_clear BEFORE UPDATE OF answer_rel_path
+             ON task_results BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
+        )
+        .unwrap();
+    assert!(
+        repository
+            .clear_retention_candidate(&candidate, now)
+            .is_err()
+    );
+    assert!(
+        repository.get_task_results(run.id).unwrap()[0]
+            .answer_rel_path
+            .is_some()
+    );
+    connection
+        .execute_batch("DROP TRIGGER fail_retention_clear;")
+        .unwrap();
+
+    assert_eq!(
+        repository
+            .clear_retention_candidate(&candidate, now)
+            .unwrap(),
+        1
+    );
+    let retained_run = repository.get_run(run.id).unwrap().unwrap();
+    assert_eq!(retained_run.status, RunStatus::Completed);
+    assert_eq!(retained_run.finished_at, run.finished_at);
+    assert!(retained_run.score.is_none());
+    let retained_result = repository.get_task_results(run.id).unwrap().remove(0);
+    assert_eq!(retained_result.score, Some(100.0));
+    assert_eq!(retained_result.answer_rel_path, None);
+}
+
+#[test]
+fn backup_snapshot_binds_exact_run_identities_and_is_a_readable_sqlite_database() {
+    let directory = tempdir().unwrap();
+    let repository = RunRepository::open(&directory.path().join("ability.db")).unwrap();
+    let first = sample_run();
+    let mut second = sample_run();
+    second.target.kind = TargetKind::CodexCli;
+    repository.insert_run(&first).unwrap();
+    repository.insert_run(&second).unwrap();
+
+    let snapshot_path = directory.path().join("snapshot.sqlite");
+    let runs = repository.snapshot_to_backup_file(&snapshot_path).unwrap();
+    assert_eq!(
+        runs.iter()
+            .map(|run| (run.id, run.target))
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from([
+            (first.id, first.target.kind),
+            (second.id, second.target.kind),
+        ])
+    );
+    assert!(
+        std::fs::read(&snapshot_path)
+            .unwrap()
+            .starts_with(b"SQLite format 3\0")
+    );
+    let connection = rusqlite::Connection::open(snapshot_path).unwrap();
+    let run_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM runs", [], |row| row.get(0))
+        .unwrap();
+    let policy: String = connection
+        .query_row(
+            "SELECT value_json FROM settings WHERE key='raw_retention_days'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(run_count, 2);
+    assert_eq!(policy, "null");
+}
+
+#[test]
+fn publication_rows_accept_only_canonical_safe_fixed_metadata() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("ability.db");
+    let repository = RunRepository::open(&database).unwrap();
+    let run = sample_run();
+    repository.insert_run(&run).unwrap();
+    let report_id = Uuid::new_v4();
+    let exported_at = chrono::DateTime::parse_from_rfc3339("2026-07-19T12:34:56Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let hash = "a".repeat(64);
+
+    repository
+        .record_publication_at(report_id, run.id, &hash, "local_html", exported_at)
+        .unwrap();
+    for (bad_hash, bad_kind) in [
+        ("A".repeat(64), "local_html"),
+        ("a".repeat(63), "local_html"),
+        ("g".repeat(64), "local_html"),
+        ("a".repeat(64), "C:\\private\\report.html"),
+        ("a".repeat(64), "local_zip"),
+    ] {
+        assert!(matches!(
+            repository.record_publication_at(
+                Uuid::new_v4(),
+                run.id,
+                &bad_hash,
+                bad_kind,
+                exported_at,
+            ),
+            Err(StorageError::InvalidData(_))
+        ));
+    }
+
+    drop(repository);
+    let connection = rusqlite::Connection::open(database).unwrap();
+    let row: (String, String, String, String, String) = connection
+        .query_row(
+            "SELECT report_id,run_id,exported_at,report_sha256,destination_kind
+             FROM publications",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(row.0, report_id.to_string());
+    assert_eq!(row.1, run.id.to_string());
+    assert_eq!(row.2, exported_at.to_rfc3339());
+    assert_eq!(row.3, hash);
+    assert_eq!(row.4, "local_html");
+    assert!(!row.4.contains(['\\', '/']));
+}

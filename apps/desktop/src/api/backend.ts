@@ -157,6 +157,15 @@ export interface RunErrorEvent {
   message: string;
 }
 
+export interface DataSettings {
+  rawRetentionDays: number | null;
+  cleanupPending: boolean;
+}
+
+export interface FullBackupInput {
+  acknowledgedUnencryptedRawData: true;
+}
+
 export type Unlisten = () => void;
 
 export interface Backend {
@@ -177,6 +186,9 @@ export interface Backend {
     target: TargetKind,
     expectedRunIds: string[],
   ): Promise<number>;
+  getDataSettings(): Promise<DataSettings>;
+  setRawRetention(rawRetentionDays: number | null): Promise<number>;
+  exportFullBackup(input: FullBackupInput): Promise<boolean>;
   onRunEvent(listener: (event: RunEvent) => void): Promise<Unlisten>;
   onRunError(listener: (event: RunErrorEvent) => void): Promise<Unlisten>;
 }

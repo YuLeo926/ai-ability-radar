@@ -77,6 +77,12 @@ function makeBackend(listRuns: Backend["listRuns"]): Backend {
     deleteRawArtifacts: async () => undefined,
     deleteRun: async () => false,
     deleteTargetHistory: async () => 0,
+    getDataSettings: async () => ({
+      rawRetentionDays: null,
+      cleanupPending: false,
+    }),
+    setRawRetention: async () => 0,
+    exportFullBackup: async () => false,
     onRunEvent: async () => () => undefined,
     onRunError: async () => () => undefined,
   };
@@ -175,7 +181,11 @@ test("failed stale target confirmation keeps history visible and never claims de
 });
 
 function renderHistory(backend: Backend) {
-  return render(
+  return render(historyTree(backend));
+}
+
+function historyTree(backend: Backend) {
+  return (
     <MemoryRouter initialEntries={["/history"]}>
       <BackendProvider backend={backend}>
         <Routes>
@@ -184,7 +194,7 @@ function renderHistory(backend: Backend) {
           <Route path="/" element={<h1>开始页</h1>} />
         </Routes>
       </BackendProvider>
-    </MemoryRouter>,
+    </MemoryRouter>
   );
 }
 
@@ -329,6 +339,303 @@ describe("HistoryPage states", () => {
       expect(screen.queryByText(/STALE MODEL/)).not.toBeInTheDocument();
     });
     expect(screen.getByText(/CURRENT MODEL/)).toBeInTheDocument();
+  });
+});
+
+describe("HistoryPage local data controls", () => {
+  test("remain available when there are no history records", async () => {
+    renderHistory(makeBackend(async () => []));
+
+    expect(
+      await screen.findByRole("heading", { name: "还没有体检记录" }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "本地数据" }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole("combobox", { name: "原始数据保留期限" }),
+    ).toBeInTheDocument();
+  });
+
+  test("retention selection and cancellation mutate nothing until explicit shortening confirmation", async () => {
+    const user = userEvent.setup();
+    const setRawRetention = vi.fn(async () => 1);
+    const backend = {
+      ...makeBackend(async () => [makeRun()]),
+      setRawRetention,
+    };
+    renderHistory(backend);
+
+    expect(
+      await screen.findByRole("heading", { name: "本地数据" }),
+    ).toBeInTheDocument();
+    const select = await screen.findByRole("combobox", {
+      name: "原始数据保留期限",
+    });
+    await user.selectOptions(select, "7");
+    expect(setRawRetention).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "应用保留期限" }));
+    const confirmation = screen.getByRole("group", {
+      name: "确认缩短原始数据保留期限",
+    });
+    await user.click(within(confirmation).getByRole("button", { name: "取消" }));
+    expect(setRawRetention).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "应用保留期限" }));
+    await user.click(
+      screen.getByRole("button", { name: "确认应用并清理过期原始数据" }),
+    );
+    await waitFor(() => expect(setRawRetention).toHaveBeenCalledTimes(1));
+    expect(setRawRetention).toHaveBeenCalledWith(7);
+  });
+
+  test("retention confirmation suppresses duplicate mutation clicks", async () => {
+    const user = userEvent.setup();
+    const pending = deferred<number>();
+    const setRawRetention = vi.fn(() => pending.promise);
+    renderHistory({
+      ...makeBackend(async () => [makeRun()]),
+      setRawRetention,
+    });
+    const select = await screen.findByRole("combobox", {
+      name: "原始数据保留期限",
+    });
+    await user.selectOptions(select, "7");
+    await user.click(screen.getByRole("button", { name: "应用保留期限" }));
+    const confirmation = screen.getByRole("group", {
+      name: "确认缩短原始数据保留期限",
+    });
+
+    await user.dblClick(
+      within(confirmation).getByRole("button", {
+        name: "确认应用并清理过期原始数据",
+      }),
+    );
+
+    expect(setRawRetention).toHaveBeenCalledTimes(1);
+    pending.resolve(1);
+    await waitFor(() => expect(select).not.toBeDisabled());
+  });
+
+  test("backup acknowledgement gates exact payload, suppresses duplicates, and cancel is silent", async () => {
+    const user = userEvent.setup();
+    const pending = deferred<boolean>();
+    const exportFullBackup = vi.fn(() => pending.promise);
+    renderHistory({
+      ...makeBackend(async () => [makeRun()]),
+      exportFullBackup,
+    });
+
+    const backup = await screen.findByRole("button", {
+      name: "导出完整本地备份",
+    });
+    expect(backup).toBeDisabled();
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "我知道此 ZIP 未加密，并包含原始回答和日志",
+      }),
+    );
+    await user.dblClick(backup);
+    expect(exportFullBackup).toHaveBeenCalledTimes(1);
+    expect(exportFullBackup).toHaveBeenCalledWith({
+      acknowledgedUnencryptedRawData: true,
+    });
+    pending.resolve(false);
+    await waitFor(() => expect(backup).not.toBeDisabled());
+    expect(screen.queryByText(/备份已导出/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  test("backup failures expose only the fixed safe UI error", async () => {
+    const user = userEvent.setup();
+    renderHistory({
+      ...makeBackend(async () => [makeRun()]),
+      exportFullBackup: async () => {
+        throw new Error("C:\\Users\\Alice\\private.zip SQL sk-ant-secret");
+      },
+    });
+    await user.click(
+      await screen.findByRole("checkbox", {
+        name: "我知道此 ZIP 未加密，并包含原始回答和日志",
+      }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "导出完整本地备份" }),
+    );
+
+    expect(
+      await screen.findByRole("alert"),
+    ).toHaveTextContent("无法完成本地备份，请稍后重试。");
+    expect(document.body.textContent).not.toContain("Alice");
+    expect(document.body.textContent).not.toContain("SQL");
+    expect(document.body.textContent).not.toContain("sk-ant");
+  });
+
+  test("backup cleanup-incomplete failures render the distinct private-data warning", async () => {
+    const user = userEvent.setup();
+    renderHistory({
+      ...makeBackend(async () => [makeRun()]),
+      exportFullBackup: async () => {
+        throw new Error(
+          "备份未完成，临时私密数据可能尚未清理；请关闭应用并联系支持。",
+        );
+      },
+    });
+    await user.click(
+      await screen.findByRole("checkbox", {
+        name: "我知道此 ZIP 未加密，并包含原始回答和日志",
+      }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "导出完整本地备份" }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "备份未完成，临时私密数据可能尚未清理；请关闭应用并联系支持。",
+    );
+    expect(screen.queryByText("无法完成本地备份，请稍后重试。")).not.toBeInTheDocument();
+  });
+
+  test("stale settings completion cannot overwrite a newer backend view", async () => {
+    const oldSettings = deferred<{
+      rawRetentionDays: number | null;
+      cleanupPending: boolean;
+    }>();
+    const oldBackend = {
+      ...makeBackend(async () => [makeRun()]),
+      getDataSettings: () => oldSettings.promise,
+    };
+    const view = renderHistory(oldBackend);
+    await screen.findByRole("heading", { name: "本地数据" });
+
+    const newBackend = {
+      ...makeBackend(async () => [makeRun()]),
+      getDataSettings: async () => ({
+        rawRetentionDays: 90,
+        cleanupPending: false,
+      }),
+    };
+    view.rerender(historyTree(newBackend));
+    const select = await screen.findByRole("combobox", {
+      name: "原始数据保留期限",
+    });
+    await waitFor(() => expect(select).toHaveValue("90"));
+    oldSettings.resolve({ rawRetentionDays: 7, cleanupPending: false });
+    await Promise.resolve();
+    expect(select).toHaveValue("90");
+  });
+
+  test("a stale retention operation cannot leave a newer backend view busy", async () => {
+    const user = userEvent.setup();
+    const oldRetention = deferred<number>();
+    const oldBackend = {
+      ...makeBackend(async () => [makeRun()]),
+      setRawRetention: () => oldRetention.promise,
+    };
+    const view = renderHistory(oldBackend);
+    const select = await screen.findByRole("combobox", {
+      name: "原始数据保留期限",
+    });
+    await user.selectOptions(select, "7");
+    await user.click(screen.getByRole("button", { name: "应用保留期限" }));
+    await user.click(
+      screen.getByRole("button", { name: "确认应用并清理过期原始数据" }),
+    );
+    expect(select).toBeDisabled();
+
+    const newSetRawRetention = vi.fn(async () => 0);
+    view.rerender(
+      historyTree({
+        ...makeBackend(async () => [makeRun()]),
+        setRawRetention: newSetRawRetention,
+      }),
+    );
+
+    const currentSelect = await screen.findByRole("combobox", {
+      name: "原始数据保留期限",
+    });
+    await waitFor(() => expect(currentSelect).not.toBeDisabled());
+    await user.selectOptions(currentSelect, "7");
+    await user.click(screen.getByRole("button", { name: "应用保留期限" }));
+    await user.click(
+      screen.getByRole("button", { name: "确认应用并清理过期原始数据" }),
+    );
+    await waitFor(() => expect(newSetRawRetention).toHaveBeenCalledTimes(1));
+    oldRetention.resolve(1);
+    await Promise.resolve();
+  });
+
+  test("a stale backup operation cannot leave a newer backend view busy or acknowledged", async () => {
+    const user = userEvent.setup();
+    const oldBackup = deferred<boolean>();
+    const oldBackend = {
+      ...makeBackend(async () => [makeRun()]),
+      exportFullBackup: () => oldBackup.promise,
+    };
+    const view = renderHistory(oldBackend);
+    const acknowledgement = await screen.findByRole("checkbox", {
+      name: "我知道此 ZIP 未加密，并包含原始回答和日志",
+    });
+    await user.click(acknowledgement);
+    await user.click(
+      screen.getByRole("button", { name: "导出完整本地备份" }),
+    );
+    expect(acknowledgement).toBeDisabled();
+
+    const newExportFullBackup = vi.fn(async () => false);
+    view.rerender(
+      historyTree({
+        ...makeBackend(async () => [makeRun()]),
+        exportFullBackup: newExportFullBackup,
+      }),
+    );
+
+    const currentAcknowledgement = await screen.findByRole("checkbox", {
+      name: "我知道此 ZIP 未加密，并包含原始回答和日志",
+    });
+    await waitFor(() => expect(currentAcknowledgement).not.toBeDisabled());
+    expect(currentAcknowledgement).not.toBeChecked();
+    oldBackup.resolve(true);
+    await Promise.resolve();
+    expect(screen.queryByText("完整本地备份已导出。")).not.toBeInTheDocument();
+  });
+
+  test("partial cleanup failure reloads effective setting and shows only safe pending copy", async () => {
+    const user = userEvent.setup();
+    const getDataSettings = vi
+      .fn<Backend["getDataSettings"]>()
+      .mockResolvedValueOnce({
+        rawRetentionDays: null,
+        cleanupPending: false,
+      })
+      .mockResolvedValueOnce({
+        rawRetentionDays: 7,
+        cleanupPending: true,
+      });
+    const setRawRetention = vi.fn(async () => {
+      throw new Error("C:\\Users\\Alice\\ability.db SQL secret");
+    });
+    renderHistory({
+      ...makeBackend(async () => [makeRun()]),
+      getDataSettings,
+      setRawRetention,
+    });
+    const select = await screen.findByRole("combobox", {
+      name: "原始数据保留期限",
+    });
+    await user.selectOptions(select, "7");
+    await user.click(screen.getByRole("button", { name: "应用保留期限" }));
+    await user.click(
+      screen.getByRole("button", { name: "确认应用并清理过期原始数据" }),
+    );
+
+    expect(
+      await screen.findByText("保留期限已生效，但原始数据清理尚未完成；稍后可重试。"),
+    ).toBeInTheDocument();
+    expect(select).toHaveValue("7");
+    expect(getDataSettings).toHaveBeenCalledTimes(2);
+    expect(document.body.textContent).not.toContain("Alice");
+    expect(document.body.textContent).not.toContain("SQL");
   });
 });
 

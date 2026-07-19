@@ -1,24 +1,25 @@
 use crate::app_state::{
     probe_node, public_cli_version, supported_node_lts, AppState, CancellationRegistration,
-    CancellationRegistry, RunOperationRegistry,
+    CancellationRegistry, LocalDataGate, LocalDataMutationClaim, RunOperationRegistry,
 };
 use crate::dto::{
-    BootstrapDto, CliRunEventDto, DeleteTargetHistoryInput, ExportReportInput, PackSummaryDto,
-    ResumeRunInput, ResumeTargetSelectionInput, RunDetailDto, RunErrorEvent, RunIdInput,
-    StartRunInput, SubmitAnswerInput, TaskResultDto,
+    BootstrapDto, CliRunEventDto, DataSettingsDto, DeleteTargetHistoryInput, ExportReportInput,
+    FullBackupInput, PackSummaryDto, ResumeRunInput, ResumeTargetSelectionInput, RunDetailDto,
+    RunErrorEvent, RunIdInput, SetRetentionInput, StartRunInput, SubmitAnswerInput, TaskResultDto,
 };
 use ability_adapters::{
     AgentAdapter, AuthState, CliRunService, PrerequisiteStatus, ProcessRunner, TargetAvailability,
 };
 use ability_core::{
-    ArtifactStore, EnvironmentFingerprint, LoadedPack, ManualStep, RunMode, RunRecord,
-    RunRepository, RunStatus, TargetKind, TargetSelection,
+    ArtifactStore, EnvironmentFingerprint, LoadedPack, ManualRunService, ManualStep, RunMode,
+    RunRecord, RunRepository, RunStatus, TargetKind, TargetSelection,
 };
 use std::collections::BTreeMap;
 use std::fs;
 #[cfg(windows)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
@@ -299,6 +300,10 @@ pub fn start_manual_run(
     input: StartRunInput,
 ) -> Result<RunRecord, String> {
     let start = validate_start(input, StartFamily::Manual)?;
+    let _local_data = state
+        .local_data_gate
+        .claim_mutating()
+        .map_err(|_| "本地数据正在备份，请稍后重试。".to_string())?;
     state
         .manual_runs
         .start(
@@ -316,6 +321,10 @@ pub fn resume_manual_run(
     input: ResumeRunInput,
 ) -> Result<RunRecord, String> {
     let run_id = parse_run_id(&input.run_id)?;
+    let _local_data = state
+        .local_data_gate
+        .claim_mutating()
+        .map_err(|_| "本地数据正在备份，请稍后重试。".to_string())?;
     let _operation = state
         .run_operations
         .claim([run_id])
@@ -343,10 +352,22 @@ pub fn next_manual_step(
     state: State<'_, AppState>,
     run_id: String,
 ) -> Result<Option<ManualStep>, String> {
-    state
-        .manual_runs
-        .next_step(parse_run_id(&run_id)?)
-        .map_err(|error| error.to_string())
+    next_manual_step_for(
+        &state.manual_runs,
+        &state.local_data_gate,
+        parse_run_id(&run_id)?,
+    )
+}
+
+fn next_manual_step_for(
+    service: &ManualRunService,
+    gate: &LocalDataGate,
+    run_id: Uuid,
+) -> Result<Option<ManualStep>, String> {
+    let _local_data = gate
+        .claim_mutating()
+        .map_err(|_| "本地数据正在备份，请稍后重试。".to_string())?;
+    service.next_step(run_id).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -354,6 +375,10 @@ pub fn submit_manual_answer(
     state: State<'_, AppState>,
     input: SubmitAnswerInput,
 ) -> Result<TaskResultDto, String> {
+    let _local_data = state
+        .local_data_gate
+        .claim_mutating()
+        .map_err(|_| "本地数据正在备份，请稍后重试。".to_string())?;
     let result = state
         .manual_runs
         .submit_answer(
@@ -380,6 +405,10 @@ pub async fn start_cli_run(
     let availability = adapter.detect().await;
     let node = probe_node(state.runner.clone()).await;
     let readiness = validate_cli_readiness(start.target.kind, availability, node)?;
+    let local_data = state
+        .local_data_gate
+        .claim_mutating()
+        .map_err(|_| "本地数据正在备份，请稍后重试。".to_string())?;
     let prepared = prepare_cli_run(
         &state.cli_runs,
         state.cli_pack.clone(),
@@ -388,7 +417,7 @@ pub async fn start_cli_run(
         &state.cancellations,
     )?;
     let run = prepared.run.clone();
-    spawn_cli_run(app, &state, adapter, prepared);
+    spawn_cli_run(app, &state, adapter, prepared, local_data);
     Ok(run)
 }
 
@@ -399,6 +428,10 @@ pub async fn resume_cli_run(
     input: ResumeRunInput,
 ) -> Result<RunRecord, String> {
     let run_id = parse_run_id(&input.run_id)?;
+    let local_data = state
+        .local_data_gate
+        .claim_mutating()
+        .map_err(|_| "本地数据正在备份，请稍后重试。".to_string())?;
     let _operation = state
         .run_operations
         .claim([run_id])
@@ -415,7 +448,7 @@ pub async fn resume_cli_run(
         },
         run_id,
         expected_target,
-        |adapter, prepared| spawn_cli_run(app, &state, adapter, prepared),
+        |adapter, prepared| spawn_cli_run(app, &state, adapter, prepared, local_data),
     )
     .await
 }
@@ -485,6 +518,7 @@ fn spawn_cli_run(
     state: &AppState,
     adapter: Arc<dyn AgentAdapter>,
     prepared: PreparedCliRun,
+    local_data: LocalDataMutationClaim,
 ) {
     let service = state.cli_runs.clone();
     let pack = state.cli_pack.clone();
@@ -499,6 +533,7 @@ fn spawn_cli_run(
         }
     });
     tauri::async_runtime::spawn(async move {
+        let _local_data = local_data;
         let _registration = prepared._registration;
         let result = service
             .execute(
@@ -545,6 +580,10 @@ fn finish_background(
 
 #[tauri::command]
 pub fn cancel_run(state: State<'_, AppState>, run_id: String) -> Result<bool, String> {
+    let _local_data = state
+        .local_data_gate
+        .claim_mutating()
+        .map_err(|_| "本地数据正在备份，请稍后重试。".to_string())?;
     Ok(state.cancellations.cancel(parse_run_id(&run_id)?))
 }
 
@@ -567,6 +606,10 @@ pub fn get_run_detail(
 #[tauri::command]
 pub fn delete_raw_artifacts(state: State<'_, AppState>, input: RunIdInput) -> Result<(), String> {
     let run_id = parse_run_id(&input.run_id)?;
+    let _local_data = state
+        .local_data_gate
+        .claim_mutating()
+        .map_err(|_| "本地数据正在备份，请稍后重试。".to_string())?;
     let store = ArtifactStore::new(state.artifact_root.clone());
     delete_raw_artifacts_for(&state.repository, &store, &state.run_operations, run_id)
 }
@@ -574,6 +617,10 @@ pub fn delete_raw_artifacts(state: State<'_, AppState>, input: RunIdInput) -> Re
 #[tauri::command]
 pub fn delete_run(state: State<'_, AppState>, input: RunIdInput) -> Result<bool, String> {
     let run_id = parse_run_id(&input.run_id)?;
+    let _local_data = state
+        .local_data_gate
+        .claim_mutating()
+        .map_err(|_| "本地数据正在备份，请稍后重试。".to_string())?;
     let store = ArtifactStore::new(state.artifact_root.clone());
     delete_run_for(&state.repository, &store, &state.run_operations, run_id)
 }
@@ -584,6 +631,10 @@ pub fn delete_target_history(
     input: DeleteTargetHistoryInput,
 ) -> Result<u32, String> {
     let expected = parse_expected_run_ids(&input.expected_run_ids)?;
+    let _local_data = state
+        .local_data_gate
+        .claim_mutating()
+        .map_err(|_| "本地数据正在备份，请稍后重试。".to_string())?;
     let store = ArtifactStore::new(state.artifact_root.clone());
     delete_target_history_for(
         &state.repository,
@@ -732,7 +783,12 @@ pub async fn export_public_report(
                 .map_err(|_| "仅支持保存到本地 HTML 文件。".to_string())?,
         ),
     };
-    export_report_to_selected_path(&state.repository, run_id, destination)
+    export_report_to_selected_path_with_gate(
+        &state.repository,
+        &state.local_data_gate,
+        run_id,
+        destination,
+    )
 }
 
 fn default_report_file_name(run_id: Uuid) -> String {
@@ -740,14 +796,32 @@ fn default_report_file_name(run_id: Uuid) -> String {
     format!("ability-radar-{}.html", &key[..8])
 }
 
+#[cfg(test)]
 fn export_report_to_selected_path(
     repository: &RunRepository,
+    run_id: Uuid,
+    destination: Option<PathBuf>,
+) -> Result<Option<String>, String> {
+    export_report_to_selected_path_with_gate(
+        repository,
+        &LocalDataGate::default(),
+        run_id,
+        destination,
+    )
+}
+
+fn export_report_to_selected_path_with_gate(
+    repository: &RunRepository,
+    gate: &LocalDataGate,
     run_id: Uuid,
     destination: Option<PathBuf>,
 ) -> Result<Option<String>, String> {
     let Some(destination) = destination else {
         return Ok(None);
     };
+    let _local_data = gate
+        .claim_mutating()
+        .map_err(|_| "本地数据正在备份，请稍后重试。".to_string())?;
     validate_export_destination(&destination)?;
     let run = repository
         .get_run(run_id)
@@ -759,7 +833,244 @@ fn export_report_to_selected_path(
     let report = ability_core::build_public_report(&run, &tasks).map_err(public_report_error)?;
     let html = ability_core::render_public_report_html(&report).map_err(public_report_error)?;
     write_new_report(&destination, html.as_bytes())?;
+    let report_hash = ability_core::public_report_sha256(&html);
+    let _ = repository.record_publication(report.report_id, run_id, &report_hash, "local_html");
     Ok(Some(report.report_id.to_string()))
+}
+
+#[tauri::command]
+pub fn get_data_settings(state: State<'_, AppState>) -> Result<DataSettingsDto, String> {
+    Ok(DataSettingsDto {
+        raw_retention_days: state
+            .repository
+            .raw_retention_days()
+            .map_err(|_| "无法读取本地数据设置，请稍后重试。".to_string())?,
+        cleanup_pending: state.cleanup_pending.load(Ordering::SeqCst),
+    })
+}
+
+#[tauri::command]
+pub fn set_raw_retention(
+    state: State<'_, AppState>,
+    input: SetRetentionInput,
+) -> Result<u32, String> {
+    set_retention_for(
+        &state.repository,
+        &ArtifactStore::new(state.artifact_root.clone()),
+        &state.run_operations,
+        &state.local_data_gate,
+        &state.cleanup_pending,
+        input.raw_retention_days,
+        chrono::Utc::now(),
+    )
+}
+
+fn set_retention_for(
+    repository: &RunRepository,
+    store: &ArtifactStore,
+    operations: &RunOperationRegistry,
+    gate: &LocalDataGate,
+    cleanup_pending: &AtomicBool,
+    days: Option<u32>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<u32, String> {
+    if !matches!(days, None | Some(7 | 30 | 90)) {
+        return Err("保留期限只能是永久、7、30 或 90 天。".into());
+    }
+    let _local_data = gate
+        .claim_mutating()
+        .map_err(|_| "本地数据正在备份，请稍后重试。".to_string())?;
+    repository
+        .set_raw_retention_days(days)
+        .map_err(|_| "无法保存本地数据设置，请稍后重试。".to_string())?;
+    match crate::data_management::prune_expired_artifacts(repository, store, operations, now) {
+        Ok(removed) => {
+            cleanup_pending.store(false, Ordering::SeqCst);
+            Ok(removed)
+        }
+        Err(_) => {
+            cleanup_pending.store(true, Ordering::SeqCst);
+            Err("保留期限已保存，但原始数据清理尚未完成，请稍后重试。".into())
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn export_full_backup(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: FullBackupInput,
+) -> Result<bool, String> {
+    if !input.acknowledged_unencrypted_raw_data {
+        return Err("请先确认备份未加密并包含原始回答和日志。".into());
+    }
+    let selected = app
+        .dialog()
+        .file()
+        .set_title("导出完整本地备份")
+        .add_filter("ZIP backup", &["zip"])
+        .set_file_name(format!(
+            "ability-radar-full-backup-{}.zip",
+            chrono::Utc::now().format("%Y%m%d")
+        ))
+        .blocking_save_file();
+    let destination = match selected {
+        None => None,
+        Some(selected) => Some(
+            selected
+                .into_path()
+                .map_err(|_| "请选择新的本地 ZIP 文件。".to_string())?,
+        ),
+    };
+    export_full_backup_to_selected_path(
+        &state.repository,
+        &ArtifactStore::new(state.artifact_root.clone()),
+        &state.run_operations,
+        &state.local_data_gate,
+        &state.app_data,
+        destination,
+        chrono::Utc::now(),
+    )
+}
+
+fn export_full_backup_to_selected_path(
+    repository: &RunRepository,
+    store: &ArtifactStore,
+    operations: &RunOperationRegistry,
+    gate: &LocalDataGate,
+    app_data: &Path,
+    destination: Option<PathBuf>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<bool, String> {
+    let Some(destination) = destination else {
+        return Ok(false);
+    };
+    validate_backup_destination(&destination, app_data)?;
+    let _exclusive = gate
+        .claim_exclusive()
+        .map_err(|_| "本地数据正在变更，请稍后重试备份。".to_string())?;
+    if operations.any_active() {
+        return Err("本地数据正在变更，请稍后重试备份。".into());
+    }
+    if repository
+        .has_running_runs()
+        .map_err(|_| "无法安全检查本地数据状态，请稍后重试。".to_string())?
+    {
+        return Err("仍有体检正在运行，请结束后再备份。".into());
+    }
+    write_full_backup_to_destination(repository, store, app_data, &destination, now)?;
+    Ok(true)
+}
+
+fn validate_backup_destination(destination: &Path, app_data: &Path) -> Result<(), String> {
+    let is_zip = destination
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("zip"));
+    if !destination.is_absolute()
+        || !is_zip
+        || validate_destination_platform(destination).is_err()
+        || path_is_within(destination, app_data)
+    {
+        return Err("备份必须保存为应用数据目录之外的新本地 .zip 文件。".into());
+    }
+    Ok(())
+}
+
+fn path_is_within(path: &Path, parent: &Path) -> bool {
+    fn components(path: &Path) -> Option<Vec<String>> {
+        path.components()
+            .map(|component| match component {
+                std::path::Component::Prefix(value) => {
+                    Some(value.as_os_str().to_string_lossy().to_ascii_lowercase())
+                }
+                std::path::Component::RootDir => Some(String::new()),
+                std::path::Component::Normal(value) => {
+                    Some(value.to_string_lossy().to_ascii_lowercase())
+                }
+                std::path::Component::CurDir | std::path::Component::ParentDir => None,
+            })
+            .collect()
+    }
+    match (components(path), components(parent)) {
+        (Some(path), Some(parent)) => path.starts_with(&parent),
+        _ => true,
+    }
+}
+
+#[cfg(windows)]
+fn write_full_backup_to_destination(
+    repository: &RunRepository,
+    store: &ArtifactStore,
+    app_data: &Path,
+    destination: &Path,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), String> {
+    write_new_backup(destination, app_data, |temporary| {
+        windows_report_file::with_private_snapshot(app_data, |snapshot_path, snapshot_file| {
+            crate::data_management::create_full_backup(
+                repository,
+                store,
+                snapshot_path,
+                snapshot_file,
+                temporary,
+                now,
+                env!("CARGO_PKG_VERSION"),
+            )
+            .map_err(std::io::Error::other)
+        })
+    })
+}
+
+#[cfg(not(windows))]
+fn write_full_backup_to_destination(
+    _repository: &RunRepository,
+    _store: &ArtifactStore,
+    _app_data: &Path,
+    _destination: &Path,
+    _now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), String> {
+    Err("当前版本仅支持在 Windows 上安全导出完整备份。".into())
+}
+
+#[cfg(windows)]
+fn write_new_backup<F>(destination: &Path, app_data: &Path, writer: F) -> Result<(), String>
+where
+    F: FnOnce(&mut fs::File) -> Result<(), windows_report_file::NativeWriteError>,
+{
+    let private_cleanup_incomplete = std::cell::Cell::new(false);
+    let result = windows_report_file::write_new_file_outside(
+        destination,
+        app_data,
+        |temporary| match writer(temporary) {
+            Ok(()) => Ok(()),
+            Err(windows_report_file::NativeWriteError::Operation(error)) => Err(error),
+            Err(windows_report_file::NativeWriteError::CleanupIncomplete) => {
+                private_cleanup_incomplete.set(true);
+                Err(std::io::Error::other("private snapshot cleanup incomplete"))
+            }
+        },
+        |_| {},
+    );
+    if private_cleanup_incomplete.get() {
+        Err(map_backup_write_error(
+            windows_report_file::NativeWriteError::CleanupIncomplete,
+        ))
+    } else {
+        result.map_err(map_backup_write_error)
+    }
+}
+
+#[cfg(windows)]
+fn map_backup_write_error(error: windows_report_file::NativeWriteError) -> String {
+    match error {
+        windows_report_file::NativeWriteError::CleanupIncomplete => {
+            "备份未完成，临时私密数据可能尚未清理；请关闭应用并联系支持。".into()
+        }
+        windows_report_file::NativeWriteError::Operation(_) => {
+            "无法安全写入新的本地备份；请重新选择位置。".into()
+        }
+    }
 }
 
 fn public_report_error(error: ability_core::ReportError) -> String {
@@ -781,14 +1092,6 @@ fn validate_export_destination(destination: &Path) -> Result<(), String> {
         || validate_destination_platform(destination).is_err()
     {
         return Err("报告必须保存为本机上的新 .html 文件。".into());
-    }
-
-    match fs::symlink_metadata(destination) {
-        Ok(_) => {
-            return Err("为避免覆盖或跟随链接，请选择一个新的报告文件名。".into());
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err("无法安全检查所选位置，请重新选择。".into()),
     }
 
     Ok(())
@@ -845,7 +1148,7 @@ fn write_new_report(_destination: &Path, _contents: &[u8]) -> Result<(), String>
 }
 
 #[cfg(windows)]
-mod windows_report_file {
+pub(crate) mod windows_report_file {
     use std::ffi::{OsStr, OsString};
     use std::fs::File;
     use std::io;
@@ -868,10 +1171,11 @@ mod windows_report_file {
     use windows_sys::Win32::Storage::FileSystem::DELETE;
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, GetDriveTypeW, GetFileInformationByHandle, GetFinalPathNameByHandleW,
-        BY_HANDLE_FILE_INFORMATION, FILE_ADD_FILE, FILE_ATTRIBUTE_NORMAL,
+        BY_HANDLE_FILE_INFORMATION, FILE_ADD_FILE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
         FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        FILE_TRAVERSE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, OPEN_EXISTING, SYNCHRONIZE,
+        FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, OPEN_EXISTING,
+        SYNCHRONIZE,
     };
     use windows_sys::Win32::System::WindowsProgramming::{
         DRIVE_CDROM, DRIVE_FIXED, DRIVE_NO_ROOT_DIR, DRIVE_RAMDISK, DRIVE_REMOTE, DRIVE_REMOVABLE,
@@ -886,6 +1190,8 @@ mod windows_report_file {
     const REPORT_FILE_ACCESS: u32 =
         FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES | FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE;
     const REPORT_FILE_SHARE_NONE: u32 = 0;
+    const PRIVATE_FILE_ACCESS: u32 = FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
+    const PRIVATE_FILE_SHARING: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub(super) enum DriveClass {
@@ -899,6 +1205,39 @@ mod windows_report_file {
         pub(super) attributes: u32,
         pub(super) volume_serial_number: u32,
         pub(super) final_path: String,
+        pub(super) file_index: u64,
+    }
+
+    #[derive(Debug)]
+    pub(super) enum NativeWriteError {
+        Operation(io::Error),
+        CleanupIncomplete,
+    }
+
+    impl From<io::Error> for NativeWriteError {
+        fn from(error: io::Error) -> Self {
+            Self::Operation(error)
+        }
+    }
+
+    impl std::fmt::Display for NativeWriteError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::Operation(_) => formatter.write_str("native file operation failed"),
+                Self::CleanupIncomplete => formatter.write_str(
+                    "report write failed and the opened temporary handle could not be deleted",
+                ),
+            }
+        }
+    }
+
+    impl std::error::Error for NativeWriteError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            match self {
+                Self::Operation(error) => Some(error),
+                Self::CleanupIncomplete => None,
+            }
+        }
     }
 
     struct OpenParent {
@@ -935,7 +1274,7 @@ mod windows_report_file {
         destination: &Path,
         writer: F,
         after_component_open: H,
-    ) -> io::Result<()>
+    ) -> Result<(), NativeWriteError>
     where
         F: FnOnce(&mut File) -> io::Result<()>,
         H: FnMut(&Path),
@@ -943,22 +1282,211 @@ mod windows_report_file {
         write_new_file_with_inspector(destination, writer, after_component_open, inspect_handle)
     }
 
+    pub(super) fn write_new_file_outside<F, H>(
+        destination: &Path,
+        forbidden_directory: &Path,
+        writer: F,
+        after_component_open: H,
+    ) -> Result<(), NativeWriteError>
+    where
+        F: FnOnce(&mut File) -> io::Result<()>,
+        H: FnMut(&Path),
+    {
+        write_new_file_with_authority(
+            destination,
+            Some(forbidden_directory),
+            writer,
+            after_component_open,
+            inspect_handle,
+            delete_file_handle,
+        )
+    }
+
     pub(super) fn write_new_file_with_inspector<F, H, I>(
         destination: &Path,
         writer: F,
-        mut after_component_open: H,
-        mut inspector: I,
-    ) -> io::Result<()>
+        after_component_open: H,
+        inspector: I,
+    ) -> Result<(), NativeWriteError>
     where
         F: FnOnce(&mut File) -> io::Result<()>,
         H: FnMut(&Path),
         I: FnMut(&File) -> io::Result<HandleSnapshot>,
     {
+        write_new_file_with_inspector_and_cleanup(
+            destination,
+            writer,
+            after_component_open,
+            inspector,
+            delete_file_handle,
+        )
+    }
+
+    pub(super) fn write_new_file_with_inspector_and_cleanup<F, H, I, D>(
+        destination: &Path,
+        writer: F,
+        after_component_open: H,
+        inspector: I,
+        cleanup: D,
+    ) -> Result<(), NativeWriteError>
+    where
+        F: FnOnce(&mut File) -> io::Result<()>,
+        H: FnMut(&Path),
+        I: FnMut(&File) -> io::Result<HandleSnapshot>,
+        D: FnMut(&File) -> io::Result<()>,
+    {
+        write_new_file_with_authority(
+            destination,
+            None,
+            writer,
+            after_component_open,
+            inspector,
+            cleanup,
+        )
+    }
+
+    pub(super) fn with_private_snapshot<F>(
+        app_data: &Path,
+        operation: F,
+    ) -> Result<(), NativeWriteError>
+    where
+        F: FnOnce(&Path, &mut File) -> io::Result<()>,
+    {
+        with_private_snapshot_with_hooks(app_data, operation, |_| {}, delete_file_handle)
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_private_snapshot_and_cleanup<F, D>(
+        app_data: &Path,
+        operation: F,
+        cleanup: D,
+    ) -> Result<(), NativeWriteError>
+    where
+        F: FnOnce(&Path, &mut File) -> io::Result<()>,
+        D: FnMut(&File) -> io::Result<()>,
+    {
+        with_private_snapshot_with_hooks(app_data, operation, |_| {}, cleanup)
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_private_snapshot_with_release_hook<F, H>(
+        app_data: &Path,
+        operation: F,
+        after_release: H,
+    ) -> Result<(), NativeWriteError>
+    where
+        F: FnOnce(&Path, &mut File) -> io::Result<()>,
+        H: FnOnce(&Path),
+    {
+        with_private_snapshot_with_hooks(app_data, operation, after_release, delete_file_handle)
+    }
+
+    fn with_private_snapshot_with_hooks<F, H, D>(
+        app_data: &Path,
+        operation: F,
+        after_release: H,
+        mut cleanup: D,
+    ) -> Result<(), NativeWriteError>
+    where
+        F: FnOnce(&Path, &mut File) -> io::Result<()>,
+        H: FnOnce(&Path),
+        D: FnMut(&File) -> io::Result<()>,
+    {
+        let name = OsString::from(format!(
+            ".ability-radar-backup-snapshot-{}.sqlite",
+            Uuid::new_v4()
+        ));
+        let path = app_data.join(&name);
+        let mut no_hook: fn(&Path) = |_| {};
+        let parent = open_parent(&path, &mut no_hook)?;
+        let mut snapshot_file = create_new_private_file(parent.directory(), &name)?;
+        let opened = inspect_handle(&snapshot_file).and_then(|snapshot| {
+            validate_private_snapshot(
+                &snapshot,
+                parent.drive,
+                parent.volume_serial_number,
+                &parent.final_path,
+                &name,
+            )?;
+            Ok(snapshot)
+        });
+        let operation_result = match &opened {
+            Ok(_) => operation(&path, &mut snapshot_file),
+            Err(error) => Err(io::Error::new(error.kind(), "snapshot authority failed")),
+        };
+        let completed_result = match &opened {
+            Ok(opened) => (|| {
+                let completed = inspect_handle(&snapshot_file)?;
+                validate_private_snapshot(
+                    &completed,
+                    parent.drive,
+                    parent.volume_serial_number,
+                    &parent.final_path,
+                    &name,
+                )?;
+                if opened.file_index != completed.file_index {
+                    return Err(unsafe_destination());
+                }
+                Ok(())
+            })(),
+            Err(_) => Err(unsafe_destination()),
+        };
+        let operation_result = operation_result.and(completed_result);
+        let expected = opened.ok();
+        drop(snapshot_file);
+        after_release(&path);
+        let cleanup_result = expected
+            .ok_or_else(unsafe_destination)
+            .and_then(|expected| {
+                delete_private_file(
+                    parent.directory(),
+                    &name,
+                    &expected,
+                    parent.drive,
+                    parent.volume_serial_number,
+                    &parent.final_path,
+                    &mut cleanup,
+                )
+            });
+        match cleanup_result {
+            Err(_) => Err(NativeWriteError::CleanupIncomplete),
+            Ok(()) => operation_result.map_err(NativeWriteError::Operation),
+        }
+    }
+
+    fn write_new_file_with_authority<F, H, I, D>(
+        destination: &Path,
+        forbidden_directory: Option<&Path>,
+        writer: F,
+        mut after_component_open: H,
+        mut inspector: I,
+        mut cleanup: D,
+    ) -> Result<(), NativeWriteError>
+    where
+        F: FnOnce(&mut File) -> io::Result<()>,
+        H: FnMut(&Path),
+        I: FnMut(&File) -> io::Result<HandleSnapshot>,
+        D: FnMut(&File) -> io::Result<()>,
+    {
         let parent = open_parent(destination, &mut after_component_open)?;
+        let forbidden_parent = if let Some(forbidden_directory) = forbidden_directory {
+            let boundary = forbidden_directory.join(".ability-radar-authority-boundary");
+            let mut no_hook: fn(&Path) = |_| {};
+            let forbidden_parent = open_parent(&boundary, &mut no_hook)?;
+            if parent.volume_serial_number == forbidden_parent.volume_serial_number
+                && final_path_is_within(&parent.final_path, &forbidden_parent.final_path)
+            {
+                return Err(unsafe_destination().into());
+            }
+            Some(forbidden_parent)
+        } else {
+            None
+        };
         let temporary_name = OsString::from(format!(".ability-radar-{}.tmp", Uuid::new_v4()));
         let mut temporary = create_new_file(parent.directory(), &temporary_name)?;
 
-        let snapshot = inspector(&temporary).or_else(|error| fail_and_delete(&temporary, error))?;
+        let snapshot = inspector(&temporary)
+            .or_else(|error| fail_and_delete_with(&temporary, error, &mut cleanup))?;
         if let Err(error) = validate_opened_file_snapshot(
             &snapshot,
             parent.drive,
@@ -966,15 +1494,15 @@ mod windows_report_file {
             &parent.final_path,
             &temporary_name,
         ) {
-            return fail_and_delete(&temporary, error);
+            return fail_and_delete_with(&temporary, error, &mut cleanup);
         }
 
         if let Err(error) = writer(&mut temporary).and_then(|()| temporary.sync_all()) {
-            return fail_and_delete(&temporary, error);
+            return fail_and_delete_with(&temporary, error, &mut cleanup);
         }
 
-        let before_publish =
-            inspector(&temporary).or_else(|error| fail_and_delete(&temporary, error))?;
+        let before_publish = inspector(&temporary)
+            .or_else(|error| fail_and_delete_with(&temporary, error, &mut cleanup))?;
         if let Err(error) = validate_opened_file_snapshot(
             &before_publish,
             parent.drive,
@@ -982,7 +1510,7 @@ mod windows_report_file {
             &parent.final_path,
             &temporary_name,
         ) {
-            return fail_and_delete(&temporary, error);
+            return fail_and_delete_with(&temporary, error, &mut cleanup);
         }
 
         if let Err(error) = rename_no_replace(
@@ -990,11 +1518,11 @@ mod windows_report_file {
             parent.directory(),
             parent.final_name.as_os_str(),
         ) {
-            return fail_and_delete(&temporary, error);
+            return fail_and_delete_with(&temporary, error, &mut cleanup);
         }
 
-        let published =
-            inspector(&temporary).or_else(|error| fail_and_delete(&temporary, error))?;
+        let published = inspector(&temporary)
+            .or_else(|error| fail_and_delete_with(&temporary, error, &mut cleanup))?;
         if let Err(error) = validate_opened_file_snapshot(
             &published,
             parent.drive,
@@ -1002,9 +1530,26 @@ mod windows_report_file {
             &parent.final_path,
             &parent.final_name,
         ) {
-            return fail_and_delete(&temporary, error);
+            return fail_and_delete_with(&temporary, error, &mut cleanup);
         }
+        drop(forbidden_parent);
         Ok(())
+    }
+
+    fn final_path_is_within(path: &str, directory: &str) -> bool {
+        let path = path.trim_end_matches(['\\', '/']);
+        let directory = directory.trim_end_matches(['\\', '/']);
+        let Some(prefix) = path.get(..directory.len()) else {
+            return false;
+        };
+        if !prefix.eq_ignore_ascii_case(directory) {
+            return false;
+        }
+        path.len() == directory.len()
+            || path
+                .as_bytes()
+                .get(directory.len())
+                .is_some_and(|byte| is_separator_char(*byte))
     }
 
     fn open_parent<H>(destination: &Path, after_component_open: &mut H) -> io::Result<OpenParent>
@@ -1171,6 +1716,50 @@ mod windows_report_file {
         )
     }
 
+    fn create_new_private_file(parent: &File, name: &OsStr) -> io::Result<File> {
+        open_relative(
+            parent,
+            name,
+            PRIVATE_FILE_ACCESS,
+            FILE_CREATE,
+            FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+            PRIVATE_FILE_SHARING,
+        )
+    }
+
+    fn delete_private_file(
+        parent: &File,
+        name: &OsStr,
+        expected: &HandleSnapshot,
+        drive: u8,
+        volume_serial_number: u32,
+        parent_final_path: &str,
+        cleanup: &mut impl FnMut(&File) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let cleanup_handle = open_relative(
+            parent,
+            name,
+            FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE,
+            FILE_OPEN,
+            FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+            REPORT_FILE_SHARE_NONE,
+        )?;
+        let cleanup_snapshot = inspect_handle(&cleanup_handle)?;
+        validate_private_snapshot(
+            &cleanup_snapshot,
+            drive,
+            volume_serial_number,
+            parent_final_path,
+            name,
+        )?;
+        if expected.file_index != cleanup_snapshot.file_index
+            || expected.volume_serial_number != cleanup_snapshot.volume_serial_number
+        {
+            return Err(unsafe_destination());
+        }
+        cleanup(&cleanup_handle)
+    }
+
     fn open_relative(
         parent: &File,
         name: &OsStr,
@@ -1262,6 +1851,8 @@ mod windows_report_file {
             attributes: information.dwFileAttributes,
             volume_serial_number: information.dwVolumeSerialNumber,
             final_path,
+            file_index: (u64::from(information.nFileIndexHigh) << 32)
+                | u64::from(information.nFileIndexLow),
         })
     }
 
@@ -1301,6 +1892,30 @@ mod windows_report_file {
             Ok(())
         } else {
             Err(unsafe_destination())
+        }
+    }
+
+    fn validate_private_snapshot<N>(
+        snapshot: &HandleSnapshot,
+        expected_drive: u8,
+        expected_volume_serial_number: u32,
+        expected_parent: &str,
+        expected_name: N,
+    ) -> io::Result<()>
+    where
+        N: AsRef<OsStr>,
+    {
+        validate_opened_file_snapshot(
+            snapshot,
+            expected_drive,
+            expected_volume_serial_number,
+            expected_parent,
+            expected_name,
+        )?;
+        if snapshot.attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+            Err(unsafe_destination())
+        } else {
+            Ok(())
         }
     }
 
@@ -1382,13 +1997,17 @@ mod windows_report_file {
         )
     }
 
-    fn fail_and_delete<T>(file: &File, primary: io::Error) -> io::Result<T> {
-        match delete_file_handle(file) {
-            Ok(()) => Err(primary),
-            Err(cleanup) => Err(io::Error::new(
-                cleanup.kind(),
-                "report write failed and the opened temporary handle could not be deleted",
-            )),
+    fn fail_and_delete_with<T, D>(
+        file: &File,
+        primary: io::Error,
+        cleanup: &mut D,
+    ) -> Result<T, NativeWriteError>
+    where
+        D: FnMut(&File) -> io::Result<()>,
+    {
+        match cleanup(file) {
+            Ok(()) => Err(NativeWriteError::Operation(primary)),
+            Err(_) => Err(NativeWriteError::CleanupIncomplete),
         }
     }
 
@@ -1482,8 +2101,9 @@ mod tests {
         TargetAvailability,
     };
     use ability_core::{
-        Category, EnvironmentFingerprint, FailureKind, LoadedPack, PackLoader, RunMode, RunRecord,
-        RunRepository, RunStatus, TargetKind, TargetSelection, TaskOutcome, TaskResult,
+        Category, EnvironmentFingerprint, FailureKind, LoadedPack, ManualRunService, PackLoader,
+        RunMode, RunRecord, RunRepository, RunStatus, TargetKind, TargetSelection, TaskOutcome,
+        TaskResult,
     };
     use std::collections::BTreeMap;
     use std::path::Path;
@@ -2077,6 +2697,253 @@ mod tests {
     }
 
     #[test]
+    fn retention_policy_remains_effective_and_reports_cleanup_pending_after_safe_failure() {
+        let directory = tempdir().unwrap();
+        let repository = RunRepository::open(&directory.path().join("ability.db")).unwrap();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-19T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let mut expired = insert_run(&repository, RunStatus::Completed);
+        expired.finished_at = Some(now - chrono::Duration::days(8));
+        let connection = rusqlite::Connection::open(directory.path().join("ability.db")).unwrap();
+        connection
+            .execute(
+                "UPDATE runs SET finished_at=?2 WHERE id=?1",
+                rusqlite::params![
+                    expired.id.to_string(),
+                    expired.finished_at.unwrap().to_rfc3339()
+                ],
+            )
+            .unwrap();
+        let artifact_root = directory.path().join("artifacts");
+        let hostile = artifact_root.join("runs").join(expired.id.to_string());
+        std::fs::create_dir_all(&hostile).unwrap();
+        std::fs::write(hostile.join("owner.bin"), "unsafe layout").unwrap();
+        let pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let error = set_retention_for(
+            &repository,
+            &ArtifactStore::new(artifact_root),
+            &RunOperationRegistry::default(),
+            &crate::app_state::LocalDataGate::default(),
+            &pending,
+            Some(7),
+            now,
+        )
+        .unwrap_err();
+        assert_eq!(repository.raw_retention_days().unwrap(), Some(7));
+        assert!(pending.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            error,
+            "保留期限已保存，但原始数据清理尚未完成，请稍后重试。"
+        );
+        assert!(!error.contains(directory.path().to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn next_manual_step_enters_the_global_gate_before_the_service_can_complete_a_run() {
+        let directory = tempdir().unwrap();
+        let repository =
+            Arc::new(RunRepository::open(&directory.path().join("ability.db")).unwrap());
+        let service = ManualRunService::new(repository, directory.path().join("artifacts"));
+        let gate = crate::app_state::LocalDataGate::default();
+        let backup = gate.claim_exclusive().unwrap();
+
+        let error = next_manual_step_for(&service, &gate, Uuid::new_v4()).unwrap_err();
+
+        assert_eq!(error, "本地数据正在备份，请稍后重试。");
+        drop(backup);
+    }
+
+    #[test]
+    fn backup_cancel_and_busy_checks_create_no_destination_or_gate_claim_window() {
+        let app_data = tempdir().unwrap();
+        let output = tempdir().unwrap();
+        let repository = RunRepository::open(&app_data.path().join("ability.db")).unwrap();
+        let store = ArtifactStore::new(app_data.path().join("artifacts"));
+        let operations = RunOperationRegistry::default();
+        let gate = crate::app_state::LocalDataGate::default();
+        let mutation = gate.claim_mutating().unwrap();
+
+        assert!(!export_full_backup_to_selected_path(
+            &repository,
+            &store,
+            &operations,
+            &gate,
+            app_data.path(),
+            None,
+            chrono::Utc::now(),
+        )
+        .unwrap());
+        drop(mutation);
+
+        let run_id = Uuid::new_v4();
+        let operation = operations.claim([run_id]).unwrap();
+        let destination = output.path().join("backup.zip");
+        let error = export_full_backup_to_selected_path(
+            &repository,
+            &store,
+            &operations,
+            &gate,
+            app_data.path(),
+            Some(destination.clone()),
+            chrono::Utc::now(),
+        )
+        .unwrap_err();
+        assert_eq!(error, "本地数据正在变更，请稍后重试备份。");
+        assert!(!destination.exists());
+        drop(operation);
+        assert!(gate.claim_mutating().is_ok());
+    }
+
+    #[test]
+    fn backup_rejects_running_run_before_opening_destination() {
+        let app_data = tempdir().unwrap();
+        let output = tempdir().unwrap();
+        let repository = RunRepository::open(&app_data.path().join("ability.db")).unwrap();
+        insert_run(&repository, RunStatus::Running);
+        let destination = output.path().join("backup.zip");
+
+        let error = export_full_backup_to_selected_path(
+            &repository,
+            &ArtifactStore::new(app_data.path().join("artifacts")),
+            &RunOperationRegistry::default(),
+            &crate::app_state::LocalDataGate::default(),
+            app_data.path(),
+            Some(destination.clone()),
+            chrono::Utc::now(),
+        )
+        .unwrap_err();
+        assert_eq!(error, "仍有体检正在运行，请结束后再备份。");
+        assert!(!destination.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn backup_streams_through_the_retained_writer_and_publishes_only_the_final_zip() {
+        let app_data = tempdir().unwrap();
+        let output = tempdir().unwrap();
+        let repository = RunRepository::open(&app_data.path().join("ability.db")).unwrap();
+        let destination = output.path().join("backup.zip");
+
+        assert!(export_full_backup_to_selected_path(
+            &repository,
+            &ArtifactStore::new(app_data.path().join("artifacts")),
+            &RunOperationRegistry::default(),
+            &crate::app_state::LocalDataGate::default(),
+            app_data.path(),
+            Some(destination.clone()),
+            chrono::Utc::now(),
+        )
+        .unwrap());
+
+        assert!(std::fs::read(&destination)
+            .unwrap()
+            .starts_with(b"PK\x03\x04"));
+        assert_eq!(
+            std::fs::read_dir(output.path()).unwrap().count(),
+            1,
+            "successful publication must leave no randomized destination temporary"
+        );
+        assert!(std::fs::read_dir(app_data.path()).unwrap().all(|entry| {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            !name.starts_with(".ability-radar-backup-snapshot-") && !name.ends_with("-journal")
+        }));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn backup_writer_rejects_a_handle_bound_app_data_parent_before_creating_a_temporary() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let app_data = tempdir().unwrap();
+        let destination = app_data.path().join("backup.zip");
+        let writer_called = AtomicBool::new(false);
+
+        let result = windows_report_file::write_new_file_outside(
+            &destination,
+            app_data.path(),
+            |_| {
+                writer_called.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+            |_| {},
+        );
+
+        assert!(result.is_err());
+        assert!(!writer_called.load(Ordering::SeqCst));
+        assert!(!destination.exists());
+        assert_eq!(std::fs::read_dir(app_data.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unsafe_artifact_enumeration_removes_the_destination_temporary_before_returning() {
+        let app_data = tempdir().unwrap();
+        let output = tempdir().unwrap();
+        let repository = RunRepository::open(&app_data.path().join("ability.db")).unwrap();
+        let run = insert_exportable_run(&repository, "safe-model");
+        let hostile = app_data
+            .path()
+            .join("artifacts/runs")
+            .join(run.id.to_string());
+        std::fs::create_dir_all(&hostile).unwrap();
+        std::fs::write(hostile.join("owner.bin"), "private attacker-shaped bytes").unwrap();
+        let destination = output.path().join("backup.zip");
+
+        let error = export_full_backup_to_selected_path(
+            &repository,
+            &ArtifactStore::new(app_data.path().join("artifacts")),
+            &RunOperationRegistry::default(),
+            &crate::app_state::LocalDataGate::default(),
+            app_data.path(),
+            Some(destination.clone()),
+            chrono::Utc::now(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "无法安全写入新的本地备份；请重新选择位置。");
+        assert!(!destination.exists());
+        assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 0);
+        assert!(std::fs::read_dir(app_data.path()).unwrap().all(|entry| {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            !name.starts_with(".ability-radar-backup-snapshot-") && !name.ends_with("-journal")
+        }));
+        assert!(!error.contains(app_data.path().to_string_lossy().as_ref()));
+        assert!(!error.contains("owner.bin"));
+    }
+
+    #[test]
+    fn publication_audit_failure_after_safe_write_is_explicitly_best_effort() {
+        let directory = tempdir().unwrap();
+        let database = directory.path().join("ability.db");
+        let repository = RunRepository::open(&database).unwrap();
+        let run = insert_exportable_run(&repository, "safe-model");
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER fail_publication BEFORE INSERT ON publications
+                 BEGIN SELECT RAISE(ABORT, 'injected audit failure'); END;",
+            )
+            .unwrap();
+        let destination = directory.path().join("published.html");
+
+        let result = export_report_to_selected_path_with_gate(
+            &repository,
+            &crate::app_state::LocalDataGate::default(),
+            run.id,
+            Some(destination.clone()),
+        )
+        .unwrap();
+        assert!(result.is_some());
+        assert!(destination.exists());
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM publications", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
     fn export_command_helper_writes_only_a_privacy_checked_offline_report() {
         let directory = tempdir().unwrap();
         let repository = RunRepository::open(&directory.path().join("runs.db")).unwrap();
@@ -2099,7 +2966,7 @@ mod tests {
     }
 
     #[test]
-    fn export_destination_is_absolute_new_local_html_only() {
+    fn export_destination_is_absolute_local_html_only_and_writer_refuses_existing_file() {
         let directory = tempdir().unwrap();
         let valid = directory.path().join("new-report.HTML");
         assert!(validate_export_destination(&valid).is_ok());
@@ -2110,10 +2977,9 @@ mod tests {
 
         let existing = directory.path().join("existing.html");
         std::fs::write(&existing, "existing").unwrap();
-        assert!(
-            validate_export_destination(&existing).is_err(),
-            "rejecting every existing target also closes the symlink-following race"
-        );
+        assert!(validate_export_destination(&existing).is_ok());
+        assert!(write_new_report(&existing, b"replacement").is_err());
+        assert_eq!(std::fs::read_to_string(existing).unwrap(), "existing");
     }
 
     #[cfg(windows)]
@@ -2143,6 +3009,7 @@ mod tests {
             attributes: 0,
             volume_serial_number: 91,
             final_path: r"\\?\C:\safe\report.tmp".into(),
+            file_index: 7,
         };
         assert!(
             validate_opened_file_snapshot(&safe, b'C', 91, r"\\?\C:\safe", "report.tmp",).is_ok()
@@ -2297,6 +3164,188 @@ mod tests {
                 "inspection {failed_inspection} left a randomized temporary file"
             );
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cleanup_failure_is_surfaced_generically_without_hiding_the_private_temporary() {
+        let directory = tempdir().unwrap();
+        let destination = directory.path().join("backup.zip");
+
+        let error = windows_report_file::write_new_file_with_inspector_and_cleanup(
+            &destination,
+            |temporary| {
+                temporary.write_all(b"private raw sentinel")?;
+                Err(std::io::Error::other(
+                    "C:\\Users\\Alice\\private.zip SQL secret",
+                ))
+            },
+            |_| {},
+            windows_report_file::inspect_handle,
+            |_| Err(std::io::Error::other("injected cleanup failure")),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "report write failed and the opened temporary handle could not be deleted"
+        );
+        assert!(!destination.exists());
+        let temporaries = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(temporaries.len(), 1);
+        assert!(temporaries[0]
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(".ability-radar-"));
+        std::fs::remove_file(&temporaries[0]).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn backup_writer_maps_cleanup_incomplete_separately_without_sensitive_details() {
+        let cleanup =
+            map_backup_write_error(windows_report_file::NativeWriteError::CleanupIncomplete);
+        assert_eq!(
+            cleanup,
+            "备份未完成，临时私密数据可能尚未清理；请关闭应用并联系支持。"
+        );
+
+        let ordinary = map_backup_write_error(windows_report_file::NativeWriteError::Operation(
+            std::io::Error::other("C:\\Users\\Alice\\private.zip SQL raw sentinel"),
+        ));
+        assert_eq!(ordinary, "无法安全写入新的本地备份；请重新选择位置。");
+        assert!(!ordinary.contains("Alice"));
+        assert!(!ordinary.contains("SQL"));
+        assert!(!ordinary.contains("sentinel"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn private_backup_snapshot_retains_authority_and_cleans_every_exit() {
+        let directory = tempdir().unwrap();
+        let observed_path = std::cell::RefCell::new(None);
+
+        let error =
+            windows_report_file::with_private_snapshot(directory.path(), |path, _retained| {
+                observed_path.replace(Some(path.to_path_buf()));
+                std::fs::write(path, b"private SQLite sentinel")?;
+                assert_eq!(std::fs::read(path)?, b"private SQLite sentinel");
+                Err(std::io::Error::other("injected archive failure"))
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            windows_report_file::NativeWriteError::Operation(_)
+        ));
+        assert!(!observed_path.borrow().as_ref().unwrap().exists());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn private_snapshot_blocks_rename_replacement_before_sqlite_opens_the_path() {
+        let directory = tempdir().unwrap();
+        let repository = RunRepository::open(&directory.path().join("ability.db")).unwrap();
+        let detached = directory.path().join("detached.sqlite");
+        let rename_succeeded = std::cell::Cell::new(false);
+
+        let result =
+            windows_report_file::with_private_snapshot(directory.path(), |path, retained| {
+                let before = windows_report_file::inspect_handle(retained)?;
+                if std::fs::rename(path, &detached).is_ok() {
+                    rename_succeeded.set(true);
+                    std::fs::write(path, b"attacker replacement")?;
+                }
+                repository
+                    .snapshot_to_backup_file(path)
+                    .map_err(std::io::Error::other)?;
+                let after = windows_report_file::inspect_handle(retained)?;
+                if before.volume_serial_number != after.volume_serial_number
+                    || before.file_index != after.file_index
+                {
+                    return Err(std::io::Error::other("snapshot identity changed"));
+                }
+                Ok(())
+            });
+
+        assert!(!rename_succeeded.get(), "retained handle allowed rename");
+        assert!(result.is_ok());
+        assert!(!detached.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn private_backup_snapshot_classifies_cleanup_failure() {
+        let directory = tempdir().unwrap();
+
+        let error = windows_report_file::with_private_snapshot_and_cleanup(
+            directory.path(),
+            |path, _retained| std::fs::write(path, b"private SQLite sentinel"),
+            |_| Err(std::io::Error::other("injected cleanup failure")),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            windows_report_file::NativeWriteError::CleanupIncomplete
+        ));
+        let residue = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(residue.len(), 1);
+        assert_eq!(
+            std::fs::read(&residue[0]).unwrap(),
+            b"private SQLite sentinel"
+        );
+        std::fs::remove_file(&residue[0]).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn post_release_snapshot_swap_is_cleanup_incomplete_and_never_publishes_zip() {
+        let app_data = tempdir().unwrap();
+        let output = tempdir().unwrap();
+        let destination = output.path().join("backup.zip");
+        let detached = app_data.path().join("detached-original.sqlite");
+        let replacement_path = std::cell::RefCell::new(None);
+
+        let error = write_new_backup(&destination, app_data.path(), |temporary| {
+            windows_report_file::with_private_snapshot_with_release_hook(
+                app_data.path(),
+                |path, _retained| {
+                    std::fs::write(path, b"original private SQLite")?;
+                    temporary.write_all(b"partial private ZIP")
+                },
+                |path| {
+                    std::fs::rename(path, &detached).unwrap();
+                    std::fs::write(path, b"attacker replacement").unwrap();
+                    replacement_path.replace(Some(path.to_path_buf()));
+                },
+            )
+        })
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            "备份未完成，临时私密数据可能尚未清理；请关闭应用并联系支持。"
+        );
+        assert!(!destination.exists());
+        assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 0);
+        let replacement = replacement_path.borrow();
+        let replacement = replacement.as_ref().unwrap();
+        assert_eq!(std::fs::read(replacement).unwrap(), b"attacker replacement");
+        assert_eq!(
+            std::fs::read(&detached).unwrap(),
+            b"original private SQLite"
+        );
+        std::fs::remove_file(replacement).unwrap();
+        std::fs::remove_file(detached).unwrap();
     }
 
     #[cfg(windows)]

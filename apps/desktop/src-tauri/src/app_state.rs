@@ -4,12 +4,14 @@ use ability_adapters::{
     TokioProcessRunner, WorkspaceVerifier,
 };
 use ability_core::{
-    LoadedPack, ManualRunService, PackLoader, PackRegistry, RunRepository, TargetKind,
+    ArtifactStore, LoadedPack, ManualRunService, PackLoader, PackRegistry, RunRepository,
+    TargetKind,
 };
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::Manager;
@@ -122,6 +124,10 @@ impl RunOperationRegistry {
             active.remove(run_id);
         }
     }
+
+    pub(crate) fn any_active(&self) -> bool {
+        !self.inner.lock().is_empty()
+    }
 }
 
 pub(crate) struct RunOperationClaim {
@@ -132,6 +138,74 @@ pub(crate) struct RunOperationClaim {
 impl Drop for RunOperationClaim {
     fn drop(&mut self) {
         self.registry.release(&self.run_ids);
+    }
+}
+
+#[derive(Default)]
+struct LocalDataGateState {
+    mutation_claims: usize,
+    exclusive: bool,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct LocalDataGate {
+    inner: Arc<Mutex<LocalDataGateState>>,
+}
+
+impl LocalDataGate {
+    pub(crate) fn claim_mutating(&self) -> Result<LocalDataMutationClaim, String> {
+        let mut state = self.inner.lock();
+        if state.exclusive {
+            return Err("an exclusive local-data snapshot is active".into());
+        }
+        state.mutation_claims = state
+            .mutation_claims
+            .checked_add(1)
+            .ok_or_else(|| "too many local-data operations".to_string())?;
+        Ok(LocalDataMutationClaim { gate: self.clone() })
+    }
+
+    pub(crate) fn claim_exclusive(&self) -> Result<LocalDataExclusiveClaim, String> {
+        let mut state = self.inner.lock();
+        if state.exclusive || state.mutation_claims != 0 {
+            return Err("local data is busy".into());
+        }
+        state.exclusive = true;
+        Ok(LocalDataExclusiveClaim { gate: self.clone() })
+    }
+
+    fn release_mutating(&self) {
+        let mut state = self.inner.lock();
+        state.mutation_claims = state
+            .mutation_claims
+            .checked_sub(1)
+            .expect("a live mutation claim increments the count");
+    }
+
+    fn release_exclusive(&self) {
+        let mut state = self.inner.lock();
+        debug_assert!(state.exclusive);
+        state.exclusive = false;
+    }
+}
+
+pub(crate) struct LocalDataMutationClaim {
+    gate: LocalDataGate,
+}
+
+impl Drop for LocalDataMutationClaim {
+    fn drop(&mut self) {
+        self.gate.release_mutating();
+    }
+}
+
+pub(crate) struct LocalDataExclusiveClaim {
+    gate: LocalDataGate,
+}
+
+impl Drop for LocalDataExclusiveClaim {
+    fn drop(&mut self) {
+        self.gate.release_exclusive();
     }
 }
 
@@ -146,7 +220,10 @@ pub struct AppState {
     pub(crate) runner: Arc<dyn ProcessRunner>,
     pub(crate) cancellations: CancellationRegistry,
     pub(crate) run_operations: RunOperationRegistry,
+    pub(crate) local_data_gate: LocalDataGate,
     pub(crate) artifact_root: PathBuf,
+    pub(crate) app_data: PathBuf,
+    pub(crate) cleanup_pending: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -182,6 +259,16 @@ impl AppState {
 
         let artifact_root = paths.app_data.join("artifacts");
         fs::create_dir_all(&artifact_root).map_err(|error| error.to_string())?;
+        let run_operations = RunOperationRegistry::default();
+        let cleanup_pending = Arc::new(AtomicBool::new(
+            crate::data_management::prune_expired_artifacts(
+                &repository,
+                &ArtifactStore::new(artifact_root.clone()),
+                &run_operations,
+                chrono::Utc::now(),
+            )
+            .is_err(),
+        ));
         let mut adapters: BTreeMap<TargetKind, Arc<dyn AgentAdapter>> = BTreeMap::new();
         adapters.insert(
             TargetKind::CodexCli,
@@ -210,8 +297,11 @@ impl AppState {
             verifier,
             runner,
             cancellations: CancellationRegistry::default(),
-            run_operations: RunOperationRegistry::default(),
+            run_operations,
+            local_data_gate: LocalDataGate::default(),
             artifact_root,
+            app_data: paths.app_data,
+            cleanup_pending,
         })
     }
 
@@ -623,6 +713,77 @@ mod tests {
     }
 
     #[test]
+    fn hostile_startup_retention_sets_retryable_pending_state_without_bricking_app() {
+        let resources = tempdir().unwrap();
+        let app_data = tempdir().unwrap();
+        copy_bundled_packs(resources.path());
+        let database = app_data.path().join("ability-radar.db");
+        let repository = RunRepository::open(&database).unwrap();
+        repository.set_raw_retention_days(Some(7)).unwrap();
+        let client_pack =
+            PackLoader::load(&resources.path().join("benchmark-packs/client-quick-v1")).unwrap();
+        let mut expired = RunRecord::new(
+            TargetSelection {
+                kind: TargetKind::ChatGptClient,
+                reported_model: "fake-model".into(),
+                reasoning_effort: None,
+            },
+            RunMode::Quick,
+            client_pack.manifest.id.clone(),
+            client_pack.manifest.version.clone(),
+            1,
+            EnvironmentFingerprint {
+                os_family: "windows".into(),
+                os_version: "test".into(),
+                app_version: "0.1.0".into(),
+                cli_version: None,
+                verifier_runtime_version: None,
+                suite_id: client_pack.manifest.id.clone(),
+                suite_version: client_pack.manifest.version.clone(),
+                suite_content_sha256: client_pack.content_sha256,
+                scoring_rule_version: "ability-v1".into(),
+                resumed: false,
+            },
+        );
+        expired.status = RunStatus::Completed;
+        expired.finished_at = Some(chrono::Utc::now() - chrono::Duration::days(8));
+        repository.insert_run(&expired).unwrap();
+        let hostile = app_data
+            .path()
+            .join("artifacts/runs")
+            .join(expired.id.to_string());
+        fs::create_dir_all(&hostile).unwrap();
+        fs::write(hostile.join("owner.bin"), "not app-owned layout").unwrap();
+        drop(repository);
+        let paths = StartupPaths {
+            app_data: app_data.path().to_path_buf(),
+            resource_dir: resources.path().to_path_buf(),
+        };
+
+        let pending = AppState::build_from_paths(
+            paths.clone(),
+            RecordingRunner::output(Some(0), "v22.0.0", ""),
+        )
+        .unwrap();
+        assert!(pending
+            .cleanup_pending
+            .load(std::sync::atomic::Ordering::SeqCst));
+        assert!(pending.repository.get_run(expired.id).unwrap().is_some());
+        drop(pending);
+
+        fs::remove_file(hostile.join("owner.bin")).unwrap();
+        fs::write(hostile.join("answer.txt"), "app-owned raw answer").unwrap();
+        let retried =
+            AppState::build_from_paths(paths, RecordingRunner::output(Some(0), "v22.0.0", ""))
+                .unwrap();
+        assert!(!retried
+            .cleanup_pending
+            .load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!hostile.exists());
+        assert!(retried.repository.get_run(expired.id).unwrap().is_some());
+    }
+
+    #[test]
     fn run_operation_claims_are_exclusive_and_batch_claims_are_atomic() {
         let registry = RunOperationRegistry::default();
         let first = Uuid::new_v4();
@@ -642,6 +803,51 @@ mod tests {
         assert!(registry.claim([first]).is_ok());
         drop(free_batch);
         assert!(registry.claim([second, third]).is_ok());
+    }
+
+    #[test]
+    fn local_data_gate_excludes_backup_and_mutations_in_both_directions() {
+        let gate = LocalDataGate::default();
+        let first_mutation = gate.claim_mutating().unwrap();
+        let second_mutation = gate.claim_mutating().unwrap();
+        assert!(gate.claim_exclusive().is_err());
+        drop(first_mutation);
+        assert!(gate.claim_exclusive().is_err());
+        drop(second_mutation);
+
+        let backup = gate.claim_exclusive().unwrap();
+        assert!(gate.claim_exclusive().is_err());
+        assert!(gate.claim_mutating().is_err());
+        drop(backup);
+        assert!(gate.claim_mutating().is_ok());
+    }
+
+    #[test]
+    fn local_data_gate_claims_release_on_every_error_return() {
+        fn failing_mutation(gate: &LocalDataGate) -> Result<(), &'static str> {
+            let _claim = gate.claim_mutating().map_err(|_| "busy")?;
+            Err("injected mutation failure")
+        }
+
+        fn failing_backup(gate: &LocalDataGate) -> Result<(), &'static str> {
+            let _claim = gate.claim_exclusive().map_err(|_| "busy")?;
+            Err("injected backup failure")
+        }
+
+        let gate = LocalDataGate::default();
+        assert_eq!(failing_mutation(&gate), Err("injected mutation failure"));
+        assert!(gate.claim_exclusive().is_ok());
+        assert_eq!(failing_backup(&gate), Err("injected backup failure"));
+        assert!(gate.claim_mutating().is_ok());
+    }
+
+    #[test]
+    fn run_operation_registry_reports_active_claims_for_backup_recheck() {
+        let registry = RunOperationRegistry::default();
+        let claim = registry.claim([Uuid::new_v4()]).unwrap();
+        assert!(registry.any_active());
+        drop(claim);
+        assert!(!registry.any_active());
     }
 
     fn copy_bundled_packs(resource_dir: &Path) {

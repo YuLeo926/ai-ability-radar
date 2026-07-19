@@ -16,7 +16,7 @@ beforeEach(() => {
   bridge.listen.mockReset();
 });
 
-test("uses exactly the fourteen reviewed commands and narrow camelCase payloads", async () => {
+test("uses exactly the seventeen reviewed commands and narrow camelCase payloads", async () => {
   bridge.invoke.mockResolvedValue(undefined);
   const manualInput: StartRunInput = {
     target: {
@@ -71,6 +71,11 @@ test("uses exactly the fourteen reviewed commands and narrow camelCase payloads"
     "run-cli-1",
     "run-cli-2",
   ]);
+  await tauriBackend.getDataSettings();
+  await tauriBackend.setRawRetention(7);
+  await tauriBackend.exportFullBackup({
+    acknowledgedUnencryptedRawData: true,
+  });
 
   expect(bridge.invoke.mock.calls).toEqual([
     ["get_bootstrap"],
@@ -118,6 +123,12 @@ test("uses exactly the fourteen reviewed commands and narrow camelCase payloads"
           expectedRunIds: ["run-cli-1", "run-cli-2"],
         },
       },
+    ],
+    ["get_data_settings"],
+    ["set_raw_retention", { input: { rawRetentionDays: 7 } }],
+    [
+      "export_full_backup",
+      { input: { acknowledgedUnencryptedRawData: true } },
     ],
   ]);
   expect(JSON.stringify(bridge.invoke.mock.calls)).not.toMatch(
