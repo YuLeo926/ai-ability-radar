@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, extname, join, normalize, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import {
   actionSteps,
   exactPermissions,
@@ -400,6 +401,19 @@ const rootPackage = json("package.json");
 const desktopPackage = json("apps/desktop/package.json");
 const tauriConfig = json("apps/desktop/src-tauri/tauri.conf.json");
 const npmLock = json("package-lock.json");
+const expectedTypeScriptParserVersion = "5.8.3";
+if (
+  rootPackage.devDependencies?.typescript !== expectedTypeScriptParserVersion ||
+  npmLock.packages?.[""]?.devDependencies?.typescript !==
+    expectedTypeScriptParserVersion ||
+  npmLock.packages?.["node_modules/typescript"]?.version !==
+    expectedTypeScriptParserVersion ||
+  ts.version !== expectedTypeScriptParserVersion
+) {
+  fail(
+    `TypeScript parser must be declared, locked, and loaded at exactly ${expectedTypeScriptParserVersion}`,
+  );
+}
 if (rootPackage.scripts?.tauri !== "npm run tauri --workspace apps/desktop --") {
   fail("package.json tauri script must preserve the argument separator for workspace forwarding");
 }
@@ -431,116 +445,503 @@ const portablePowerShellSource = portableSources.get(
   "scripts/compress-portable.ps1",
 );
 
-function canonicalStatement(source) {
-  return source.replace(/\s+/g, " ").trim();
+function portableAstFailure(message) {
+  fail(`portable Node AST allowlist ${message}`);
 }
 
-const portableNodeImports =
-  portableNodeSource.match(/import\s+[\s\S]*?\s+from\s+"[^"]+";/g) ?? [];
-const expectedPortableNodeImports = [
-  'import { createHash, randomUUID } from "node:crypto";',
-  'import { spawnSync } from "node:child_process";',
-  'import { copyFile, link, lstat, mkdir, readFile, readdir, realpath, rm, writeFile, } from "node:fs/promises";',
-  'import { fileURLToPath } from "node:url";',
-  'import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep, } from "node:path";',
-].map(canonicalStatement).sort();
-const actualPortableNodeImports =
-  portableNodeImports.map(canonicalStatement).sort();
-if (
-  JSON.stringify(actualPortableNodeImports) !==
-    JSON.stringify(expectedPortableNodeImports) ||
-  /\bimport\s*\(|\brequire\s*\(|\bprocess\.binding\s*\(/.test(
-    portableNodeSource,
-  ) ||
-  /\b(?:fetch|WebSocket|XMLHttpRequest|EventSource)\s*\(|\bsendBeacon\s*\(/.test(
-    portableNodeSource,
-  )
-) {
-  fail(
-    "portable Node import allowlist permits only reviewed core filesystem, path, crypto, URL, and child-process imports; network and dynamic imports are forbidden",
-  );
-}
-const forbiddenPortableNodeSyntax = [
-  /\bprocess\s*\.\s*getBuiltinModule\s*\(/,
-  /\b(?:global|globalThis)\s*\[/,
-  /\[\s*["'](?:spawnSync|fetch|copyFile|link|rm|writeFile|rename|createWriteStream|request|connect)["']\s*\]/,
-  /\b(?:import|require|eval|Function)\s*\(/,
-  /\bReflect(?:\s*\.|\s*\[)/,
-  /\b(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=\s*(?:spawnSync|copyFile|link|rm|writeFile|rename|fetch)\b(?!\s*\()/,
-];
-if (forbiddenPortableNodeSyntax.some((pattern) => pattern.test(portableNodeSource))) {
-  fail(
-    "portable Node syntax allowlist forbids computed/global/builtin-module access, capability aliases, and indirect execution, network, or write access",
-  );
+function expressionShape(node) {
+  if (ts.isIdentifier(node)) return ["identifier", node.text];
+  if (ts.isStringLiteral(node)) return ["string", node.text];
+  if (ts.isNumericLiteral(node)) return ["number", node.text];
+  if (node.kind === ts.SyntaxKind.TrueKeyword) return ["boolean", true];
+  if (node.kind === ts.SyntaxKind.FalseKeyword) return ["boolean", false];
+  if (ts.isPropertyAccessExpression(node)) {
+    return ["property", expressionShape(node.expression), node.name.text];
+  }
+  if (ts.isElementAccessExpression(node)) {
+    return [
+      "element",
+      expressionShape(node.expression),
+      expressionShape(node.argumentExpression),
+    ];
+  }
+  if (ts.isCallExpression(node)) {
+    return [
+      "call",
+      expressionShape(node.expression),
+      node.arguments.map(expressionShape),
+    ];
+  }
+  if (ts.isArrayLiteralExpression(node)) {
+    return ["array", node.elements.map(expressionShape)];
+  }
+  if (ts.isObjectLiteralExpression(node)) {
+    return [
+      "object",
+      node.properties.map((property) => {
+        if (
+          !ts.isPropertyAssignment(property) ||
+          (!ts.isIdentifier(property.name) && !ts.isStringLiteral(property.name))
+        ) {
+          return ["unsupported"];
+        }
+        return [
+          property.name.text,
+          expressionShape(property.initializer),
+        ];
+      }),
+    ];
+  }
+  if (ts.isTemplateExpression(node)) return ["template"];
+  return ["unsupported", ts.SyntaxKind[node.kind]];
 }
 
-const expectedPortableCallCounts = new Map([
-  ["copyFile", 3],
-  ["link", 1],
-  ["lstat", 6],
-  ["mkdir", 1],
-  ["randomUUID", 1],
-  ["readFile", 3],
-  ["readdir", 1],
-  ["realpath", 2],
-  ["rm", 2],
-  ["spawnSync", 1],
-  ["writeFile", 1],
-]);
-for (const [operation, expected] of expectedPortableCallCounts) {
-  const count = [...portableNodeSource.matchAll(
-    new RegExp(`\\b${operation}\\s*\\(`, "g"),
-  )].length;
-  if (count !== expected) {
-    fail(
-      `portable Node operation allowlist requires ${operation} exactly ${expected} time(s); found ${count}`,
+function shapeKey(value) {
+  return JSON.stringify(value);
+}
+
+function reviewPortableNodeAst(source) {
+  const sourceFile = ts.createSourceFile(
+    "scripts/package-portable.mjs",
+    source,
+    ts.ScriptTarget.ESNext,
+    true,
+    ts.ScriptKind.JS,
+  );
+  if (sourceFile.parseDiagnostics.length > 0) {
+    portableAstFailure("requires parseable JavaScript with no diagnostics");
+    return;
+  }
+
+  const expectedImports = new Map([
+    ["node:crypto", ["createHash", "randomUUID"]],
+    ["node:child_process", ["spawnSync"]],
+    [
+      "node:fs/promises",
+      [
+        "copyFile",
+        "link",
+        "lstat",
+        "mkdir",
+        "readFile",
+        "readdir",
+        "realpath",
+        "rm",
+        "writeFile",
+      ],
+    ],
+    ["node:url", ["fileURLToPath"]],
+    [
+      "node:path",
+      [
+        "basename",
+        "dirname",
+        "isAbsolute",
+        "join",
+        "parse",
+        "relative",
+        "resolve",
+        "sep",
+      ],
+    ],
+  ]);
+  const actualImports = new Map();
+  for (const statement of sourceFile.statements) {
+    if (!ts.isImportDeclaration(statement)) continue;
+    const moduleName = ts.isStringLiteral(statement.moduleSpecifier)
+      ? statement.moduleSpecifier.text
+      : "";
+    const bindings = statement.importClause?.namedBindings;
+    if (
+      statement.importClause?.name ||
+      !bindings ||
+      !ts.isNamedImports(bindings) ||
+      bindings.elements.some((element) => element.propertyName)
+    ) {
+      portableAstFailure("rejects default, namespace, and aliased imports");
+      continue;
+    }
+    actualImports.set(
+      moduleName,
+      bindings.elements.map((element) => element.name.text).sort(),
+    );
+  }
+  const sortedImports = (imports) =>
+    [...imports].sort(([left], [right]) =>
+      left < right ? -1 : left > right ? 1 : 0,
+    );
+  if (
+    shapeKey(sortedImports(actualImports)) !==
+    shapeKey(sortedImports(expectedImports))
+  ) {
+    portableAstFailure("requires the exact reviewed core import specifiers");
+  }
+
+  const expectedDirectCalls = new Map([
+    ["archiveLeaf", 1],
+    ["assertArchiveCandidate", 3],
+    ["assertInside", 17],
+    ["basename", 5],
+    ["canonicalExisting", 5],
+    ["comparable", 2],
+    ["copyFile", 3],
+    ["copyValidatedTree", 1],
+    ["createHash", 1],
+    ["dirname", 5],
+    ["ensureDirectory", 5],
+    ["entriesUnder", 4],
+    ["fileURLToPath", 2],
+    ["isAbsolute", 1],
+    ["join", 25],
+    ["link", 1],
+    ["lstat", 6],
+    ["main", 1],
+    ["mkdir", 1],
+    ["packagePortableFromBuild", 2],
+    ["parse", 1],
+    ["pathInfo", 6],
+    ["publicationHook", 2],
+    ["randomUUID", 1],
+    ["readFile", 3],
+    ["readdir", 1],
+    ["realpath", 2],
+    ["relative", 4],
+    ["requireDirectory", 13],
+    ["requireFile", 9],
+    ["resolve", 9],
+    ["rm", 2],
+    ["safeRemoveFile", 1],
+    ["safeRemoveTree", 3],
+    ["samePath", 3],
+    ["settlePortableCleanup", 1],
+    ["sha256", 1],
+    ["spawnSync", 1],
+    ["stagePortable", 1],
+    ["writeFile", 1],
+  ]);
+  const expectedMemberCalls = new Map([
+    ["allSettled", 1],
+    ["catch", 1],
+    ["digest", 1],
+    ["filter", 3],
+    ["includes", 2],
+    ["isDirectory", 2],
+    ["isFile", 4],
+    ["isSymbolicLink", 4],
+    ["join", 2],
+    ["map", 1],
+    ["parse", 1],
+    ["push", 5],
+    ["reverse", 1],
+    ["sort", 1],
+    ["split", 2],
+    ["startsWith", 1],
+    ["subarray", 1],
+    ["test", 1],
+    ["toLowerCase", 1],
+    ["update", 1],
+    ["write", 2],
+  ]);
+  const expectedProperties = new Map([
+    ["NODE_TEST_CONTEXT", 1],
+    ["allSettled", 1],
+    ["argv", 2],
+    ["catch", 1],
+    ["code", 1],
+    ["digest", 1],
+    ["directory", 1],
+    ["env", 1],
+    ["error", 2],
+    ["exitCode", 1],
+    ["filter", 3],
+    ["includes", 2],
+    ["isDirectory", 2],
+    ["isFile", 4],
+    ["isSymbolicLink", 4],
+    ["join", 2],
+    ["length", 1],
+    ["map", 1],
+    ["message", 2],
+    ["name", 5],
+    ["parse", 1],
+    ["path", 2],
+    ["platform", 2],
+    ["push", 5],
+    ["reverse", 1],
+    ["root", 1],
+    ["size", 1],
+    ["sort", 1],
+    ["split", 2],
+    ["startsWith", 1],
+    ["status", 1],
+    ["stderr", 1],
+    ["stdout", 1],
+    ["subarray", 1],
+    ["test", 1],
+    ["toLowerCase", 1],
+    ["update", 1],
+    ["url", 2],
+    ["version", 1],
+    ["write", 2],
+  ]);
+  const sensitiveCapabilities = new Set([
+    "copyFile",
+    "link",
+    "lstat",
+    "mkdir",
+    "readFile",
+    "readdir",
+    "realpath",
+    "rm",
+    "spawnSync",
+    "writeFile",
+  ]);
+  const forbiddenIdentifiers = new Set([
+    "EventSource",
+    "Function",
+    "Reflect",
+    "WebSocket",
+    "XMLHttpRequest",
+    "eval",
+    "fetch",
+    "global",
+    "globalThis",
+    "require",
+    "sendBeacon",
+  ]);
+  const directCalls = new Map();
+  const memberCalls = new Map();
+  const properties = new Map();
+  const directCallNodes = new Map();
+
+  function increment(map, name) {
+    map.set(name, (map.get(name) ?? 0) + 1);
+  }
+
+  function visit(node) {
+    if (ts.isIdentifier(node)) {
+      if (forbiddenIdentifiers.has(node.text)) {
+        portableAstFailure(`rejects forbidden capability identifier ${node.text}`);
+      }
+      if (sensitiveCapabilities.has(node.text)) {
+        const imported =
+          ts.isImportSpecifier(node.parent) && node.parent.name === node;
+        const directCallee =
+          ts.isCallExpression(node.parent) && node.parent.expression === node;
+        if (!imported && !directCallee) {
+          portableAstFailure(`rejects aliases of capability ${node.text}`);
+        }
+      }
+    }
+    if (ts.isPropertyAccessExpression(node)) {
+      increment(properties, node.name.text);
+      if (
+        node.name.text === "getBuiltinModule" ||
+        node.name.text === "binding"
+      ) {
+        portableAstFailure("rejects process builtin-module access");
+      }
+    }
+    if (ts.isCallExpression(node)) {
+      if (node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+        portableAstFailure("rejects dynamic import calls");
+      } else if (ts.isIdentifier(node.expression)) {
+        const name = node.expression.text;
+        increment(directCalls, name);
+        const nodes = directCallNodes.get(name) ?? [];
+        nodes.push(node);
+        directCallNodes.set(name, nodes);
+        if (!expectedDirectCalls.has(name)) {
+          portableAstFailure(`rejects unknown direct callee ${name}`);
+        }
+      } else if (ts.isPropertyAccessExpression(node.expression)) {
+        const name = node.expression.name.text;
+        increment(memberCalls, name);
+        if (!expectedMemberCalls.has(name)) {
+          portableAstFailure(`rejects unknown member callee ${name}`);
+        }
+      } else {
+        portableAstFailure("rejects computed, element-access, and indirect callees");
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(sourceFile);
+
+  const compareCounts = (label, actual, expected) => {
+    if (
+      shapeKey([...actual].sort()) !==
+      shapeKey([...expected].sort())
+    ) {
+      portableAstFailure(`requires exact reviewed ${label} counts`);
+    }
+  };
+  compareCounts("direct call", directCalls, expectedDirectCalls);
+  compareCounts("member call", memberCalls, expectedMemberCalls);
+  compareCounts("member access", properties, expectedProperties);
+
+  const actualElementShapes = [];
+  function collectElementShape(node) {
+    if (ts.isElementAccessExpression(node)) {
+      actualElementShapes.push(shapeKey(expressionShape(node)));
+    }
+    ts.forEachChild(node, collectElementShape);
+  }
+  collectElementShape(sourceFile);
+  const reviewedElementShapes = [
+    [
+      "element",
+      ["property", ["identifier", "process"], "argv"],
+      ["number", "1"],
+    ],
+    [
+      "element",
+      ["property", ["identifier", "process"], "argv"],
+      ["number", "1"],
+    ],
+    ["element", ["identifier", "signature"], ["number", "0"]],
+    ["element", ["identifier", "signature"], ["number", "1"]],
+  ];
+  if (
+    shapeKey(actualElementShapes.sort()) !==
+    shapeKey(reviewedElementShapes.map(shapeKey).sort())
+  ) {
+    portableAstFailure("rejects unreviewed computed or element access");
+  }
+
+  const expectedCopyArguments = [
+    [
+      ["property", ["identifier", "entry"], "path"],
+      ["identifier", "destination"],
+    ],
+    [
+      ["identifier", "executable"],
+      [
+        "call",
+        ["identifier", "join"],
+        [
+          ["identifier", "stageRoot"],
+          ["string", "ability-radar.exe"],
+        ],
+      ],
+    ],
+    [
+      ["identifier", "readme"],
+      [
+        "call",
+        ["identifier", "join"],
+        [
+          ["identifier", "stageRoot"],
+          ["string", "README.txt"],
+        ],
+      ],
+    ],
+  ];
+  const actualCopyArguments = (directCallNodes.get("copyFile") ?? [])
+    .map((call) => call.arguments.map(expressionShape))
+    .map(shapeKey)
+    .sort();
+  if (
+    shapeKey(actualCopyArguments) !==
+    shapeKey(expectedCopyArguments.map(shapeKey).sort())
+  ) {
+    portableAstFailure("rejects unreviewed copyFile sources or destinations");
+  }
+
+  const expectedSimpleMutationArguments = new Map([
+    [
+      "link",
+      [[["identifier", "temporaryArchive"], ["identifier", "archivePath"]]],
+    ],
+    ["mkdir", [[["identifier", "current"]]]],
+    [
+      "rm",
+      [
+        [["identifier", "path"]],
+        [
+          ["identifier", "path"],
+          ["object", [["recursive", ["boolean", true]]]],
+        ],
+      ],
+    ],
+  ]);
+  for (const [name, expected] of expectedSimpleMutationArguments) {
+    const actual = (directCallNodes.get(name) ?? [])
+      .map((call) => call.arguments.map(expressionShape))
+      .map(shapeKey)
+      .sort();
+    if (shapeKey(actual) !== shapeKey(expected.map(shapeKey).sort())) {
+      portableAstFailure(`rejects unreviewed ${name} destinations`);
+    }
+  }
+
+  const writeCall = directCallNodes.get("writeFile")?.[0];
+  const expectedWriteDestination = [
+    "call",
+    ["identifier", "join"],
+    [
+      ["identifier", "stageRoot"],
+      ["string", "SHA256SUMS.txt"],
+    ],
+  ];
+  if (
+    !writeCall ||
+    writeCall.arguments.length !== 3 ||
+    shapeKey(expressionShape(writeCall.arguments[0])) !==
+      shapeKey(expectedWriteDestination) ||
+    shapeKey(expressionShape(writeCall.arguments[2])) !==
+      shapeKey(["object", [["flag", ["string", "wx"]]]])
+  ) {
+    portableAstFailure("rejects unreviewed writeFile destinations or options");
+  }
+
+  const spawnCall = directCallNodes.get("spawnSync")?.[0];
+  const expectedSpawnArguments = [
+    ["string", "powershell.exe"],
+    [
+      "array",
+      [
+        ["string", "-NoLogo"],
+        ["string", "-NoProfile"],
+        ["string", "-NonInteractive"],
+        ["string", "-ExecutionPolicy"],
+        ["string", "Bypass"],
+        ["string", "-File"],
+        [
+          "call",
+          ["identifier", "join"],
+          [
+            ["identifier", "repoRoot"],
+            ["string", "scripts"],
+            ["string", "compress-portable.ps1"],
+          ],
+        ],
+        ["string", "-Source"],
+        ["identifier", "stageRoot"],
+        ["string", "-Destination"],
+        ["identifier", "temporaryArchive"],
+      ],
+    ],
+    [
+      "object",
+      [
+        ["cwd", ["identifier", "repoRoot"]],
+        ["stdio", ["string", "inherit"]],
+      ],
+    ],
+  ];
+  if (
+    !spawnCall ||
+    shapeKey(spawnCall.arguments.map(expressionShape)) !==
+      shapeKey(expectedSpawnArguments)
+  ) {
+    portableAstFailure(
+      "permits only the exact reviewed powershell.exe compressor invocation",
     );
   }
 }
-if (
-  !portableNodeSource.includes(
-    'const targetDir = join(repoRoot, "target", "release");',
-  ) ||
-  !portableNodeSource.includes(
-    'const bundleDir = join(targetDir, "bundle", "portable");',
-  ) ||
-  !portableNodeSource.includes(
-    'await copyFile(executable, join(stageRoot, "ability-radar.exe"));',
-  ) ||
-  !portableNodeSource.includes(
-    'await copyFile(readme, join(stageRoot, "README.txt"));',
-  ) ||
-  !portableNodeSource.includes("await copyFile(entry.path, destination);") ||
-  !portableNodeSource.includes("await link(temporaryArchive, archivePath);") ||
-  !portableNodeSource.includes("await rm(path, { recursive: true });") ||
-  !portableNodeSource.includes("await rm(path);")
-) {
-  fail(
-    "portable Node operation allowlist rejects copyFile, link, or removal destinations outside the reviewed target/release/bundle/portable flow",
-  );
-}
-const exactPortableSpawn = `spawnSync(
-      "powershell.exe",
-      [
-        "-NoLogo",
-        "-NoProfile",
-        "-NonInteractive",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        join(repoRoot, "scripts", "compress-portable.ps1"),
-        "-Source",
-        stageRoot,
-        "-Destination",
-        temporaryArchive,
-      ],
-      { cwd: repoRoot, stdio: "inherit" },
-    )`;
-if (!portableNodeSource.includes(exactPortableSpawn)) {
-  fail(
-    "portable Node child process allowlist permits only powershell.exe with the reviewed compressor, stage source, and temporary archive destination",
-  );
-}
+
+reviewPortableNodeAst(portableNodeSource);
 
 const reviewedPowerShell = portablePowerShellSource
   .replace(/^\s*#.*$/gm, "")
@@ -632,7 +1033,7 @@ if (
 const portableSourceSeals = new Map([
   [
     "scripts/package-portable.mjs",
-    "dd75003e1739cd130430801e41f107461db73d10278991f8d95fa13a45ba2fd9",
+    "f3948b4c05974db195daa6aa7602cf088d5e858ee4b3cd053c4bf15a3c594643",
   ],
   [
     "scripts/compress-portable.ps1",

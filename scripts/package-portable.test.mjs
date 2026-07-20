@@ -36,6 +36,10 @@ function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 async function createFixture({ cli = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "ability-radar-portable-"));
   const repoRoot = join(root, "repo");
@@ -451,6 +455,125 @@ test(
       await assert.rejects(lstat(join(fixture.bundleDir, ".stage")), {
         code: "ENOENT",
       });
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "real temporary cleanup failure after publication still cleans stage",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const fixture = await createFixture({ cli: true });
+    try {
+      const portable = await import("./package-portable.mjs");
+      let caught;
+      try {
+        await portable.packagePortableFromBuildForTest(
+          fixture.repoRoot,
+          async ({ phase, temporaryArchive }) => {
+            if (phase !== "afterLink") return;
+            await rm(temporaryArchive);
+            await mkdir(temporaryArchive);
+          },
+        );
+      } catch (error) {
+        caught = error;
+      }
+      assert.ok(caught, "cleanup failure must reject packaging");
+      assert.match(caught.message, /published.*cleanup incomplete/i);
+      assert.doesNotMatch(caught.message, new RegExp(escapeRegExp(fixture.root)));
+      const archivePath = join(
+        fixture.bundleDir,
+        "ability-radar_0.2.1_windows-x64-portable.zip",
+      );
+      assert.deepEqual(
+        [...(await readFile(archivePath)).subarray(0, 2)],
+        [0x50, 0x4b],
+      );
+      await assert.rejects(lstat(join(fixture.bundleDir, ".stage")), {
+        code: "ENOENT",
+      });
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "published archive aggregates simultaneous cleanup failures without paths",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const fixture = await createFixture({ cli: true });
+    try {
+      const portable = await import("./package-portable.mjs");
+      let caught;
+      try {
+        await portable.packagePortableFromBuildForTest(
+          fixture.repoRoot,
+          async ({ phase, temporaryArchive }) => {
+            if (phase !== "afterLink") return;
+            await rm(temporaryArchive);
+            await mkdir(temporaryArchive);
+            const stageParent = join(fixture.bundleDir, ".stage");
+            await rm(stageParent, { recursive: true });
+            await writeFile(stageParent, "blocks directory cleanup");
+          },
+        );
+      } catch (error) {
+        caught = error;
+      }
+      assert.ok(caught, "cleanup failures must reject packaging");
+      assert.match(caught.message, /published.*cleanup incomplete.*2 operations/i);
+      assert.doesNotMatch(caught.message, new RegExp(escapeRegExp(fixture.root)));
+      const archivePath = join(
+        fixture.bundleDir,
+        "ability-radar_0.2.1_windows-x64-portable.zip",
+      );
+      assert.deepEqual(
+        [...(await readFile(archivePath)).subarray(0, 2)],
+        [0x50, 0x4b],
+      );
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "pre-publication primary failure survives simultaneous cleanup failures",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const fixture = await createFixture({ cli: true });
+    try {
+      const portable = await import("./package-portable.mjs");
+      let caught;
+      try {
+        await portable.packagePortableFromBuildForTest(
+          fixture.repoRoot,
+          async ({ phase, temporaryArchive }) => {
+            if (phase !== "beforeLink") return;
+            await rm(temporaryArchive);
+            await mkdir(temporaryArchive);
+            const stageParent = join(fixture.bundleDir, ".stage");
+            await rm(stageParent, { recursive: true });
+            await writeFile(stageParent, "blocks directory cleanup");
+            throw new Error("primary publication-boundary failure");
+          },
+        );
+      } catch (error) {
+        caught = error;
+      }
+      assert.ok(caught, "primary failure must reject packaging");
+      assert.match(caught.message, /primary publication-boundary failure/i);
+      assert.match(caught.message, /cleanup incomplete.*2 operations/i);
+      assert.doesNotMatch(caught.message, new RegExp(escapeRegExp(fixture.root)));
+      const archivePath = join(
+        fixture.bundleDir,
+        "ability-radar_0.2.1_windows-x64-portable.zip",
+      );
+      await assert.rejects(lstat(archivePath), { code: "ENOENT" });
     } finally {
       await rm(fixture.root, { recursive: true, force: true });
     }

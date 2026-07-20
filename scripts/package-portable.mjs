@@ -167,6 +167,26 @@ async function safeRemoveFile(path, canonicalRoot, label) {
   await rm(path);
 }
 
+async function settlePortableCleanup({
+  temporaryArchive,
+  stageParent,
+  canonicalBundle,
+}) {
+  const results = await Promise.allSettled([
+    safeRemoveFile(
+      temporaryArchive,
+      canonicalBundle,
+      "portable temporary archive",
+    ),
+    safeRemoveTree(
+      stageParent,
+      canonicalBundle,
+      "portable stage directory",
+    ),
+  ]);
+  return results.filter(({ status }) => status === "rejected").length;
+}
+
 function archiveLeaf(version) {
   if (!strictSemver.test(version)) {
     throw new Error("root package version must be strict semantic version");
@@ -362,6 +382,7 @@ async function packagePortableFromBuild(repoRoot, publicationHook) {
   );
 
   let published = false;
+  let primaryError;
   try {
     if (await pathInfo(archivePath)) {
       throw new Error("portable final archive already exists; refusing to overwrite");
@@ -424,34 +445,43 @@ async function packagePortableFromBuild(repoRoot, publicationHook) {
       "portable final archive",
     );
     assertInside(canonicalBundle, canonicalFinal, "portable final archive");
-    await safeRemoveFile(
-      temporaryArchive,
-      canonicalBundle,
-      "portable temporary archive",
-    );
-    return archivePath;
   } catch (error) {
-    if (published) {
-      throw new Error(
-        `portable archive was published but post-publication cleanup failed: ${
-          error instanceof Error ? error.message : error
-        }`,
-        { cause: error },
-      );
-    }
-    throw error;
-  } finally {
-    await safeRemoveFile(
-      temporaryArchive,
-      canonicalBundle,
-      "portable temporary archive",
-    );
-    await safeRemoveTree(
-      stageParent,
-      canonicalBundle,
-      "portable stage directory",
+    primaryError = error;
+  }
+
+  const cleanupFailureCount = await settlePortableCleanup({
+    temporaryArchive,
+    stageParent,
+    canonicalBundle,
+  });
+  const cleanupSummary = `cleanup incomplete (${cleanupFailureCount} operation${
+    cleanupFailureCount === 1 ? "" : "s"
+  })`;
+
+  if (published && cleanupFailureCount > 0) {
+    throw new Error(
+      `portable archive was published; ${cleanupSummary}`,
+      { cause: primaryError },
     );
   }
+  if (published && primaryError) {
+    throw new Error(
+      "portable archive was published; post-publication processing failed, cleanup completed",
+      { cause: primaryError },
+    );
+  }
+  if (primaryError && cleanupFailureCount > 0) {
+    throw new Error(
+      `${
+        primaryError instanceof Error
+          ? primaryError.message
+          : "portable packaging failed"
+      }; ${cleanupSummary}`,
+      { cause: primaryError },
+    );
+  }
+  if (primaryError) throw primaryError;
+  return archivePath;
 }
 
 export async function packagePortableFromBuildForTest(repoRoot, publicationHook) {

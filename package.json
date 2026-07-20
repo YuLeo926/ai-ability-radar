@@ -9,6 +9,9 @@
   "workspaces": [
     "apps/desktop"
   ],
+  "devDependencies": {
+    "typescript": "5.8.3"
+  },
   "scripts": {
     "build": "npm run build --workspace apps/desktop",
     "test": "node --test scripts/package-portable.test.mjs && node --test scripts/repository-contracts.test.mjs && npm run test --workspace apps/desktop",

@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
   cpSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -85,6 +87,14 @@ function runNegativeFixture(mutate, { fixtureValidator = false } = {}) {
     const validatorPath = fixtureValidator
       ? join(fixture, "scripts", "validate-repository.mjs")
       : validator;
+    if (fixtureValidator) {
+      mkdirSync(join(fixture, "node_modules"), { recursive: true });
+      symlinkSync(
+        join(root, "node_modules", "typescript"),
+        join(fixture, "node_modules", "typescript"),
+        "junction",
+      );
+    }
     return spawnSync(process.execPath, [validatorPath], {
       cwd: fixture,
       env: { ...process.env, REPOSITORY_ROOT: fixture },
@@ -165,7 +175,10 @@ test("portable entry points reject real provider invocations", () => {
     "scripts/package-portable.mjs",
     (source) => `${source}\nspawnSync("codex", ["exec", "forbidden"]);\n`,
   );
-  assertRejected(result, /portable Node operation allowlist|child process allowlist/i);
+  assertRejected(
+    result,
+    /portable Node AST allowlist|operation allowlist|child process allowlist/i,
+  );
 });
 
 test("portable entry points reject network upload commands", () => {
@@ -183,7 +196,7 @@ test("portable entry points reject writes outside the portable bundle", () => {
     (source) =>
       `${source}\nawait writeFile(join(repoRoot, "escaped.txt"), "forbidden");\n`,
   );
-  assertRejected(result, /portable Node operation allowlist/i);
+  assertRejected(result, /portable Node AST allowlist|operation allowlist/i);
 });
 
 test("portable Node import allowlist rejects an aliased child process", () => {
@@ -196,7 +209,10 @@ test("portable Node import allowlist rejects an aliased child process", () => {
       )
       .replace("const result = spawnSync(", "const result = runPowerShell("),
   );
-  assertRejected(result, /portable Node import allowlist|child process allowlist/i);
+  assertRejected(
+    result,
+    /portable Node AST allowlist|import allowlist|child process allowlist/i,
+  );
 });
 
 test("portable Node child-process allowlist rejects another executable", () => {
@@ -204,7 +220,10 @@ test("portable Node child-process allowlist rejects another executable", () => {
     "scripts/package-portable.mjs",
     (source) => source.replace('"powershell.exe"', '"cmd.exe"'),
   );
-  assertRejected(result, /portable Node child process allowlist/i);
+  assertRejected(
+    result,
+    /portable Node AST allowlist|child process allowlist/i,
+  );
 });
 
 test("portable PowerShell operation allowlist rejects aliases", () => {
@@ -235,7 +254,10 @@ test("portable Node operation allowlist checks copy destinations", () => {
     (source) =>
       `${source}\nawait copyFile(executable, join(repoRoot, "escaped.exe"));\n`,
   );
-  assertRejected(result, /portable Node operation allowlist.*copyFile/i);
+  assertRejected(
+    result,
+    /portable Node AST allowlist.*copyFile|portable Node AST allowlist.*direct call counts|portable Node operation allowlist.*copyFile/i,
+  );
 });
 
 test("portable Node import allowlist rejects write streams", () => {
@@ -248,7 +270,10 @@ test("portable Node import allowlist rejects write streams", () => {
       )
       .concat('\ncreateWriteStream(join(repoRoot, "escaped.zip"));\n'),
   );
-  assertRejected(result, /portable Node import allowlist|operation allowlist/i);
+  assertRejected(
+    result,
+    /portable Node AST allowlist|import allowlist|operation allowlist/i,
+  );
 });
 
 test("portable Node operation allowlist rejects indirect rename escapes", () => {
@@ -257,7 +282,10 @@ test("portable Node operation allowlist rejects indirect rename escapes", () => 
     (source) =>
       `${source}\nawait import("node:fs/promises").then(({ rename }) => rename(stageRoot, repoRoot));\n`,
   );
-  assertRejected(result, /portable Node import allowlist|operation allowlist/i);
+  assertRejected(
+    result,
+    /portable Node AST allowlist|import allowlist|operation allowlist/i,
+  );
 });
 
 test("portable Node operation allowlist rejects Reflect write escapes", () => {
@@ -266,7 +294,10 @@ test("portable Node operation allowlist rejects Reflect write escapes", () => {
     (source) =>
       `${source}\nReflect.apply(writeFile, undefined, [join(repoRoot, "escaped"), "x"]);\n`,
   );
-  assertRejected(result, /portable Node operation allowlist|indirect/i);
+  assertRejected(
+    result,
+    /portable Node AST allowlist|operation allowlist|indirect/i,
+  );
 });
 
 test("portable Node child-process allowlist rejects Reflect execution", () => {
@@ -275,7 +306,10 @@ test("portable Node child-process allowlist rejects Reflect execution", () => {
     (source) =>
       `${source}\nReflect.apply(spawnSync, undefined, ["cmd.exe", ["/c", "exit"]]);\n`,
   );
-  assertRejected(result, /portable Node child process allowlist|indirect/i);
+  assertRejected(
+    result,
+    /portable Node AST allowlist|child process allowlist|indirect/i,
+  );
 });
 
 test("portable Node import allowlist rejects network modules", () => {
@@ -283,7 +317,10 @@ test("portable Node import allowlist rejects network modules", () => {
     "scripts/package-portable.mjs",
     (source) => `import "node:https";\n${source}`,
   );
-  assertRejected(result, /portable Node import allowlist|network/i);
+  assertRejected(
+    result,
+    /portable Node AST allowlist|import allowlist|network/i,
+  );
 });
 
 test("portable Node import allowlist rejects computed network APIs", () => {
@@ -327,6 +364,48 @@ test("portable Node syntax rejects local capability aliases", () => {
   assertRejected(result, /portable Node.*syntax|child process|alias/i);
 });
 
+test("portable AST rejects computed getBuiltinModule destructuring bypass", () => {
+  const result = runPortableMutation(
+    "scripts/package-portable.mjs",
+    (source) =>
+      `${source}\nconst { spawnSync: execute } = process["getBuiltinModule"]("node:child_process");\nexecute("cmd.exe");\n`,
+  );
+  assertRejected(result, /portable Node.*(?:AST|syntax|alias|callee)/i);
+});
+
+test("portable AST rejects parenthesized capability aliases", () => {
+  const result = runPortableMutation(
+    "scripts/package-portable.mjs",
+    (source) => `${source}\nconst execute = (spawnSync);\nexecute("cmd.exe");\n`,
+  );
+  assertRejected(result, /portable Node.*(?:AST|syntax|alias|callee)/i);
+});
+
+test("portable AST rejects assignment capability aliases", () => {
+  const result = runPortableMutation(
+    "scripts/package-portable.mjs",
+    (source) => `${source}\nlet execute;\nexecute = spawnSync;\nexecute("cmd.exe");\n`,
+  );
+  assertRejected(result, /portable Node.*(?:AST|syntax|alias|callee)/i);
+});
+
+test("portable AST rejects computed getBuiltinModule calls", () => {
+  const result = runPortableMutation(
+    "scripts/package-portable.mjs",
+    (source) =>
+      `${source}\nprocess["getBuiltinModule"]("node:child_process");\n`,
+  );
+  assertRejected(result, /portable Node.*(?:AST|syntax|builtin|callee)/i);
+});
+
+test("portable AST rejects unknown direct callees", () => {
+  const result = runPortableMutation(
+    "scripts/package-portable.mjs",
+    (source) => `${source}\nmysteryPortableOperation();\n`,
+  );
+  assertRejected(result, /portable Node.*(?:AST|syntax|unknown|callee)/i);
+});
+
 test("portable PowerShell operation allowlist rejects ScriptBlock creation", () => {
   const result = runPortableMutation(
     "scripts/compress-portable.ps1",
@@ -344,7 +423,10 @@ test("portable compressor destination must remain the temporary archive", () => 
       '"-Destination",\n        repoRoot,',
     ),
   );
-  assertRejected(result, /portable Node child process allowlist|destination/i);
+  assertRejected(
+    result,
+    /portable Node AST allowlist|child process allowlist|destination/i,
+  );
 });
 
 test("portable semantic checks tolerate harmless comments with reviewed seals", () => {
@@ -378,6 +460,27 @@ test("portable semantic checks tolerate harmless comments with reviewed seals", 
     { fixtureValidator: true },
   );
   assertAccepted(result);
+});
+
+test("repository validator parser is an exact root dependency", () => {
+  const packageManifest = JSON.parse(
+    readFileSync(join(root, "package.json"), "utf8"),
+  );
+  const lock = JSON.parse(readFileSync(join(root, "package-lock.json"), "utf8"));
+  assert.equal(packageManifest.devDependencies?.typescript, "5.8.3");
+  assert.equal(lock.packages?.[""]?.devDependencies?.typescript, "5.8.3");
+  assert.equal(lock.packages?.["node_modules/typescript"]?.version, "5.8.3");
+});
+
+test("repository validator rejects parser dependency version ranges", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, "package.json"), (source) => {
+      const manifest = JSON.parse(source);
+      manifest.devDependencies.typescript = "~5.8.3";
+      return `${JSON.stringify(manifest, null, 2)}\n`;
+    });
+  });
+  assertRejected(result, /TypeScript parser.*exactly 5\.8\.3/i);
 });
 
 test("comment-only action cannot satisfy a required workflow action", () => {
