@@ -1012,3 +1012,78 @@ git commit -m "docs: explain trusted CLI detection states"
 
 If `docs/troubleshooting.md` already contains the exact verified guidance,
 skip the commit and record the clean status in the execution notes.
+
+---
+
+### Task 6: Keep the Reviewed npm Entry Node-Compatible on Windows
+
+**Files:**
+
+- Modify: `crates/ability-adapters/src/command_locator.rs`
+- Modify: `crates/ability-adapters/tests/process_contract.rs`
+
+**Interfaces:**
+
+- Consumes: the canonical package-identity and containment checks from Task 2.
+- Produces: a reviewed npm launch whose Node main-script argument remains the
+  validated ordinary absolute path instead of Windows' `\\?\` verbatim
+  canonical form.
+
+- [ ] **Step 1: Write the failing Windows launch-path regression**
+
+Update the reviewed npm locator assertion so it requires the fixed lexical
+entry path built from the absolute PATH directory and the reviewed relative
+entry. On Windows, also assert that the Node prefix argument does not start
+with `\\?\`.
+
+Update the child-scoped process-contract expectation to the same ordinary
+absolute entry path. Run:
+
+```powershell
+cargo test -p ability-adapters command_locator -- --nocapture
+cargo test -p ability-adapters --test process_contract -- --nocapture
+```
+
+Expected before the implementation: the locator regression fails because
+`canonical_reviewed_file` returns the `std::fs::canonicalize` result as the
+Node argument.
+
+- [ ] **Step 2: Separate trust validation from the launch spelling**
+
+Keep canonicalization for both the reviewed package root and candidate, and
+keep the exact canonical containment/relative-path check. After the entry
+passes that check, return the original absolute
+`package_root.join(entry_relative)` spelling for Node to execute:
+
+```rust
+let entry = package_root.join(entry_relative);
+canonical_reviewed_file(&package_root, &entry, entry_relative)?;
+Some(entry)
+```
+
+Do not weaken package name, single exact `bin` mapping, shim evidence, or
+canonical containment. Do not add a shell/npm-shim launch path.
+
+- [ ] **Step 3: Run focused and strict regression gates**
+
+Run:
+
+```powershell
+cargo test -p ability-adapters command_locator -- --nocapture
+cargo test -p ability-adapters --test process_contract -- --nocapture
+cargo test -p ability-adapters --all-targets -- --nocapture
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+```
+
+Expected: all commands pass and no test invokes a real provider or model.
+
+- [ ] **Step 4: Commit the Windows path correction**
+
+```powershell
+git add crates/ability-adapters/src/command_locator.rs crates/ability-adapters/tests/process_contract.rs
+git commit -m "fix: pass Node-compatible reviewed entry paths"
+```
+
+After independent review, repeat every Task 5 automated and real-machine gate
+before adding troubleshooting guidance.
