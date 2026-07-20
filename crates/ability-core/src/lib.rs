@@ -1,4 +1,5 @@
 mod artifact_store;
+mod display_text;
 mod domain;
 mod grading;
 mod orchestration;
@@ -7,6 +8,7 @@ mod report;
 mod storage;
 
 pub use artifact_store::*;
+pub use display_text::*;
 pub use domain::*;
 pub use grading::*;
 pub use orchestration::*;

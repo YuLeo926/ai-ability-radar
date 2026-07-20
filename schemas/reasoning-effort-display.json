@@ -1,0 +1,42 @@
+{
+  "chat_gpt_client": {
+    "none": "无",
+    "minimal": "最小",
+    "low": "轻度",
+    "medium": "中",
+    "high": "高",
+    "xhigh": "极高",
+    "max": "最高",
+    "ultra": "Ultra"
+  },
+  "claude_client": {
+    "none": "无",
+    "minimal": "最小",
+    "low": "低",
+    "medium": "中",
+    "high": "高",
+    "xhigh": "极高",
+    "max": "最高",
+    "ultra": "Ultra"
+  },
+  "codex_cli": {
+    "none": "无",
+    "minimal": "最小",
+    "low": "低",
+    "medium": "中",
+    "high": "高",
+    "xhigh": "极高",
+    "max": "最高",
+    "ultra": "Ultra"
+  },
+  "claude_code": {
+    "none": "无",
+    "minimal": "最小",
+    "low": "低",
+    "medium": "中",
+    "high": "高",
+    "xhigh": "极高",
+    "max": "最高",
+    "ultra": "Ultra"
+  }
+}

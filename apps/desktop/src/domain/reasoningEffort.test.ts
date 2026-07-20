@@ -28,26 +28,55 @@ describe("provider effort matrices", () => {
   });
 });
 
-test("every canonical label is localized under every provider family", () => {
+test("every target has an explicit canonical 8-value display policy", () => {
   const expectedLabels = {
-    none: "无",
-    minimal: "最小",
-    low: "低",
-    medium: "中",
-    high: "高",
-    xhigh: "极高",
-    max: "最高",
-    ultra: "Ultra",
+    chat_gpt_client: {
+      none: "无",
+      minimal: "最小",
+      low: "轻度",
+      medium: "中",
+      high: "高",
+      xhigh: "极高",
+      max: "最高",
+      ultra: "Ultra",
+    },
+    claude_client: {
+      none: "无",
+      minimal: "最小",
+      low: "低",
+      medium: "中",
+      high: "高",
+      xhigh: "极高",
+      max: "最高",
+      ultra: "Ultra",
+    },
+    codex_cli: {
+      none: "无",
+      minimal: "最小",
+      low: "低",
+      medium: "中",
+      high: "高",
+      xhigh: "极高",
+      max: "最高",
+      ultra: "Ultra",
+    },
+    claude_code: {
+      none: "无",
+      minimal: "最小",
+      low: "低",
+      medium: "中",
+      high: "高",
+      xhigh: "极高",
+      max: "最高",
+      ultra: "Ultra",
+    },
   } as const;
-  const kinds = [
-    "chat_gpt_client",
-    "claude_client",
-    "codex_cli",
-    "claude_code",
-  ] as const;
 
-  for (const kind of kinds) {
-    for (const [value, label] of Object.entries(expectedLabels)) {
+  for (const kind of Object.keys(expectedLabels) as Array<
+    keyof typeof expectedLabels
+  >) {
+    const labels = expectedLabels[kind];
+    for (const [value, label] of Object.entries(labels)) {
       expect(formatReasoningEffort(kind, value), `${kind}/${value}`).toBe(label);
     }
     expect(formatReasoningEffort(kind, "扩展思考")).toBe("扩展思考");

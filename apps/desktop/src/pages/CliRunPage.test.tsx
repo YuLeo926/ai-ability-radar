@@ -22,6 +22,7 @@ import type {
   RunRecord,
   TargetKind,
 } from "../api/backend";
+import { CLI_EFFORT_DISPLAY_CASES } from "../test/reasoningEffortCases";
 import { CliRunPage } from "./CliRunPage";
 
 const RUN_ID = "2cf59f48-f775-47ad-b595-8be91f593474";
@@ -187,6 +188,24 @@ test("resume route keeps preflight and cost acknowledgement before continuing th
   expect(startCliRun).not.toHaveBeenCalled();
   expect(await screen.findByText(/2 \/ 4/)).toBeInTheDocument();
 });
+
+test.each(CLI_EFFORT_DISPLAY_CASES)(
+  "CLI resume displays %s/%s as %s",
+  async (kind, effort, expectedLabel) => {
+    const preview = makeRun(kind, { status: "interrupted" });
+    preview.target.reasoningEffort = effort;
+    const backend = fakeBackend({
+      getBootstrap: vi.fn(async () => makeBootstrap(kind)),
+      getRunDetail: vi.fn(async () => detail(preview)),
+    });
+
+    renderWizard(backend, `/cli/${kind}?resume=${RUN_ID}`);
+
+    await screen.findByRole("heading", { name: "确认恢复原体检" });
+    const effortTerm = screen.getByText("原推理档位");
+    expect(effortTerm.parentElement).toHaveTextContent(expectedLabel);
+  },
+);
 
 test("same-family CLI route mismatch is rejected before any resume call", async () => {
   const stored = makeRun("claude_code", { status: "interrupted" });

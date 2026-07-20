@@ -22,6 +22,7 @@ import type {
   TargetKind,
   TaskResult,
 } from "../api/backend";
+import { MANUAL_EFFORT_DISPLAY_CASES } from "../test/reasoningEffortCases";
 import { ManualRunPage } from "./ManualRunPage";
 import { ResultPage } from "./ResultPage";
 
@@ -172,6 +173,24 @@ test("resume preview shows the persisted target snapshot before continuing it ex
     screen.queryByLabelText("当前显示的模型"),
   ).not.toBeInTheDocument();
 });
+
+test.each(MANUAL_EFFORT_DISPLAY_CASES)(
+  "manual resume displays %s/%s as %s",
+  async (kind, effort, expectedLabel) => {
+    const preview = makeRun(kind);
+    preview.status = "interrupted";
+    preview.target.reasoningEffort = effort;
+    const backend = fakeBackend({
+      getRunDetail: vi.fn(async () => ({ run: preview, taskResults: [] })),
+    });
+
+    renderWizard(backend, `/manual/${kind}?resume=${RUN_ID}`);
+
+    await screen.findByRole("heading", { name: "确认恢复原体检" });
+    const effortTerm = screen.getByText("原推理档位");
+    expect(effortTerm.parentElement).toHaveTextContent(expectedLabel);
+  },
+);
 
 test("a resumed run returned after unmount is interrupted exactly without reading a step", async () => {
   const user = userEvent.setup();
@@ -542,6 +561,37 @@ test("validates the model locally and preserves setup after a start failure", as
   expect(modelInput).toHaveValue(" GPT-5 ");
   expect(screen.getByLabelText("我会为每道题新建空白对话")).toBeChecked();
   expect(screen.getByRole("button", { name: "开始快速体检" })).toBeEnabled();
+});
+
+test.each([
+  ["zero-width space", "\u200B"],
+  ["right-to-left override", "\u202E"],
+  ["word joiner", "\u2060"],
+  ["invisible-only text", "\u200B\u2060"],
+  ["mixed visible and invisible text", "GPT\u200B-5"],
+] as const)("rejects %s in a reported model before start", (_, value) => {
+  const backend = fakeBackend();
+  renderWizard(backend);
+
+  const modelInput = screen.getByLabelText("当前显示的模型");
+  fireEvent.change(modelInput, { target: { value } });
+
+  expect(modelInput).toHaveAttribute("aria-invalid", "true");
+  expect(screen.getByRole("button", { name: "开始快速体检" })).toBeDisabled();
+  expect(backend.startManualRun).not.toHaveBeenCalled();
+});
+
+test.each([
+  ["valid Unicode", "模型-α"],
+  ["exactly 120 visible characters", "模".repeat(120)],
+] as const)("accepts a %s reported model", (_, value) => {
+  const backend = fakeBackend();
+  renderWizard(backend);
+
+  const modelInput = screen.getByLabelText("当前显示的模型");
+  fireEvent.change(modelInput, { target: { value } });
+
+  expect(modelInput).not.toHaveAttribute("aria-invalid", "true");
 });
 
 test("retains a created run and retries its first step without starting again", async () => {

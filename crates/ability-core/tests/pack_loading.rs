@@ -77,6 +77,96 @@ fn loads_a_minimal_pack_and_computes_a_hash() {
     assert_eq!(pack.content_sha256.len(), 64);
 }
 
+fn raw_runtime_manifest(schema: &str, time_budget: &str, max_turns: &str, grader: &str) -> String {
+    format!(
+        r#"{{"schema_version":{schema},"id":"security-pack","version":"1.0.0","title":"Security Pack","target_kinds":["chat_gpt_client"],"tasks":[{{"id":"security-1","category":"logic","prompt_file":"prompt.txt","starter_dir":null,"time_budget_secs":{time_budget},"max_turns":{max_turns},"grader":{grader}}}]}}"#
+    )
+}
+
+#[test]
+fn runtime_parser_rejects_nonportable_json_and_numeric_forms() {
+    let cases = [
+        (
+            "UTF-8 BOM",
+            format!(
+                "\u{feff}{}",
+                raw_runtime_manifest("1", "30", "1", r#"{"type":"exact_text","expected":"4"}"#)
+            ),
+        ),
+        (
+            "duplicate object keys",
+            raw_runtime_manifest(
+                r#"2,"schema_version":1"#,
+                "30",
+                "1",
+                r#"{"type":"exact_text","expected":"4"}"#,
+            ),
+        ),
+        (
+            "fractional integer lexeme",
+            raw_runtime_manifest("1", "30", "1.0", r#"{"type":"exact_text","expected":"4"}"#),
+        ),
+        (
+            "exponent integer lexeme",
+            raw_runtime_manifest("1", "3e1", "1", r#"{"type":"exact_text","expected":"4"}"#),
+        ),
+        (
+            "u64 overflow",
+            raw_runtime_manifest(
+                "1",
+                "18446744073709551616",
+                "1",
+                r#"{"type":"exact_text","expected":"4"}"#,
+            ),
+        ),
+        (
+            "non-finite exact JSON number",
+            raw_runtime_manifest("1", "30", "1", r#"{"type":"exact_json","expected":1e400}"#),
+        ),
+        (
+            "time budget below range",
+            raw_runtime_manifest("1", "0", "1", r#"{"type":"exact_text","expected":"4"}"#),
+        ),
+        (
+            "time budget above range",
+            raw_runtime_manifest("1", "7201", "1", r#"{"type":"exact_text","expected":"4"}"#),
+        ),
+        (
+            "turn count below range",
+            raw_runtime_manifest("1", "30", "0", r#"{"type":"exact_text","expected":"4"}"#),
+        ),
+        (
+            "turn count above range",
+            raw_runtime_manifest("1", "30", "101", r#"{"type":"exact_text","expected":"4"}"#),
+        ),
+    ];
+
+    for (name, manifest) in cases {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("prompt.txt"), "Only answer 4.").unwrap();
+        fs::write(dir.path().join("manifest.json"), manifest).unwrap();
+        assert!(PackLoader::load(dir.path()).is_err(), "accepted {name}");
+    }
+}
+
+#[test]
+fn runtime_parser_accepts_inclusive_task_range_endpoints() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("prompt.txt"), "Only answer 4.").unwrap();
+    fs::write(
+        dir.path().join("manifest.json"),
+        raw_runtime_manifest(
+            "1",
+            "7200",
+            "100",
+            r#"{"type":"exact_text","expected":"4"}"#,
+        ),
+    )
+    .unwrap();
+
+    assert!(PackLoader::load(dir.path()).is_ok());
+}
+
 #[test]
 fn hash_covers_starter_and_verifier_files_not_only_prompts() {
     let dir = tempdir().unwrap();

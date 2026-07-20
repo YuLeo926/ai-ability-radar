@@ -5259,7 +5259,7 @@ fn normalize_target(mut target: TargetSelection) -> Result<TargetSelection, Stri
     target.reported_model = target.reported_model.trim().to_owned();
     if target.reported_model.is_empty()
         || target.reported_model.chars().count() > 120
-        || target.reported_model.chars().any(char::is_control)
+        || contains_forbidden_display_character(&target.reported_model)
     {
         return Err("模型名称必须是 1–120 个可见字符".into());
     }
@@ -5466,6 +5466,13 @@ pub fn get_run_detail(
     Ok(Some(RunDetailDto { run, task_results }))
 }
 ```
+
+For v0.2.1, `contains_forbidden_display_character` is the shared core
+predicate used by backend start/resume and public-report validation. It rejects
+Unicode `Cc`, `Cf`, `Default_Ignorable_Code_Point`, and bidi formatting
+characters. Frontend manual-start validation mirrors this policy; invalid
+legacy stored labels are displayed through a stable localized placeholder
+without rewriting the stored record.
 
 - [ ] **Step 6: Register state and commands**
 

@@ -17,6 +17,7 @@ import type {
   RunRecord,
   TaskResult,
 } from "../api/backend";
+import { CANONICAL_EFFORT_DISPLAY_CASES } from "../test/reasoningEffortCases";
 import { ResultPage } from "./ResultPage";
 
 const runId = "a8ecbc64-9160-448d-9426-e21c6839d219";
@@ -340,6 +341,42 @@ describe("ResultPage objective semantics", () => {
     ).toBeInTheDocument();
     expect(screen.getByRole("main")).toHaveAttribute("aria-busy", "true");
   });
+
+  test("renders a stable safe placeholder for an invalid legacy model name", async () => {
+    const unsafeModel = "GPT\u200B-X";
+    renderResult(
+      makeBackend(async () =>
+        makeDetail({
+          target: { ...makeRun().target, reportedModel: unsafeModel },
+        }),
+      ),
+    );
+
+    await screen.findByRole("heading", { name: "本次客观结果" });
+    expect(document.body.textContent).toContain("模型名称不可显示");
+    expect(document.body.textContent).not.toContain(unsafeModel);
+  });
+
+  test.each(CANONICAL_EFFORT_DISPLAY_CASES)(
+    "result displays %s/%s as %s",
+    async (kind, effort, expectedLabel) => {
+      renderResult(
+        makeBackend(async () =>
+          makeDetail({
+            target: {
+              ...makeRun().target,
+              kind,
+              reasoningEffort: effort,
+            },
+          }),
+        ),
+      );
+
+      await screen.findByRole("heading", { name: "本次客观结果" });
+      const effortTerm = screen.getByText("推理档位");
+      expect(effortTerm.parentElement).toHaveTextContent(expectedLabel);
+    },
+  );
 
   test("explains a partially invalid completed score with exact denominators", async () => {
     renderResult(makeBackend(async () => makeDetail()));

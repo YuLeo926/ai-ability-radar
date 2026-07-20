@@ -10,6 +10,7 @@ import type {
   TargetKind,
 } from "../api/backend";
 import { formatReasoningEffort } from "../domain/reasoningEffort";
+import { formatReportedModel } from "../domain/reportedModel";
 import "./ResultsHistory.css";
 
 const targetLabels: Record<TargetKind, string> = {
@@ -147,9 +148,7 @@ function statusLabel(run: RunRecord): string {
 }
 
 function modelLabel(run: RunRecord): string {
-  return run.target.reportedModel === "default"
-    ? "默认路由（未固定）"
-    : run.target.reportedModel;
+  return formatReportedModel(run.target.reportedModel);
 }
 
 function deterministicDate(value: string): {

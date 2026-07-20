@@ -1,60 +1,55 @@
 import type { TargetKind } from "../api/backend";
+import displayPolicyJson from "../../../../schemas/reasoning-effort-display.json";
 
 export interface EffortOption {
   value: string;
   label: string;
 }
 
-const common = [
-  { value: "low", label: "低" },
-  { value: "medium", label: "中" },
-  { value: "high", label: "高" },
-  { value: "xhigh", label: "极高" },
-  { value: "max", label: "最高" },
+const CANONICAL_EFFORTS = [
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
 ] as const;
+type CanonicalEffort = (typeof CANONICAL_EFFORTS)[number];
 
-const matrices: Record<TargetKind, readonly EffortOption[]> = {
-  chat_gpt_client: [
-    { value: "low", label: "轻度" },
-    ...common.slice(1),
-    { value: "ultra", label: "Ultra" },
-  ],
-  claude_client: common,
-  codex_cli: [
-    { value: "minimal", label: "最小" },
-    ...common,
-    { value: "ultra", label: "Ultra" },
-  ],
-  claude_code: common,
+const displayPolicy = displayPolicyJson satisfies Record<
+  TargetKind,
+  Record<CanonicalEffort, string>
+>;
+const offeredEfforts: Record<TargetKind, readonly CanonicalEffort[]> = {
+  chat_gpt_client: ["low", "medium", "high", "xhigh", "max", "ultra"],
+  claude_client: ["low", "medium", "high", "xhigh", "max"],
+  codex_cli: ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+  claude_code: ["low", "medium", "high", "xhigh", "max"],
 };
-
-const CANONICAL_LABELS = {
-  none: "无",
-  minimal: "最小",
-  low: "低",
-  medium: "中",
-  high: "高",
-  xhigh: "极高",
-  max: "最高",
-  ultra: "Ultra",
-} as const;
 
 const FORBIDDEN_CUSTOM_CHARACTER =
   /[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}]/u;
 const SAFE_CLI_EFFORT = /^[A-Za-z0-9_-]{1,32}$/;
-const KNOWN_EFFORTS = new Set(Object.keys(CANONICAL_LABELS));
+const KNOWN_EFFORTS = new Set<string>(CANONICAL_EFFORTS);
 
 export function effortOptionsFor(kind: TargetKind): readonly EffortOption[] {
-  return matrices[kind];
+  return offeredEfforts[kind].map((value) => ({
+    value,
+    label: displayPolicy[kind][value],
+  }));
 }
 
 export function formatReasoningEffort(
-  _kind: TargetKind,
+  kind: TargetKind,
   value?: string | null,
   emptyLabel = "未记录",
 ): string {
   if (!value) return emptyLabel;
-  return CANONICAL_LABELS[value as keyof typeof CANONICAL_LABELS] ?? value;
+  return KNOWN_EFFORTS.has(value)
+    ? displayPolicy[kind][value as CanonicalEffort]
+    : value;
 }
 
 export function reasoningEffortError(

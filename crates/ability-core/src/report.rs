@@ -1,6 +1,6 @@
 use crate::{
     Category, FailureKind, RunRecord, RunStatus, ScoreSummary, TargetKind, TaskOutcome, TaskResult,
-    grading::has_coherent_task_evidence, summarize_scores,
+    grading::has_coherent_task_evidence, is_valid_reported_model, summarize_scores,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use regex::Regex;
@@ -109,7 +109,7 @@ pub fn build_public_report(
         generated_at: Utc::now(),
         target: PublicTarget {
             kind: run.target.kind,
-            reported_model: required_text(&run.target.reported_model, "reportedModel", 120)?,
+            reported_model: required_reported_model(&run.target.reported_model)?,
             reasoning_effort: optional_text(
                 run.target.reasoning_effort.as_deref(),
                 "reasoningEffort",
@@ -169,7 +169,7 @@ pub fn validate_public_report(report: &PublicReport) -> Result<(), ReportError> 
         return Err(ReportError::InvalidData("reportId"));
     }
 
-    validate_text(&report.target.reported_model, "reportedModel", 120, true)?;
+    validate_reported_model(&report.target.reported_model)?;
     validate_optional_text(
         report.target.reasoning_effort.as_deref(),
         "reasoningEffort",
@@ -262,20 +262,66 @@ pub fn validate_public_report(report: &PublicReport) -> Result<(), ReportError> 
     Ok(())
 }
 
-fn reasoning_effort_display(kind: TargetKind, value: Option<&str>) -> &str {
-    match (kind, value) {
-        (_, None | Some("")) => "\u{672a}\u{8bb0}\u{5f55}",
-        (TargetKind::ChatGptClient, Some("low")) => "\u{8f7b}\u{5ea6}",
-        (_, Some("none")) => "\u{65e0}",
-        (_, Some("minimal")) => "\u{6700}\u{5c0f}",
-        (_, Some("low")) => "\u{4f4e}",
-        (_, Some("medium")) => "\u{4e2d}",
-        (_, Some("high")) => "\u{9ad8}",
-        (_, Some("xhigh")) => "\u{6781}\u{9ad8}",
-        (_, Some("max")) => "\u{6700}\u{9ad8}",
-        (_, Some("ultra")) => "Ultra",
-        (_, Some(value)) => value,
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReasoningEffortDisplayPolicy {
+    chat_gpt_client: CanonicalEffortLabels,
+    claude_client: CanonicalEffortLabels,
+    codex_cli: CanonicalEffortLabels,
+    claude_code: CanonicalEffortLabels,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CanonicalEffortLabels {
+    none: String,
+    minimal: String,
+    low: String,
+    medium: String,
+    high: String,
+    xhigh: String,
+    max: String,
+    ultra: String,
+}
+
+impl CanonicalEffortLabels {
+    fn get(&self, value: &str) -> Option<&str> {
+        match value {
+            "none" => Some(&self.none),
+            "minimal" => Some(&self.minimal),
+            "low" => Some(&self.low),
+            "medium" => Some(&self.medium),
+            "high" => Some(&self.high),
+            "xhigh" => Some(&self.xhigh),
+            "max" => Some(&self.max),
+            "ultra" => Some(&self.ultra),
+            _ => None,
+        }
     }
+}
+
+fn reasoning_effort_display_policy() -> &'static ReasoningEffortDisplayPolicy {
+    static POLICY: OnceLock<ReasoningEffortDisplayPolicy> = OnceLock::new();
+    POLICY.get_or_init(|| {
+        serde_json::from_str(include_str!(
+            "../../../schemas/reasoning-effort-display.json"
+        ))
+        .expect("embedded reasoning effort display policy must be valid")
+    })
+}
+
+fn reasoning_effort_display(kind: TargetKind, value: Option<&str>) -> &str {
+    let Some(value) = value.filter(|value| !value.is_empty()) else {
+        return "\u{672a}\u{8bb0}\u{5f55}";
+    };
+    let policy = reasoning_effort_display_policy();
+    let labels = match kind {
+        TargetKind::ChatGptClient => &policy.chat_gpt_client,
+        TargetKind::ClaudeClient => &policy.claude_client,
+        TargetKind::CodexCli => &policy.codex_cli,
+        TargetKind::ClaudeCode => &policy.claude_code,
+    };
+    labels.get(value).unwrap_or(value)
 }
 
 pub fn render_public_report_html(report: &PublicReport) -> Result<String, ReportError> {
@@ -581,6 +627,19 @@ fn validate_optional_text(
         validate_text(value, field, max_chars, true)?;
     }
     Ok(())
+}
+
+fn validate_reported_model(value: &str) -> Result<(), ReportError> {
+    if !is_valid_reported_model(value) {
+        return Err(ReportError::InvalidData("reportedModel"));
+    }
+    scan_text("reportedModel", value)
+}
+
+fn required_reported_model(value: &str) -> Result<String, ReportError> {
+    let trimmed = value.trim();
+    validate_reported_model(trimmed)?;
+    Ok(trimmed.to_owned())
 }
 
 fn required_text(

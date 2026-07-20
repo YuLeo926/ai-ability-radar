@@ -12,6 +12,10 @@ import {
   formatReasoningEffort,
   normalizeReasoningEffortForTarget,
 } from "../domain/reasoningEffort";
+import {
+  formatReportedModel,
+  reportedModelError,
+} from "../domain/reportedModel";
 import { useT } from "../i18n/I18nContext";
 import type {
   ManualStep,
@@ -22,7 +26,6 @@ import type {
 import "./ManualRunPage.css";
 
 const ANSWER_LIMIT_BYTES = 256 * 1024;
-const CONTROL_CHARACTER = /\p{Cc}/u;
 
 type ClientTargetKind = Extract<
   TargetKind,
@@ -78,17 +81,6 @@ function sameTarget(left: TargetSelection, right: TargetSelection): boolean {
   );
 }
 
-function validateModel(value: string): string | null {
-  if (CONTROL_CHARACTER.test(value)) {
-    return "模型名称不能包含控制字符";
-  }
-  const trimmed = value.trim();
-  if (!trimmed || Array.from(trimmed).length > 120) {
-    return "模型名称必须是 1–120 个可见字符";
-  }
-  return null;
-}
-
 function answerBytes(value: string): number {
   return new TextEncoder().encode(value).byteLength;
 }
@@ -122,7 +114,7 @@ function SetupPage({
   onReasoningValidationChange(error: string | null): void;
   onStart(): void;
 }) {
-  const modelError = validateModel(model);
+  const modelError = reportedModelError(model);
   const showModelError = modelTouched && modelError;
   const label = clientLabels[kind];
 
@@ -341,7 +333,7 @@ function ResumeReviewPage({
         </div>
         <div>
           <dt>原模型</dt>
-          <dd>{run.target.reportedModel}</dd>
+          <dd>{formatReportedModel(run.target.reportedModel)}</dd>
         </div>
         <div>
           <dt>原推理档位</dt>
@@ -825,7 +817,7 @@ function ManualWizard({
   }
 
   async function start() {
-    const modelError = validateModel(model);
+    const modelError = reportedModelError(model);
     setModelTouched(true);
     if (modelError || reasoningError || !freshChat || state.kind !== "setup") {
       return;

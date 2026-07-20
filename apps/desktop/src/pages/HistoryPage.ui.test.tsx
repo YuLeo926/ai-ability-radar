@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { describe, expect, test, vi } from "vitest";
 import { BackendProvider } from "../api/BackendContext";
 import type { Backend, RunRecord } from "../api/backend";
+import { CANONICAL_EFFORT_DISPLAY_CASES } from "../test/reasoningEffortCases";
 import { HistoryPage } from "./HistoryPage";
 
 function makeRun(overrides: Partial<RunRecord> = {}): RunRecord {
@@ -208,6 +209,42 @@ function deferred<T>() {
   });
   return { promise, resolve, reject };
 }
+
+test("renders a stable safe placeholder for an invalid legacy model name", async () => {
+  const unsafeModel = "GPT\u200B-X";
+  renderHistory(
+    makeBackend(async () => [
+      makeRun({
+        target: { ...makeRun().target, reportedModel: unsafeModel },
+      }),
+    ]),
+  );
+
+  await screen.findByRole("link", { name: /查看本次结果/ });
+  expect(document.body.textContent).toContain("模型名称不可显示");
+  expect(document.body.textContent).not.toContain(unsafeModel);
+});
+
+test.each(CANONICAL_EFFORT_DISPLAY_CASES)(
+  "history displays %s/%s as %s",
+  async (kind, effort, expectedLabel) => {
+    renderHistory(
+      makeBackend(async () => [
+        makeRun({
+          target: {
+            ...makeRun().target,
+            kind,
+            reasoningEffort: effort,
+          },
+        }),
+      ]),
+    );
+
+    await screen.findByRole("link", { name: /查看本次结果/ });
+    const effortTerm = screen.getByText("推理档位");
+    expect(effortTerm.parentElement).toHaveTextContent(expectedLabel);
+  },
+);
 
 describe("HistoryPage states", () => {
   test("shows an explicit loading state", () => {

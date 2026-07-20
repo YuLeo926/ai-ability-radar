@@ -18,6 +18,7 @@ import {
   formatReasoningEffort,
   normalizeReasoningEffortForTarget,
 } from "../domain/reasoningEffort";
+import { formatReportedModel } from "../domain/reportedModel";
 import type {
   Bootstrap,
   RunEvent,
@@ -789,7 +790,9 @@ function CliWizard({
                 </div>
                 <div>
                   <dt>原模型</dt>
-                  <dd>{resumePreview.run.target.reportedModel}</dd>
+                  <dd>
+                    {formatReportedModel(resumePreview.run.target.reportedModel)}
+                  </dd>
                 </div>
                 <div>
                   <dt>原推理档位</dt>

@@ -13,12 +13,21 @@
 The user selected Decision A on 2026-07-20. This section supersedes every
 conflicting earlier step, example, test name, and code snippet below:
 
-- Portable packaging semantically validates the source, staged, pre-compression,
-  and extracted benchmark trees against the committed registry, complete
-  manifests, referenced files, and content hashes.
+- Portable packaging invokes the first-party `ability-pack-validator`, which
+  reuses runtime `PackRegistry::parse` and `PackLoader::load`, at the source,
+  staged, pre-compression, and extracted checkpoints. Existing Node schema,
+  reference, and content-seal validation remains in place.
+- Before extraction, the packager parses the raw ZIP central directory,
+  rejects unsupported encodings/structures and unsafe Windows aliases, and
+  requires the exact staged file-member set. The helper executable is a build
+  tool and is never copied into the portable payload.
 - Manual custom effort text rejects Unicode `Cc`, `Cf`,
   `Default_Ignorable_Code_Point`, and bidi format controls; trimmed input must
   contain 1–40 visible characters. CLI safe-token normalization is unchanged.
+- Reported-model labels use the same Unicode rejection policy and a trimmed
+  1–120-character limit in frontend start, backend start/resume, and public
+  report validation. Invalid legacy labels render as a localized safe
+  placeholder without changing stored history.
 - Each packaging invocation exclusively creates a UUID staging directory,
   records its identity, and cleans only that identity. A fixed or pre-existing
   `.stage` is never reused or deleted.
@@ -32,8 +41,10 @@ conflicting earlier step, example, test name, and code snippet below:
   directories. If installation adds a PATH directory, the user must restart
   the app and then re-detect.
 - One retained backend-private provider command is reused from readiness
-  through every automatic task. Known canonical effort labels use one global
-  display map, and custom-field errors are associated with the custom input.
+  through every automatic task. Known canonical effort labels use one shared
+  4-target × 8-value display policy with explicit target overrides (including
+  ChatGPT `low` → `轻度`) in setup, resume, history, result, and HTML; custom-
+  field errors are associated with the custom input.
 
 ## Global Constraints
 

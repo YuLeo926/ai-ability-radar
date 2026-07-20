@@ -33,6 +33,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 2.0.18",
+ "unicode-general-category",
  "uuid",
  "windows-sys 0.61.2",
 ]
@@ -57,7 +58,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
- "unicode-general-category",
  "uuid",
  "windows-sys 0.61.2",
 ]

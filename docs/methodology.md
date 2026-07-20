@@ -36,6 +36,10 @@ CLI 模型字段为空白（输入留空）表示使用该 CLI 的默认路由�
 不能跨键拼接趋势。
 
 客户端的“报告模型”由用户填写并去除首尾空白；它是标签，不是应用对服务端模型身份的验证。
+该标签去除首尾空白后须为 1–120 个字符，并拒绝 Unicode `Cc`、`Cf`、
+`Default_Ignorable_Code_Point` 与双向格式控制字符。前端启动、后端
+启动/恢复和公开 JSON/HTML 报告使用同一规则。旧历史若含无效标签，界面
+只显示稳定的“模型名称不可显示”占位符，不修改原始存储记录。
 
 当前推理档位矩阵如下。实际可用档位仍取决于模型、客户端版本和账户权限；“自定义”只记录经过
 校验的用户输入，不代表应用验证了服务端支持。
@@ -46,6 +50,11 @@ CLI 模型字段为空白（输入留空）表示使用该 CLI 的默认路由�
 | Claude 客户端 | 未显示/不适用、低、中、高、极高、最高，以及“其他/按界面原样填写” |
 | Codex CLI | CLI 默认、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`、`ultra`，以及自定义 |
 | Claude Code | CLI 默认、`low`、`medium`、`high`、`xhigh`、`max`，以及自定义 |
+
+规范值的中文标签由 `schemas/reasoning-effort-display.json` 中一份显式的
+4 个目标 × 8 个值策略提供。策略允许目标覆盖，例如 ChatGPT 的 `low`
+显示为“轻度”，其他目标的 `low` 显示为“低”；同一目标/值在设置、恢复、
+历史、结果和导出 HTML 中必须一致，JSON 与数据库中的规范值保持不变。
 
 ChatGPT/Codex 的 `none` 只能作为自定义值记录；Claude Code 的 `ultracode` 是组合运行模式，
 不是额外的 effort 值。已有 `low`、`medium`、`high` 历史保持兼容。
@@ -80,6 +89,21 @@ ChatGPT/Codex 的 `none` 只能作为自定义值记录；Claude Code 的 `ultra
 - CLI 验证器规则：`dedupe-events-v1`、`retry-schedule-v1`
 
 这些字符串进入持久化环境、报告或题包哈希。改变含义时必须发布新版本，不能静默复用旧字符串。
+
+## 便携包的运行时解析一致性
+
+便携包仍保留 Node 侧的精确 schema、引用关系、文件集合与内容哈希检查，
+并额外构建第一方 `ability-pack-validator`。该 helper 直接复用运行时
+`PackRegistry::parse` 与 `PackLoader::load`，在 source、staged、
+pre-compression 和 extracted 四个检查点解析题包，因此 BOM、重复键、
+整数的浮点/指数写法、溢出与非有限数等输入会按 Rust/Serde 运行时规则
+失败。helper 只参与构建，不复制进应用或便携包 payload。
+
+代价是 `package:portable:from-build` 会多执行一次离线 Rust release helper
+构建，并在打包期间启动四次短生命周期的本地 helper 进程；它不会调用
+模型服务或增加运行应用时的常驻成本。压缩后、解压前还会解析原始 ZIP
+central directory，先验证 Windows 路径安全、规范化碰撞及精确文件成员
+集合，再允许提取和发布。
 
 ## v0.5 计划边界
 

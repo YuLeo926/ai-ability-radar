@@ -1,7 +1,7 @@
 use ability_core::{
     Category, EnvironmentFingerprint, FailureKind, ReportError, RunMode, RunRecord, RunStatus,
     ScoreSummary, TargetKind, TargetSelection, TaskOutcome, TaskResult, build_public_report,
-    render_public_report_html,
+    render_public_report_html, validate_public_report,
 };
 use std::collections::BTreeMap;
 
@@ -98,6 +98,51 @@ fn report_id_is_fresh_and_not_derived_from_the_local_run_id() {
     assert_ne!(first.report_id, run.id);
     assert_ne!(second.report_id, run.id);
     assert_ne!(first.report_id, second.report_id);
+}
+
+#[test]
+fn reported_model_requires_visible_unicode_in_built_and_validated_reports() {
+    for model in [
+        "\u{200b}",
+        "\u{202e}",
+        "\u{2060}",
+        "\u{200b}\u{2060}",
+        "GPT\u{200b}-5",
+    ] {
+        let (run, tasks) = sample_evidence(model);
+        assert!(
+            matches!(
+                build_public_report(&run, &tasks),
+                Err(ReportError::InvalidData("reportedModel"))
+            ),
+            "build accepted {model:?}"
+        );
+
+        let (valid_run, valid_tasks) = sample_evidence("模型-α");
+        let mut report = build_public_report(&valid_run, &valid_tasks).unwrap();
+        report.target.reported_model = model.into();
+        assert!(
+            matches!(
+                validate_public_report(&report),
+                Err(ReportError::InvalidData("reportedModel"))
+            ),
+            "validation accepted {model:?}"
+        );
+    }
+
+    for model in ["模型-α".to_owned(), "模".repeat(120)] {
+        let (run, tasks) = sample_evidence(&model);
+        let report = build_public_report(&run, &tasks).unwrap();
+        assert_eq!(report.target.reported_model, model);
+        validate_public_report(&report).unwrap();
+    }
+
+    let too_long = "模".repeat(121);
+    let (run, tasks) = sample_evidence(&too_long);
+    assert!(matches!(
+        build_public_report(&run, &tasks),
+        Err(ReportError::InvalidData("reportedModel"))
+    ));
 }
 
 #[test]
@@ -365,6 +410,67 @@ fn html_report_translates_known_efforts_but_json_stays_canonical() {
             .unwrap()
             .contains("\u{63a8}\u{7406}\u{6863}\u{4f4d}\u{ff1a}\u{8f7b}\u{5ea6}")
     );
+}
+
+#[test]
+fn html_report_uses_the_complete_target_specific_effort_display_table() {
+    let cases = [
+        (TargetKind::ChatGptClient, "none", "无"),
+        (TargetKind::ChatGptClient, "minimal", "最小"),
+        (TargetKind::ChatGptClient, "low", "轻度"),
+        (TargetKind::ChatGptClient, "medium", "中"),
+        (TargetKind::ChatGptClient, "high", "高"),
+        (TargetKind::ChatGptClient, "xhigh", "极高"),
+        (TargetKind::ChatGptClient, "max", "最高"),
+        (TargetKind::ChatGptClient, "ultra", "Ultra"),
+        (TargetKind::ClaudeClient, "none", "无"),
+        (TargetKind::ClaudeClient, "minimal", "最小"),
+        (TargetKind::ClaudeClient, "low", "低"),
+        (TargetKind::ClaudeClient, "medium", "中"),
+        (TargetKind::ClaudeClient, "high", "高"),
+        (TargetKind::ClaudeClient, "xhigh", "极高"),
+        (TargetKind::ClaudeClient, "max", "最高"),
+        (TargetKind::ClaudeClient, "ultra", "Ultra"),
+        (TargetKind::CodexCli, "none", "无"),
+        (TargetKind::CodexCli, "minimal", "最小"),
+        (TargetKind::CodexCli, "low", "低"),
+        (TargetKind::CodexCli, "medium", "中"),
+        (TargetKind::CodexCli, "high", "高"),
+        (TargetKind::CodexCli, "xhigh", "极高"),
+        (TargetKind::CodexCli, "max", "最高"),
+        (TargetKind::CodexCli, "ultra", "Ultra"),
+        (TargetKind::ClaudeCode, "none", "无"),
+        (TargetKind::ClaudeCode, "minimal", "最小"),
+        (TargetKind::ClaudeCode, "low", "低"),
+        (TargetKind::ClaudeCode, "medium", "中"),
+        (TargetKind::ClaudeCode, "high", "高"),
+        (TargetKind::ClaudeCode, "xhigh", "极高"),
+        (TargetKind::ClaudeCode, "max", "最高"),
+        (TargetKind::ClaudeCode, "ultra", "Ultra"),
+    ];
+
+    for (kind, canonical, expected_label) in cases {
+        let (mut run, tasks) = sample_evidence("GPT-5.6");
+        run.target.kind = kind;
+        run.target.reasoning_effort = Some(canonical.into());
+
+        let report = build_public_report(&run, &tasks).unwrap();
+        assert_eq!(
+            report.target.reasoning_effort.as_deref(),
+            Some(canonical),
+            "{kind:?}/{canonical}"
+        );
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(
+            json.contains(&format!(r#""reasoningEffort":"{canonical}""#)),
+            "{kind:?}/{canonical} JSON was not canonical"
+        );
+        let html = render_public_report_html(&report).unwrap();
+        assert!(
+            html.contains(&format!("<p>推理档位：{expected_label}</p>")),
+            "{kind:?}/{canonical} did not render {expected_label:?}"
+        );
+    }
 }
 
 #[test]

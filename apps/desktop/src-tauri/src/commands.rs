@@ -12,8 +12,9 @@ use ability_adapters::{
     AgentAdapter, AuthState, CliRunService, PrerequisiteStatus, ProcessRunner, TargetAvailability,
 };
 use ability_core::{
-    ArtifactStore, EnvironmentFingerprint, LoadedPack, ManualRunService, ManualStep, RunMode,
-    RunRecord, RunRepository, RunStatus, TargetKind, TargetSelection,
+    contains_forbidden_display_character, is_valid_reported_model, ArtifactStore,
+    EnvironmentFingerprint, LoadedPack, ManualRunService, ManualStep, RunMode, RunRecord,
+    RunRepository, RunStatus, TargetKind, TargetSelection,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -26,7 +27,6 @@ use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use unicode_general_category::{get_general_category, GeneralCategory};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,26 +58,6 @@ const KNOWN_REASONING_EFFORTS: &[&str] = &[
     "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
 ];
 
-fn is_forbidden_reasoning_effort_character(character: char) -> bool {
-    if character.is_control() || get_general_category(character) == GeneralCategory::Format {
-        return true;
-    }
-
-    matches!(
-        u32::from(character),
-        0x034f
-            | 0x115f..=0x1160
-            | 0x17b4..=0x17b5
-            | 0x180b..=0x180f
-            | 0x2065
-            | 0x3164
-            | 0xfe00..=0xfe0f
-            | 0xffa0
-            | 0xfff0..=0xfff8
-            | 0xe0000..=0xe0fff
-    )
-}
-
 fn normalize_reasoning_effort(
     value: Option<String>,
     family: StartFamily,
@@ -85,7 +65,7 @@ fn normalize_reasoning_effort(
     let Some(value) = value else {
         return Ok(None);
     };
-    if value.chars().any(is_forbidden_reasoning_effort_character) {
+    if contains_forbidden_display_character(&value) {
         return Err("\u{63a8}\u{7406}\u{6863}\u{4f4d}\u{4e0d}\u{80fd}\u{5305}\u{542b}\u{63a7}\u{5236}\u{5b57}\u{7b26}\u{3001}\u{683c}\u{5f0f}\u{5b57}\u{7b26}\u{6216}\u{4e0d}\u{53ef}\u{89c1}\u{5b57}\u{7b26}".into());
     }
     let trimmed = value.trim();
@@ -156,14 +136,11 @@ fn validate_start(input: StartRunInput, family: StartFamily) -> Result<Validated
         .into());
     }
 
-    if input.target.reported_model.chars().any(char::is_control) {
-        return Err("模型名称不能包含控制字符".into());
+    if contains_forbidden_display_character(&input.target.reported_model) {
+        return Err("模型名称不能包含控制字符、格式字符或不可见字符".into());
     }
     let reported_model = input.target.reported_model.trim().to_owned();
-    if reported_model.is_empty()
-        || reported_model.chars().count() > 120
-        || reported_model.chars().any(char::is_control)
-    {
+    if !is_valid_reported_model(&reported_model) {
         return Err("模型名称必须是 1–120 个可见字符".into());
     }
     if family == StartFamily::Cli && !safe_cli_model(&reported_model) {
@@ -211,11 +188,7 @@ fn validate_resume_target(
     if !target_kind_is_in_family(input.kind, family) {
         return Err("恢复目标不属于当前体检类型。".into());
     }
-    if input.reported_model.is_empty()
-        || input.reported_model.chars().count() > 120
-        || input.reported_model.trim() != input.reported_model
-        || input.reported_model.chars().any(char::is_control)
-    {
+    if !is_valid_reported_model(&input.reported_model) {
         return Err("恢复目标包含无效的模型名称。".into());
     }
     if family == StartFamily::Cli && !safe_cli_model(&input.reported_model) {
@@ -2482,6 +2455,78 @@ mod tests {
             )
             .is_err());
         }
+    }
+
+    #[test]
+    fn reported_model_requires_visible_unicode_for_start_and_resume() {
+        let invalid_models = [
+            "\u{200b}",
+            "\u{202e}",
+            "\u{2060}",
+            "\u{200b}\u{2060}",
+            "GPT\u{200b}-5",
+        ];
+        for model in invalid_models {
+            assert!(
+                validate_start(
+                    start_input(TargetKind::ChatGptClient, model, None, RunMode::Quick,),
+                    StartFamily::Manual,
+                )
+                .is_err(),
+                "start accepted {model:?}"
+            );
+            assert!(
+                validate_resume_target(
+                    ResumeTargetSelectionInput {
+                        kind: TargetKind::ChatGptClient,
+                        reported_model: model.into(),
+                        reasoning_effort: None,
+                    },
+                    StartFamily::Manual,
+                )
+                .is_err(),
+                "resume accepted {model:?}"
+            );
+        }
+
+        for model in ["模型-α".to_owned(), "模".repeat(120)] {
+            assert!(
+                validate_start(
+                    start_input(TargetKind::ChatGptClient, &model, None, RunMode::Quick,),
+                    StartFamily::Manual,
+                )
+                .is_ok(),
+                "start rejected {model:?}"
+            );
+            assert!(
+                validate_resume_target(
+                    ResumeTargetSelectionInput {
+                        kind: TargetKind::ChatGptClient,
+                        reported_model: model.clone(),
+                        reasoning_effort: None,
+                    },
+                    StartFamily::Manual,
+                )
+                .is_ok(),
+                "resume rejected {model:?}"
+            );
+        }
+
+        let too_long = "模".repeat(121);
+        assert!(validate_start(
+            start_input(TargetKind::ChatGptClient, &too_long, None, RunMode::Quick,),
+            StartFamily::Manual,
+        )
+        .is_err());
+        assert!(validate_resume_target(
+            ResumeTargetSelectionInput {
+                kind: TargetKind::ChatGptClient,
+                reported_model: too_long,
+                reasoning_effort: None,
+            },
+            StartFamily::Manual,
+        )
+        .is_err());
     }
 
     #[test]

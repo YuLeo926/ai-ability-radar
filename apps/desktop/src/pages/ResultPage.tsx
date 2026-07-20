@@ -17,6 +17,7 @@ import type {
 } from "../api/backend";
 import { CategoryBars } from "../components/CategoryBars";
 import { formatReasoningEffort } from "../domain/reasoningEffort";
+import { formatReportedModel } from "../domain/reportedModel";
 import "./ResultsHistory.css";
 
 const targetLabels: Record<TargetKind, string> = {
@@ -157,9 +158,7 @@ function statusPresentation(status: RunStatus): {
 }
 
 function modelLabel(run: RunRecord): string {
-  return run.target.reportedModel === "default"
-    ? "默认路由（未固定）"
-    : run.target.reportedModel;
+  return formatReportedModel(run.target.reportedModel);
 }
 
 function technicalValue(value: string | null | undefined): string {
@@ -375,7 +374,7 @@ function ReportExportControls({ detail }: { detail: RunDetail }) {
                     </div>
                     <div>
                       <dt>用户填写模型</dt>
-                      <dd>{run.target.reportedModel.trim()}</dd>
+                      <dd>{formatReportedModel(run.target.reportedModel)}</dd>
                     </div>
                     <div>
                       <dt>推理档位</dt>

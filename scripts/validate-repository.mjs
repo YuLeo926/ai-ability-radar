@@ -422,19 +422,154 @@ const expectedPortableScripts = {
   start: "npm run tauri -- dev",
   "package:portable":
     "npm run tauri -- build --no-bundle && npm run package:portable:from-build",
-  "package:portable:from-build": "node scripts/package-portable.mjs",
+  "package:portable:from-build":
+    "cargo build -p ability-core --bin ability-pack-validator --release --locked --offline && node scripts/package-portable.mjs",
 };
 for (const [name, expected] of Object.entries(expectedPortableScripts)) {
   if (rootPackage.scripts?.[name] !== expected) {
     fail(`package.json ${name} script must be exactly: ${expected}`);
   }
 }
+const requiredTestSteps = [
+  "cargo build -p ability-core --bin ability-pack-validator --locked --offline",
+  "node --test scripts/package-portable.test.mjs",
+];
+const configuredTestSteps = rootPackage.scripts?.test?.split(" && ") ?? [];
+for (const step of requiredTestSteps) {
+  if (!configuredTestSteps.includes(step)) {
+    fail(`package.json test script must run exactly: ${step}`);
+  }
+}
+
+const expectedReasoningEffortDisplayPolicy = {
+  chat_gpt_client: {
+    none: "无",
+    minimal: "最小",
+    low: "轻度",
+    medium: "中",
+    high: "高",
+    xhigh: "极高",
+    max: "最高",
+    ultra: "Ultra",
+  },
+  claude_client: {
+    none: "无",
+    minimal: "最小",
+    low: "低",
+    medium: "中",
+    high: "高",
+    xhigh: "极高",
+    max: "最高",
+    ultra: "Ultra",
+  },
+  codex_cli: {
+    none: "无",
+    minimal: "最小",
+    low: "低",
+    medium: "中",
+    high: "高",
+    xhigh: "极高",
+    max: "最高",
+    ultra: "Ultra",
+  },
+  claude_code: {
+    none: "无",
+    minimal: "最小",
+    low: "低",
+    medium: "中",
+    high: "高",
+    xhigh: "极高",
+    max: "最高",
+    ultra: "Ultra",
+  },
+};
+const reasoningEffortDisplayPolicy = json(
+  "schemas/reasoning-effort-display.json",
+);
+try {
+  assert.deepStrictEqual(
+    reasoningEffortDisplayPolicy,
+    expectedReasoningEffortDisplayPolicy,
+  );
+} catch {
+  fail(
+    "schemas/reasoning-effort-display.json must define the exact reviewed 4-by-8 target display policy",
+  );
+}
+
+const reasoningEffortConsumerPath =
+  "apps/desktop/src/domain/reasoningEffort.ts";
+const reasoningEffortConsumerSource = read(reasoningEffortConsumerPath);
+const reasoningEffortConsumerAst = ts.createSourceFile(
+  reasoningEffortConsumerPath,
+  reasoningEffortConsumerSource,
+  ts.ScriptTarget.Latest,
+  true,
+  ts.ScriptKind.TS,
+);
+if (reasoningEffortConsumerAst.parseDiagnostics.length > 0) {
+  fail(`${reasoningEffortConsumerPath} must remain parseable TypeScript`);
+}
+let hasExactReasoningPolicyImport = false;
+let hasSharedReasoningPolicyBinding = false;
+let targetAwareReasoningPolicyLookups = 0;
+function reviewReasoningEffortConsumer(node) {
+  if (
+    ts.isImportDeclaration(node) &&
+    ts.isStringLiteral(node.moduleSpecifier) &&
+    node.moduleSpecifier.text ===
+      "../../../../schemas/reasoning-effort-display.json" &&
+    node.importClause?.name?.text === "displayPolicyJson" &&
+    !node.importClause.namedBindings
+  ) {
+    hasExactReasoningPolicyImport = true;
+  }
+  if (
+    ts.isVariableDeclaration(node) &&
+    ts.isIdentifier(node.name) &&
+    node.name.text === "displayPolicy" &&
+    node.initializer &&
+    ts.isSatisfiesExpression(node.initializer) &&
+    ts.isIdentifier(node.initializer.expression) &&
+    node.initializer.expression.text === "displayPolicyJson"
+  ) {
+    hasSharedReasoningPolicyBinding = true;
+  }
+  if (
+    ts.isElementAccessExpression(node) &&
+    ts.isElementAccessExpression(node.expression) &&
+    ts.isIdentifier(node.expression.expression) &&
+    node.expression.expression.text === "displayPolicy" &&
+    ts.isIdentifier(node.expression.argumentExpression) &&
+    node.expression.argumentExpression.text === "kind"
+  ) {
+    targetAwareReasoningPolicyLookups += 1;
+  }
+  ts.forEachChild(node, reviewReasoningEffortConsumer);
+}
+reviewReasoningEffortConsumer(reasoningEffortConsumerAst);
 if (
-  !rootPackage.scripts?.test
-    ?.split(" && ")
-    .includes("node --test scripts/package-portable.test.mjs")
+  !hasExactReasoningPolicyImport ||
+  !hasSharedReasoningPolicyBinding ||
+  targetAwareReasoningPolicyLookups !== 2
 ) {
-  fail("package.json test script must run scripts/package-portable.test.mjs");
+  fail(
+    `${reasoningEffortConsumerPath} must derive both option and display labels from the shared target-aware policy`,
+  );
+}
+const rustReportSource = read("crates/ability-core/src/report.rs");
+const rustPolicyIncludes = [
+  ...rustReportSource.matchAll(
+    /include_str!\(\s*"\.\.\/\.\.\/\.\.\/schemas\/reasoning-effort-display\.json"\s*,?\s*\)/g,
+  ),
+];
+if (
+  rustPolicyIncludes.length !== 1 ||
+  !/serde_json::from_str\s*\(\s*include_str!/m.test(rustReportSource)
+) {
+  fail(
+    "crates/ability-core/src/report.rs must deserialize the same shared reasoning-effort display policy",
+  );
 }
 
 const portableSources = new Map([
@@ -597,9 +732,13 @@ function reviewPortableNodeAst(source) {
     "copyValidatedTree",
     "ensureDirectory",
     "entriesUnder",
+    "expectedRawZipMembers",
     "fileIdentity",
+    "findRawZipEndRecord",
     "loadTrustedRegistry",
     "main",
+    "normalizeRawZipMember",
+    "observeRuntimePackValidatorForTest",
     "packDirectoryHash",
     "packagePortableFromBuild",
     "packagePortableFromBuildForTest",
@@ -612,6 +751,8 @@ function reviewPortableNodeAst(source) {
     "requireOwnedDirectoryIdentity",
     "requireOwnedFileIdentity",
     "requirePackChild",
+    "rawZipError",
+    "runRuntimePackValidator",
     "safePackRelativePath",
     "safeRemoveOwnedFile",
     "safeRemoveOwnedTree",
@@ -624,7 +765,10 @@ function reviewPortableNodeAst(source) {
     "validateGrader",
     "validateManifest",
     "validatePortablePacks",
+    "validateRawZipCentralDirectory",
+    "validateRawZipForTest",
     "validateRegistry",
+    "validateZipExtraFields",
   ]);
   const reviewedBindingNames = new Set([
     ...reviewedImportNames,
@@ -696,7 +840,7 @@ function reviewPortableNodeAst(source) {
   const expectedDirectCalls = new Map([
     ["archiveLeaf", 1],
     ["assertArchiveCandidate", 4],
-    ["assertInside", 22],
+    ["assertInside", 23],
     ["basename", 6],
     ["BigInt", 2],
     ["canonicalExisting", 9],
@@ -708,16 +852,19 @@ function reviewPortableNodeAst(source) {
     ["dirname", 6],
     ["ensureDirectory", 5],
     ["entriesUnder", 6],
+    ["expectedRawZipMembers", 1],
     ["fileIdentity", 2],
     ["fileURLToPath", 2],
+    ["findRawZipEndRecord", 1],
     ["isAbsolute", 1],
-    ["isDeepStrictEqual", 3],
-    ["join", 37],
+    ["isDeepStrictEqual", 4],
+    ["join", 38],
     ["link", 1],
     ["loadTrustedRegistry", 1],
     ["lstat", 12],
     ["main", 1],
     ["mkdir", 3],
+    ["normalizeRawZipMember", 2],
     ["packagePortableFromBuild", 2],
     ["packDirectoryHash", 1],
     ["parse", 1],
@@ -725,6 +872,7 @@ function reviewPortableNodeAst(source) {
     ["plainObject", 2],
     ["publicationHook", 4],
     ["randomUUID", 4],
+    ["rawZipError", 24],
     ["readBoundedJson", 3],
     ["readFile", 7],
     ["readdir", 2],
@@ -733,12 +881,14 @@ function reviewPortableNodeAst(source) {
     ["rename", 1],
     ["requireDirectory", 15],
     ["requireExactKeys", 8],
-    ["requireFile", 9],
+    ["requireFile", 10],
     ["requireOwnedDirectoryIdentity", 3],
     ["requireOwnedFileIdentity", 3],
     ["requirePackChild", 2],
     ["resolve", 10],
     ["rm", 2],
+    ["runRuntimePackValidator", 1],
+    ["runtimePackValidatorObserver", 1],
     ["safePackRelativePath", 3],
     ["safeRemoveOwnedFile", 1],
     ["safeRemoveOwnedTree", 3],
@@ -746,122 +896,153 @@ function reviewPortableNodeAst(source) {
     ["samePath", 3],
     ["settlePortableCleanup", 1],
     ["sha256", 2],
-    ["spawnSync", 2],
+    ["spawnSync", 3],
     ["stagePortable", 1],
     ["validateExtractedArchive", 1],
     ["validateGrader", 1],
     ["validateManifest", 1],
     ["validatePortablePacks", 4],
+    ["validateRawZipCentralDirectory", 2],
     ["validateRegistry", 2],
+    ["validateZipExtraFields", 2],
     ["writeFile", 1],
   ]);
   const expectedMemberCalls = new Map([
-    ["add", 1],
+    ["add", 4],
     ["alloc", 2],
     ["allSettled", 2],
+    ["byteLength", 1],
     ["catch", 1],
-    ["compare", 1],
-    ["decode", 2],
+    ["compare", 2],
+    ["decode", 3],
     ["digest", 2],
+    ["endsWith", 3],
     ["entries", 1],
-    ["filter", 5],
-    ["from", 2],
-    ["has", 3],
-    ["includes", 4],
+    ["filter", 7],
+    ["from", 3],
+    ["get", 1],
+    ["has", 6],
+    ["includes", 7],
     ["isArray", 5],
+    ["isBuffer", 1],
     ["isDirectory", 7],
     ["isFile", 6],
-    ["isSafeInteger", 3],
+    ["isSafeInteger", 4],
     ["isSymbolicLink", 9],
-    ["join", 5],
+    ["join", 6],
     ["keys", 1],
-    ["map", 5],
+    ["map", 6],
+    ["max", 1],
+    ["normalize", 2],
     ["parse", 2],
-    ["push", 8],
+    ["push", 10],
+    ["readUInt16LE", 19],
+    ["readUInt32LE", 13],
+    ["replaceAll", 1],
     ["reverse", 1],
-    ["some", 2],
-    ["sort", 7],
-    ["split", 8],
-    ["startsWith", 3],
+    ["set", 1],
+    ["slice", 2],
+    ["some", 6],
+    ["sort", 10],
+    ["split", 11],
+    ["startsWith", 5],
     ["stringify", 2],
-    ["subarray", 1],
-    ["test", 5],
+    ["subarray", 5],
+    ["test", 7],
     ["toLowerCase", 1],
+    ["toUpperCase", 3],
     ["trim", 1],
     ["update", 5],
     ["write", 2],
     ["writeBigUInt64LE", 2],
   ]);
   const expectedProperties = new Map([
-    ["add", 1],
+    ["add", 4],
     ["alloc", 2],
-    ["NODE_TEST_CONTEXT", 1],
     ["allSettled", 2],
     ["argv", 2],
     ["bundled", 1],
+    ["byteLength", 1],
     ["catch", 1],
     ["category", 1],
     ["checksumManifest", 1],
     ["code", 2],
-    ["compare", 1],
+    ["compare", 2],
     ["content_sha256", 2],
-    ["decode", 2],
+    ["decode", 3],
     ["dev", 3],
     ["digest", 2],
-    ["directory", 1],
-    ["entries", 2],
-    ["env", 1],
-    ["error", 4],
+    ["directories", 1],
+    ["directory", 5],
+    ["end", 1],
+    ["endsWith", 3],
+    ["entries", 3],
+    ["env", 3],
+    ["error", 5],
     ["exitCode", 1],
     ["expected", 5],
-    ["filter", 5],
-    ["from", 2],
+    ["files", 1],
+    ["filter", 7],
+    ["from", 3],
+    ["get", 1],
     ["grader", 1],
-    ["has", 3],
+    ["has", 6],
     ["id", 10],
-    ["includes", 4],
+    ["includes", 7],
     ["ino", 3],
     ["isArray", 5],
+    ["isBuffer", 1],
     ["isDirectory", 7],
     ["isFile", 6],
-    ["isSafeInteger", 3],
+    ["isSafeInteger", 4],
     ["isSymbolicLink", 9],
-    ["join", 5],
+    ["join", 6],
+    ["key", 2],
     ["keys", 1],
-    ["length", 11],
+    ["length", 21],
     ["license", 1],
-    ["map", 5],
+    ["map", 6],
+    ["max", 1],
     ["max_turns", 3],
     ["message", 1],
-    ["name", 20],
+    ["name", 24],
+    ["NODE_TEST_CONTEXT", 3],
+    ["normalize", 2],
     ["packs", 4],
     ["parse", 2],
     ["path", 10],
     ["payloads", 1],
-    ["platform", 2],
+    ["platform", 3],
     ["prompt_file", 1],
-    ["push", 8],
+    ["push", 10],
+    ["readUInt16LE", 19],
+    ["readUInt32LE", 13],
+    ["replaceAll", 1],
     ["reverse", 1],
     ["root", 1],
     ["schema_version", 2],
+    ["set", 1],
     ["sha256", 1],
     ["size", 8],
-    ["some", 2],
-    ["sort", 7],
-    ["split", 8],
+    ["slice", 2],
+    ["some", 6],
+    ["sort", 10],
+    ["split", 11],
+    ["start", 3],
     ["starter_dir", 3],
-    ["startsWith", 3],
-    ["status", 2],
+    ["startsWith", 5],
+    ["status", 3],
     ["stderr", 1],
     ["stdout", 1],
     ["stringify", 2],
-    ["subarray", 1],
+    ["subarray", 5],
     ["target_kinds", 3],
     ["tasks", 3],
-    ["test", 5],
+    ["test", 7],
     ["time_budget_secs", 3],
     ["title", 2],
     ["toLowerCase", 1],
+    ["toUpperCase", 3],
     ["trim", 1],
     ["trustedRegistry", 2],
     ["type", 2],
@@ -1109,6 +1290,28 @@ function reviewPortableNodeAst(source) {
     ],
     [
       "element",
+      [
+        "call",
+        ["property", ["identifier", "part"], "split"],
+        [
+          ["string", "."],
+          ["number", "1"],
+        ],
+      ],
+      ["number", "0"],
+    ],
+    [
+      "element",
+      ["identifier", "localRanges"],
+      ["unsupported", "BinaryExpression"],
+    ],
+    [
+      "element",
+      ["identifier", "localRanges"],
+      ["identifier", "index"],
+    ],
+    [
+      "element",
       ["property", ["identifier", "process"], "argv"],
       ["number", "1"],
     ],
@@ -1241,6 +1444,17 @@ function reviewPortableNodeAst(source) {
   ];
   const expectedSpawnArguments = [
     [
+      ["identifier", "validatorPath"],
+      ["array", [["identifier", "packsRoot"]]],
+      [
+        "object",
+        [
+          ["encoding", ["string", "utf8"]],
+          ["windowsHide", ["boolean", true]],
+        ],
+      ],
+    ],
+    [
       ["string", "powershell.exe"],
       [
         "array",
@@ -1296,7 +1510,134 @@ function reviewPortableNodeAst(source) {
     shapeKey(expectedSpawnArguments.map(shapeKey).sort())
   ) {
     portableAstFailure(
-      "permits only the exact reviewed powershell.exe compressor and extractor invocations",
+      "permits only the exact reviewed runtime validator, compressor, and extractor invocations",
+    );
+  }
+
+  const expectedPackValidationArguments = [
+    [
+      ["identifier", "canonicalPacks"],
+      ["identifier", "trustedRegistry"],
+      ["string", "source portable benchmark packs"],
+      ["identifier", "canonicalPackValidator"],
+    ],
+    [
+      [
+        "call",
+        ["identifier", "join"],
+        [
+          ["identifier", "stageRoot"],
+          ["string", "benchmark-packs"],
+        ],
+      ],
+      ["identifier", "trustedRegistry"],
+      ["string", "staged portable benchmark packs"],
+      ["identifier", "canonicalPackValidator"],
+    ],
+    [
+      [
+        "call",
+        ["identifier", "join"],
+        [
+          ["identifier", "stageRoot"],
+          ["string", "benchmark-packs"],
+        ],
+      ],
+      ["property", ["identifier", "expectedArchive"], "trustedRegistry"],
+      ["string", "pre-compression portable benchmark packs"],
+      ["identifier", "packValidatorPath"],
+    ],
+    [
+      [
+        "call",
+        ["identifier", "join"],
+        [
+          ["identifier", "extractedRoot"],
+          ["string", "benchmark-packs"],
+        ],
+      ],
+      ["property", ["identifier", "expectedArchive"], "trustedRegistry"],
+      ["string", "extracted portable benchmark packs"],
+      ["identifier", "validatorPath"],
+    ],
+  ];
+  const actualPackValidationArguments = (
+    directCallNodes.get("validatePortablePacks") ?? []
+  )
+    .map((call) => call.arguments.map(expressionShape))
+    .map(shapeKey)
+    .sort();
+  if (
+    shapeKey(actualPackValidationArguments) !==
+    shapeKey(expectedPackValidationArguments.map(shapeKey).sort())
+  ) {
+    portableAstFailure(
+      "requires runtime pack validation at the exact source, staged, pre-compression, and extracted checkpoints",
+    );
+  }
+
+  const runtimeValidatorCall = directCallNodes.get(
+    "runRuntimePackValidator",
+  )?.[0];
+  if (
+    !runtimeValidatorCall ||
+    shapeKey(runtimeValidatorCall.arguments.map(expressionShape)) !==
+      shapeKey([
+        ["identifier", "validatorPath"],
+        ["identifier", "canonicalPacks"],
+        ["identifier", "label"],
+      ])
+  ) {
+    portableAstFailure(
+      "requires every portable pack checkpoint to invoke the reviewed runtime validator",
+    );
+  }
+
+  const expectedRawValidationArguments = [
+    [
+      [
+        "call",
+        ["property", ["identifier", "Buffer"], "from"],
+        [["identifier", "bytes"]],
+      ],
+      ["identifier", "expectedEntries"],
+    ],
+    [
+      ["identifier", "archiveBytes"],
+      ["property", ["identifier", "expectedArchive"], "entries"],
+    ],
+  ];
+  const rawValidationCalls =
+    directCallNodes.get("validateRawZipCentralDirectory") ?? [];
+  const actualRawValidationArguments = rawValidationCalls
+    .map((call) => call.arguments.map(expressionShape))
+    .map(shapeKey)
+    .sort();
+  if (
+    shapeKey(actualRawValidationArguments) !==
+    shapeKey(expectedRawValidationArguments.map(shapeKey).sort())
+  ) {
+    portableAstFailure(
+      "requires exact raw ZIP validation for the test seam and staged payload",
+    );
+  }
+  const productionRawValidation = rawValidationCalls.find(
+    (call) =>
+      shapeKey(call.arguments.map(expressionShape)) ===
+      shapeKey(expectedRawValidationArguments[1]),
+  );
+  const extractorSpawn = (directCallNodes.get("spawnSync") ?? []).find(
+    (call) =>
+      shapeKey(call.arguments.map(expressionShape)) ===
+      shapeKey(expectedSpawnArguments[2]),
+  );
+  if (
+    !productionRawValidation ||
+    !extractorSpawn ||
+    productionRawValidation.end >= extractorSpawn.pos
+  ) {
+    portableAstFailure(
+      "requires raw ZIP validation to finish before the extractor can start",
     );
   }
 }
@@ -1492,7 +1833,7 @@ if (
 const portableSourceSeals = new Map([
   [
     "scripts/package-portable.mjs",
-    "949dd69f2ef8c298148de27744f61c492a8eacdf536c2968778781b396a0b67e",
+    "080def23093593f4b9fd9a01ffaad46302c70c0adbb6257bf63e1d9676715cb8",
   ],
   [
     "scripts/compress-portable.ps1",
@@ -2510,6 +2851,11 @@ requireText("docs/methodology.md", [
   ["CLI custom lowercase safe tokens", /CLI 自定义值.*规范化为小写安全 token/],
   ["history recovery comparison normalization without migration", /写入历史.*恢复运行核对.*同条件比较.*不需要数据库迁移/si],
   ["existing low medium high remains readable", /已有 `low`、`medium`、`high` 历史.*仍可读取.*恢复.*比较/si],
+  ["reported-model Unicode display policy", /1.?120.*`Cc`.*`Cf`.*`Default_Ignorable_Code_Point`/si],
+  ["shared target-aware effort policy", /schemas\/reasoning-effort-display\.json.*4.*8.*ChatGPT.*`low`.*轻度/si],
+  ["runtime pack parser parity helper", /ability-pack-validator.*PackRegistry::parse.*PackLoader::load.*source.*staged.*pre-compression.*extracted/si],
+  ["portable helper build-only boundary", /helper.*(?:build|构建).*payload/si],
+  ["raw ZIP membership before extraction", /central directory.*Windows.*(?:member|成员).*(?:extract|提取)/si],
 ]);
 const methodology = read("docs/methodology.md");
 if (/已知推理值保留输入大小写/.test(methodology)) {

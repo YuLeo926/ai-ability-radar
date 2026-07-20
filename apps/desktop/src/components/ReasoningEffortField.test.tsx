@@ -2,6 +2,11 @@ import { useState } from "react";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
+import type { TargetKind } from "../api/backend";
+import {
+  effortOptionsFor,
+  formatReasoningEffort,
+} from "../domain/reasoningEffort";
 import { ReasoningEffortField } from "./ReasoningEffortField";
 
 test("renders ChatGPT levels and sends the canonical selection", async () => {
@@ -25,6 +30,39 @@ test("renders ChatGPT levels and sends the canonical selection", async () => {
   await user.selectOptions(screen.getByLabelText("推理档位"), "xhigh");
   expect(onChange).toHaveBeenLastCalledWith("xhigh");
 });
+
+test.each([
+  "chat_gpt_client",
+  "claude_client",
+  "codex_cli",
+  "claude_code",
+] as const)(
+  "renders every offered %s option with the canonical target-specific label",
+  (kind: TargetKind) => {
+    render(
+      <ReasoningEffortField
+        emptyLabel="未显示 / 不适用"
+        id="effort"
+        kind={kind}
+        label="推理档位"
+        onChange={() => undefined}
+        onValidationChange={() => undefined}
+        value=""
+      />,
+    );
+
+    const options = screen.getByLabelText("推理档位").querySelectorAll("option");
+    for (const { label, value } of effortOptionsFor(kind)) {
+      const rendered = Array.from(options).find(
+        (option) => option.getAttribute("value") === value,
+      );
+      expect(rendered, `${kind}/${value}`).toHaveTextContent(label);
+      expect(rendered, `${kind}/${value} formatter parity`).toHaveTextContent(
+        formatReasoningEffort(kind, value),
+      );
+    }
+  },
+);
 
 test("custom mode preserves manual labels and reports validation", async () => {
   const user = userEvent.setup();

@@ -34,6 +34,9 @@ const MAX_PROMPT_BYTES = 256 * 1024;
 const MAX_PACK_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_PACK_BYTES = 32 * 1024 * 1024;
 const MAX_PACK_ENTRIES = 4_096;
+const packValidatorLeaf = process.platform === "win32"
+  ? "ability-pack-validator.exe"
+  : "ability-pack-validator";
 const expectedPackIdentities = [
   { id: "client-quick", path: "client-quick-v1" },
   { id: "cli-quick", path: "cli-quick-v1" },
@@ -50,6 +53,7 @@ const taskCategories = new Set([
   "code_review",
   "cli_coding",
 ]);
+let runtimePackValidatorObserver;
 
 function comparable(path) {
   const absolute = resolve(path);
@@ -458,7 +462,23 @@ async function loadTrustedRegistry(repoRoot) {
   return validateRegistry(value, "committed portable pack registry");
 }
 
-async function validatePortablePacks(packsRoot, trustedRegistry, label) {
+function runRuntimePackValidator(validatorPath, packsRoot, label) {
+  runtimePackValidatorObserver?.(label);
+  const result = spawnSync(validatorPath, [packsRoot], {
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  if (result.error || result.status !== 0) {
+    throw new Error(`${label} was rejected by the runtime pack parser`);
+  }
+}
+
+async function validatePortablePacks(
+  packsRoot,
+  trustedRegistry,
+  label,
+  validatorPath,
+) {
   const canonicalPacks = await requireDirectory(packsRoot, label);
   const topLevel = await readdir(canonicalPacks, { withFileTypes: true });
   topLevel.sort((left, right) =>
@@ -495,6 +515,7 @@ async function validatePortablePacks(packsRoot, trustedRegistry, label) {
       throw new Error(`${label} content hash does not match the registry seal`);
     }
   }
+  runRuntimePackValidator(validatorPath, canonicalPacks, label);
 }
 
 function fileIdentity(info) {
@@ -547,6 +568,7 @@ async function requireOwnedFileIdentity(path, canonicalRoot, label, identity) {
 }
 
 async function safeRemoveOwnedTree(path, canonicalRoot, label, identity) {
+  if (!path) return;
   const info = await pathInfo(path);
   if (!info) return;
   if (
@@ -674,9 +696,301 @@ async function sha256(path) {
   return createHash("sha256").update(await readFile(path)).digest("hex");
 }
 
+function rawZipError(detail) {
+  throw new Error(`portable raw ZIP validation failed: ${detail}`);
+}
+
+function validateZipExtraFields(bytes) {
+  let cursor = 0;
+  while (cursor < bytes.length) {
+    if (cursor + 4 > bytes.length) rawZipError("malformed extra field");
+    const headerId = bytes.readUInt16LE(cursor);
+    const size = bytes.readUInt16LE(cursor + 2);
+    cursor += 4;
+    if (cursor + size > bytes.length) rawZipError("malformed extra field");
+    if (headerId === 0x0001) rawZipError("ZIP64 is unsupported");
+    cursor += size;
+  }
+}
+
+function normalizeRawZipMember(name) {
+  if (
+    !name ||
+    name.length > 4_096 ||
+    name.startsWith("/") ||
+    name.startsWith("\\")
+  ) {
+    rawZipError("unsafe member name");
+  }
+  const portable = name.replaceAll("\\", "/");
+  const directory = portable.endsWith("/");
+  const body = directory ? portable.slice(0, -1) : portable;
+  const parts = body.split("/");
+  if (
+    !body ||
+    parts.some((part) =>
+      !part ||
+      part === "." ||
+      part === ".." ||
+      part.endsWith(".") ||
+      part.endsWith(" ") ||
+      Buffer.byteLength(part, "utf8") > 255 ||
+      /[\u0000-\u001f\u007f<>:"|?*]/u.test(part)
+    )
+  ) {
+    rawZipError("unsafe member component");
+  }
+  const reserved = /^(?:CON|PRN|AUX|NUL|CLOCK\$|CONIN\$|CONOUT\$|COM[1-9¹²³]|LPT[1-9¹²³])$/u;
+  if (
+    parts.some((part) =>
+      reserved.test(part.split(".", 1)[0].toUpperCase())
+    )
+  ) {
+    rawZipError("reserved member component");
+  }
+  return {
+    directory,
+    key: body.normalize("NFC").toUpperCase(),
+    name: body,
+  };
+}
+
+function findRawZipEndRecord(bytes) {
+  const minimum = Math.max(0, bytes.length - 22 - 65_535);
+  for (let offset = bytes.length - 22; offset >= minimum; offset -= 1) {
+    if (
+      bytes.readUInt32LE(offset) === 0x06054b50 &&
+      offset + 22 + bytes.readUInt16LE(offset + 20) === bytes.length
+    ) {
+      return offset;
+    }
+  }
+  rawZipError("end record is missing");
+}
+
+function expectedRawZipMembers(expectedEntries) {
+  const files = new Set();
+  const directories = new Set(["ability-radar-portable"]);
+  for (const entry of expectedEntries) {
+    const member = normalizeRawZipMember(
+      `ability-radar-portable/${entry.name}${entry.directory ? "/" : ""}`,
+    );
+    if (member.directory) directories.add(member.name);
+    else files.add(member.name);
+  }
+  return { directories, files };
+}
+
+function validateRawZipCentralDirectory(bytes, expectedEntries) {
+  if (!Buffer.isBuffer(bytes) || bytes.length < 22) {
+    rawZipError("archive is truncated");
+  }
+  const endOffset = findRawZipEndRecord(bytes);
+  const diskNumber = bytes.readUInt16LE(endOffset + 4);
+  const centralDisk = bytes.readUInt16LE(endOffset + 6);
+  const entriesOnDisk = bytes.readUInt16LE(endOffset + 8);
+  const entryCount = bytes.readUInt16LE(endOffset + 10);
+  const centralSize = bytes.readUInt32LE(endOffset + 12);
+  const centralOffset = bytes.readUInt32LE(endOffset + 16);
+  if (
+    diskNumber !== 0 ||
+    centralDisk !== 0 ||
+    entriesOnDisk !== entryCount
+  ) {
+    rawZipError("multi-disk archives are unsupported");
+  }
+  if (
+    entryCount === 0xffff ||
+    centralSize === 0xffffffff ||
+    centralOffset === 0xffffffff ||
+    endOffset >= 20 && bytes.readUInt32LE(endOffset - 20) === 0x07064b50
+  ) {
+    rawZipError("ZIP64 is unsupported");
+  }
+  const centralEnd = centralOffset + centralSize;
+  if (
+    !Number.isSafeInteger(centralEnd) ||
+    centralOffset > endOffset ||
+    centralEnd !== endOffset
+  ) {
+    rawZipError("central directory bounds are invalid");
+  }
+
+  const decodedMembers = [];
+  const destinations = new Map();
+  const localRanges = [];
+  const localOffsets = new Set();
+  let cursor = centralOffset;
+  for (let index = 0; index < entryCount; index += 1) {
+    if (
+      cursor + 46 > centralEnd ||
+      bytes.readUInt32LE(cursor) !== 0x02014b50
+    ) {
+      rawZipError("central directory entry is malformed");
+    }
+    const versionNeeded = bytes.readUInt16LE(cursor + 6);
+    const flags = bytes.readUInt16LE(cursor + 8);
+    const method = bytes.readUInt16LE(cursor + 10);
+    const crc = bytes.readUInt32LE(cursor + 16);
+    const compressedSize = bytes.readUInt32LE(cursor + 20);
+    const uncompressedSize = bytes.readUInt32LE(cursor + 24);
+    const nameLength = bytes.readUInt16LE(cursor + 28);
+    const extraLength = bytes.readUInt16LE(cursor + 30);
+    const commentLength = bytes.readUInt16LE(cursor + 32);
+    const diskStart = bytes.readUInt16LE(cursor + 34);
+    const localOffset = bytes.readUInt32LE(cursor + 42);
+    const entryEnd =
+      cursor + 46 + nameLength + extraLength + commentLength;
+    if (
+      entryEnd > centralEnd ||
+      nameLength === 0 ||
+      versionNeeded > 20 ||
+      flags & ~0x080e ||
+      ![0, 8].includes(method) ||
+      compressedSize === 0xffffffff ||
+      uncompressedSize === 0xffffffff ||
+      localOffset === 0xffffffff ||
+      diskStart !== 0
+    ) {
+      rawZipError("unsupported central directory entry");
+    }
+    const nameBytes = bytes.subarray(cursor + 46, cursor + 46 + nameLength);
+    if (
+      !(flags & 0x0800) &&
+      nameBytes.some((value) => value > 0x7f)
+    ) {
+      rawZipError("legacy filename encoding is unsupported");
+    }
+    let rawName;
+    try {
+      rawName = new TextDecoder("utf-8", { fatal: true }).decode(nameBytes);
+    } catch {
+      rawZipError("member name is not UTF-8");
+    }
+    const member = normalizeRawZipMember(rawName);
+    if (destinations.has(member.key)) {
+      rawZipError("duplicate normalized destination");
+    }
+    destinations.set(member.key, member.directory ? "directory" : "file");
+    decodedMembers.push(member);
+    if (member.directory && (compressedSize !== 0 || uncompressedSize !== 0)) {
+      rawZipError("directory member has payload bytes");
+    }
+    validateZipExtraFields(
+      bytes.subarray(
+        cursor + 46 + nameLength,
+        cursor + 46 + nameLength + extraLength,
+      ),
+    );
+
+    if (
+      localOffset + 30 > centralOffset ||
+      bytes.readUInt32LE(localOffset) !== 0x04034b50 ||
+      localOffsets.has(localOffset)
+    ) {
+      rawZipError("local entry header is invalid");
+    }
+    localOffsets.add(localOffset);
+    const localVersion = bytes.readUInt16LE(localOffset + 4);
+    const localFlags = bytes.readUInt16LE(localOffset + 6);
+    const localMethod = bytes.readUInt16LE(localOffset + 8);
+    const localCrc = bytes.readUInt32LE(localOffset + 14);
+    const localCompressedSize = bytes.readUInt32LE(localOffset + 18);
+    const localUncompressedSize = bytes.readUInt32LE(localOffset + 22);
+    const localNameLength = bytes.readUInt16LE(localOffset + 26);
+    const localExtraLength = bytes.readUInt16LE(localOffset + 28);
+    const localHeaderEnd =
+      localOffset + 30 + localNameLength + localExtraLength;
+    const dataEnd = localHeaderEnd + compressedSize;
+    if (
+      localVersion !== versionNeeded ||
+      localFlags !== flags ||
+      localMethod !== method ||
+      localHeaderEnd > centralOffset ||
+      dataEnd > centralOffset ||
+      localNameLength !== nameLength ||
+      Buffer.compare(
+        bytes.subarray(localOffset + 30, localOffset + 30 + localNameLength),
+        nameBytes,
+      ) !== 0 ||
+      !(flags & 0x0008) && (
+        localCrc !== crc ||
+        localCompressedSize !== compressedSize ||
+        localUncompressedSize !== uncompressedSize
+      ) ||
+      flags & 0x0008 && (
+        ![0, compressedSize].includes(localCompressedSize) ||
+        ![0, uncompressedSize].includes(localUncompressedSize)
+      )
+    ) {
+      rawZipError("local and central entry metadata differ");
+    }
+    validateZipExtraFields(
+      bytes.subarray(
+        localOffset + 30 + localNameLength,
+        localHeaderEnd,
+      ),
+    );
+    localRanges.push({ start: localOffset, end: dataEnd });
+    cursor = entryEnd;
+  }
+  if (cursor !== centralEnd) {
+    rawZipError("central directory size is inconsistent");
+  }
+  localRanges.sort((left, right) => left.start - right.start);
+  for (let index = 1; index < localRanges.length; index += 1) {
+    if (localRanges[index - 1].end > localRanges[index].start) {
+      rawZipError("local entries overlap");
+    }
+  }
+  for (const member of decodedMembers) {
+    const parts = member.name.split("/");
+    for (let index = 1; index < parts.length; index += 1) {
+      const ancestor = parts.slice(0, index).join("/")
+        .normalize("NFC")
+        .toUpperCase();
+      if (destinations.get(ancestor) === "file") {
+        rawZipError("file and directory destinations alias");
+      }
+    }
+  }
+
+  const expected = expectedRawZipMembers(expectedEntries);
+  const actualFiles = decodedMembers
+    .filter(({ directory }) => !directory)
+    .map(({ name }) => name)
+    .sort();
+  const expectedFiles = [...expected.files].sort();
+  if (!isDeepStrictEqual(actualFiles, expectedFiles)) {
+    rawZipError("file membership differs from the staged payload");
+  }
+  if (
+    decodedMembers
+      .filter(({ directory }) => directory)
+      .some(({ name }) => !expected.directories.has(name))
+  ) {
+    rawZipError("directory membership is not a safe payload subset");
+  }
+}
+
+export function validateRawZipForTest(bytes, expectedEntries) {
+  if (!process.env.NODE_TEST_CONTEXT) {
+    throw new Error("raw ZIP test seam is available only under node:test");
+  }
+  validateRawZipCentralDirectory(Buffer.from(bytes), expectedEntries);
+}
+
+export function observeRuntimePackValidatorForTest(observer) {
+  if (!process.env.NODE_TEST_CONTEXT) {
+    throw new Error("runtime pack validator observer is available only under node:test");
+  }
+  runtimePackValidatorObserver = observer;
+}
+
 async function validateExtractedArchive(
   verificationDirectory,
   expectedArchive,
+  validatorPath,
 ) {
   const extractedEntries = await entriesUnder(verificationDirectory);
   const actualEntries = extractedEntries.map(({ path, directory }) => ({
@@ -717,6 +1031,7 @@ async function validateExtractedArchive(
     join(extractedRoot, "benchmark-packs"),
     expectedArchive.trustedRegistry,
     "extracted portable benchmark packs",
+    validatorPath,
   );
 }
 
@@ -725,6 +1040,7 @@ export async function stagePortable({
   targetDir,
   bundleDir,
   version,
+  packValidatorPath = join(targetDir, packValidatorLeaf),
 }) {
   const archiveName = archiveLeaf(version);
   assertInside(targetDir, bundleDir, "portable bundle directory");
@@ -753,11 +1069,22 @@ export async function stagePortable({
   assertInside(canonicalTarget, canonicalPacks, "portable benchmark packs");
   const canonicalReadme = await requireFile(readme, "portable README");
   assertInside(canonicalRepo, canonicalReadme, "portable README");
+  let canonicalPackValidator;
+  try {
+    canonicalPackValidator = await requireFile(
+      packValidatorPath,
+      "runtime pack validator",
+    );
+  } catch {
+    throw new Error("runtime pack validator is missing or invalid");
+  }
+  assertInside(canonicalTarget, canonicalPackValidator, "runtime pack validator");
   const trustedRegistry = await loadTrustedRegistry(repoRoot);
   await validatePortablePacks(
     canonicalPacks,
     trustedRegistry,
     "source portable benchmark packs",
+    canonicalPackValidator,
   );
   const packEntries = await entriesUnder(packs);
 
@@ -801,6 +1128,7 @@ export async function stagePortable({
       join(stageRoot, "benchmark-packs"),
       trustedRegistry,
       "staged portable benchmark packs",
+      canonicalPackValidator,
     );
     await copyFile(readme, join(stageRoot, "README.txt"));
     await requireFile(join(stageRoot, "README.txt"), "staged portable README");
@@ -838,6 +1166,7 @@ export async function stagePortable({
       checksumManifest,
       entries,
       payloads,
+      packValidatorPath: canonicalPackValidator,
       trustedRegistry,
       stageIdentity,
       stageParent,
@@ -887,6 +1216,7 @@ async function packagePortableFromBuild(repoRoot, publicationHook) {
     stageIdentity,
     stageParent,
     stageRoot,
+    packValidatorPath,
   } = expectedArchive;
   let temporaryArchive;
   let temporaryIdentity;
@@ -956,7 +1286,8 @@ async function packagePortableFromBuild(repoRoot, publicationHook) {
     await validatePortablePacks(
       join(stageRoot, "benchmark-packs"),
       expectedArchive.trustedRegistry,
-      "staged portable benchmark packs",
+      "pre-compression portable benchmark packs",
+      packValidatorPath,
     );
     await requireOwnedDirectoryIdentity(
       stageParent,
@@ -1013,10 +1344,12 @@ async function packagePortableFromBuild(repoRoot, publicationHook) {
     ) {
       throw new Error("portable ZIP compressor did not produce a regular archive");
     }
-    const signature = (await readFile(temporaryArchive)).subarray(0, 2);
+    const archiveBytes = await readFile(temporaryArchive);
+    const signature = archiveBytes.subarray(0, 2);
     if (signature[0] !== 0x50 || signature[1] !== 0x4b) {
       throw new Error("portable ZIP compressor produced an invalid ZIP signature");
     }
+    validateRawZipCentralDirectory(archiveBytes, expectedArchive.entries);
     const extractionResult = spawnSync(
       "powershell.exe",
       [
@@ -1044,7 +1377,11 @@ async function packagePortableFromBuild(repoRoot, publicationHook) {
       "portable verification directory",
       verificationIdentity,
     );
-    await validateExtractedArchive(verificationDirectory, expectedArchive);
+    await validateExtractedArchive(
+      verificationDirectory,
+      expectedArchive,
+      packValidatorPath,
+    );
     await requireOwnedFileIdentity(
       temporaryArchive,
       canonicalBundle,
