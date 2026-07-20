@@ -2335,7 +2335,7 @@ for (const [label, pattern] of forbiddenSitePatterns) {
 }
 
 const readme = requireText("README.md", [
-  ["v0.2 Windows preview status", /v0\.2.*Windows.*预览/],
+  ["exact v0.2.1 current-status banner", /^> 当前状态：v0\.2\.1 Windows 预览版。支持 Windows 10\/11 x64；安装程序尚未签名，也没有自动更新。$/m],
   ["exact client task count", /8\s*道/],
   ["exact CLI task count", /2\s*(?:个|项)/],
   ["fake CI cost boundary", /GitHub CI.*(?:假|fake).*CLI/si],
@@ -2374,7 +2374,22 @@ requireText("docs/methodology.md", [
   ["provider effort matrix Claude", /\| Claude 客户端 \|[^|]*低[^|]*中[^|]*高[^|]*极高[^|]*最高[^|]*原样填写[^|]*\|/],
   ["provider effort matrix Codex", /\| Codex CLI \|[^|]*`minimal`[^|]*`low`[^|]*`medium`[^|]*`high`[^|]*`xhigh`[^|]*`max`[^|]*`ultra`[^|]*自定义 \|/],
   ["provider effort matrix Claude Code", /\| Claude Code \|[^|]*`low`[^|]*`medium`[^|]*`high`[^|]*`xhigh`[^|]*`max`[^|]*自定义 \|/],
+  ["known reasoning lowercase canonical strings", /已知推理值.*保持小写规范字符串/],
+  ["manual custom trimmed display text", /手动客户端自定义标签.*保留去除首尾空白后的\s*显示文本/],
+  ["CLI custom lowercase safe tokens", /CLI 自定义值.*规范化为小写安全 token/],
+  ["history recovery comparison normalization without migration", /写入历史.*恢复运行核对.*同条件比较.*不需要数据库迁移/si],
+  ["existing low medium high remains readable", /已有 `low`、`medium`、`high` 历史.*仍可读取.*恢复.*比较/si],
 ]);
+const methodology = read("docs/methodology.md");
+if (/已知推理值保留输入大小写/.test(methodology)) {
+  fail("docs/methodology.md contradicts the known reasoning lowercase canonical rule");
+}
+if (/手动自定义标签统一转为小写/.test(methodology)) {
+  fail("docs/methodology.md contradicts the manual custom display-text rule");
+}
+if (/CLI 自定义值保留原始大小写/.test(methodology)) {
+  fail("docs/methodology.md contradicts the CLI custom lowercase safe-token rule");
+}
 for (const path of ["docs/privacy.md", "docs/security.md"]) {
   requireText(path, [
     ["no app telemetry endpoint", /应用.*(?:没有|无).*遥测.*(?:上传端点|endpoint)/si],

@@ -607,6 +607,20 @@ test("README requires the exact Tauri source start commands", () => {
   assertRejected(result, /README\.md.*npm ci.*npm start/si);
 });
 
+test("README current-status banner rejects v0.2", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, "README.md"), (source) => {
+      const changed = source.replace(
+        /^> 当前状态：[^\n]+$/m,
+        "> 当前状态：v0.2 Windows 预览版（旧版 banner）。支持 Windows 10/11 x64；安装程序尚未签名，也没有自动更新。",
+      );
+      assert.notEqual(changed, source, "README banner mutation must change the fixture");
+      return changed;
+    });
+  });
+  assertRejected(result, /README\.md.*v0\.2\.1.*current-status|当前状态/i);
+});
+
 test("README rejects treating the Vite URL as the complete product", () => {
   const result = runNegativeFixture((fixture) => {
     replace(join(fixture, "README.md"), (source) =>
@@ -662,6 +676,48 @@ test("methodology requires all four provider effort matrices", () => {
       ));
   });
   assertRejected(result, /methodology\.md.*provider effort matrix|推理档位矩阵/i);
+});
+
+test("methodology rejects preserving input case for known reasoning values", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, "docs", "methodology.md"), (source) => {
+      const changed = source.replace(
+        "当前推理档位矩阵如下。",
+        "当前推理档位矩阵如下。已知推理值保留输入大小写。",
+      );
+      assert.notEqual(changed, source, "known-value mutation must change the fixture");
+      return changed;
+    });
+  });
+  assertRejected(result, /methodology\.md.*known reasoning|已知推理值.*小写/i);
+});
+
+test("methodology rejects lowercasing manual custom display labels", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, "docs", "methodology.md"), (source) => {
+      const changed = source.replace(
+        "“自定义”只记录经过",
+        "手动自定义标签统一转为小写；“自定义”只记录经过",
+      );
+      assert.notEqual(changed, source, "manual-label mutation must change the fixture");
+      return changed;
+    });
+  });
+  assertRejected(result, /methodology\.md.*manual custom|手动自定义标签.*显示文本/i);
+});
+
+test("methodology rejects preserving original case for CLI custom values", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, "docs", "methodology.md"), (source) => {
+      const changed = source.replace(
+        "ChatGPT/Codex 的",
+        "CLI 自定义值保留原始大小写。ChatGPT/Codex 的",
+      );
+      assert.notEqual(changed, source, "CLI custom-value mutation must change the fixture");
+      return changed;
+    });
+  });
+  assertRejected(result, /methodology\.md.*CLI custom|CLI 自定义值.*小写安全 token/i);
 });
 
 test("release checklist requires portable archive gates", () => {
