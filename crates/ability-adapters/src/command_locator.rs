@@ -116,11 +116,9 @@ fn reviewed_package_entry(directory: &Path, provider: &str) -> Option<PathBuf> {
         return None;
     }
 
-    canonical_reviewed_file(
-        &package_root,
-        &package_root.join(entry_relative),
-        entry_relative,
-    )
+    let entry = package_root.join(entry_relative);
+    canonical_reviewed_file(&package_root, &entry, entry_relative)?;
+    Some(entry)
 }
 
 #[cfg(windows)]
@@ -227,13 +225,12 @@ mod tests {
         assert_eq!(launch.program, node_bin.join("node.exe"));
         assert_eq!(
             launch.prefix_args,
-            [
-                std::fs::canonicalize(npm.join("node_modules/@openai/codex/bin/codex.js"))
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned()
-            ]
+            [npm.join("node_modules/@openai/codex")
+                .join("bin/codex.js")
+                .to_string_lossy()
+                .into_owned()]
         );
+        assert!(!launch.prefix_args[0].starts_with(r"\\?\"));
     }
 
     #[test]

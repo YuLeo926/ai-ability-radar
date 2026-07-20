@@ -127,11 +127,12 @@ async fn provider_path_child_case() {
         .run(process, CancellationToken::new())
         .await
         .unwrap();
-    let reviewed_entry =
-        std::fs::canonicalize(fixture_root.join("npm/node_modules/@openai/codex/bin/codex.js"))
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
+    let reviewed_entry = fixture_root
+        .join("npm")
+        .join("node_modules/@openai/codex")
+        .join("bin/codex.js")
+        .to_string_lossy()
+        .into_owned();
     let mut expected = vec![reviewed_entry];
     expected.extend(hostile_args);
 
