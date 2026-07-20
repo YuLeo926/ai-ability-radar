@@ -1,6 +1,7 @@
 use ability_adapters::{
-    AdapterCompletion, AdapterError, AgentAdapter, AuthState, CodexAdapter, ExecutionRequest,
-    OutputStream, ProcessEnvironment, ProcessError, ProcessOutput, ProcessRunner, ProcessSpec,
+    AdapterCompletion, AdapterError, AgentAdapter, AuthState, AvailabilityStatus, CodexAdapter,
+    ExecutionRequest, LaunchSource, OutputStream, ProcessEnvironment, ProcessError, ProcessOutput,
+    ProcessRunner, ProcessSpec,
 };
 use ability_core::FailureKind;
 use async_trait::async_trait;
@@ -48,6 +49,94 @@ fn request() -> ExecutionRequest {
 
 fn test_adapter(runner: Arc<dyn ProcessRunner>) -> CodexAdapter {
     CodexAdapter::with_resolved_command(runner, "codex", Vec::new())
+}
+
+#[derive(Default)]
+struct OrderedCandidateRunner {
+    seen: Mutex<Vec<ProcessSpec>>,
+}
+
+impl OrderedCandidateRunner {
+    fn execution_used_reviewed_npm(&self) -> bool {
+        self.seen.lock().unwrap().iter().any(|spec| {
+            spec.program == PathBuf::from("node.exe")
+                && spec.args.first().map(String::as_str)
+                    == Some("npm/node_modules/@openai/codex/bin/codex.js")
+                && spec.args.get(1).map(String::as_str) == Some("exec")
+        })
+    }
+}
+
+#[async_trait]
+impl ProcessRunner for OrderedCandidateRunner {
+    async fn run(
+        &self,
+        spec: ProcessSpec,
+        _cancellation: CancellationToken,
+    ) -> Result<ProcessOutput, ProcessError> {
+        self.seen.lock().unwrap().push(spec.clone());
+        if spec.program == PathBuf::from("windows-app/codex.exe") {
+            return Err(ProcessError::Spawn(io::Error::from(
+                io::ErrorKind::PermissionDenied,
+            )));
+        }
+        let stdout = match spec.args.last().map(String::as_str) {
+            Some("--version") => "codex-cli 0.142.5",
+            Some("status") => "Logged in",
+            _ => {
+                return Ok(ProcessOutput {
+                    exit_code: Some(0),
+                    stdout: concat!(
+                        "{\"type\":\"thread.started\",\"thread_id\":\"abc\"}\n",
+                        "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":12,\"output_tokens\":4}}\n"
+                    )
+                    .into(),
+                    stderr: String::new(),
+                    duration_ms: 1,
+                });
+            }
+        };
+        Ok(ProcessOutput {
+            exit_code: Some(0),
+            stdout: stdout.into(),
+            stderr: String::new(),
+            duration_ms: 1,
+        })
+    }
+}
+
+#[tokio::test]
+async fn codex_detection_skips_an_inaccessible_candidate_and_retains_npm() {
+    let runner = Arc::new(OrderedCandidateRunner::default());
+    let adapter = CodexAdapter::with_candidate_commands(
+        runner.clone(),
+        vec![
+            (
+                PathBuf::from("windows-app/codex.exe"),
+                Vec::new(),
+                LaunchSource::NativeExe,
+            ),
+            (
+                PathBuf::from("node.exe"),
+                vec!["npm/node_modules/@openai/codex/bin/codex.js".into()],
+                LaunchSource::ReviewedNpm,
+            ),
+        ],
+        false,
+    );
+
+    let availability = adapter.detect().await;
+
+    assert!(availability.installed);
+    assert_eq!(availability.status, AvailabilityStatus::Ready);
+    assert_eq!(availability.auth_state, AuthState::Ready);
+    assert_eq!(availability.source, Some(LaunchSource::ReviewedNpm));
+    assert_eq!(availability.version.as_deref(), Some("codex-cli 0.142.5"));
+    adapter
+        .execute(request(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(runner.execution_used_reviewed_npm());
 }
 
 #[tokio::test]

@@ -1,4 +1,5 @@
-use crate::command_locator::{LaunchCommand, resolve_launch_command};
+use crate::command_locator::{LaunchCommand, LaunchDiscovery};
+use crate::provider_detection::{probe_launch_candidates, probe_provider_launches};
 use crate::{
     AdapterCompletion, AdapterError, AgentAdapter, AuthState, AvailabilityStatus, ExecutionRequest,
     LaunchSource, ProcessEnvironment, ProcessError, ProcessOutput, ProcessRunner, ProcessSpec,
@@ -8,7 +9,7 @@ use ability_core::{FailureKind, TargetKind};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -17,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 pub struct ClaudeCodeAdapter {
     runner: Arc<dyn ProcessRunner>,
     launch: Mutex<Option<LaunchCommand>>,
+    discovery_override: Option<LaunchDiscovery>,
 }
 
 impl ClaudeCodeAdapter {
@@ -24,6 +26,7 @@ impl ClaudeCodeAdapter {
         Self {
             runner,
             launch: Mutex::new(None),
+            discovery_override: None,
         }
     }
 
@@ -32,28 +35,48 @@ impl ClaudeCodeAdapter {
         program: impl Into<std::path::PathBuf>,
         prefix_args: Vec<String>,
     ) -> Self {
+        let launch = LaunchCommand {
+            program: program.into(),
+            prefix_args,
+            source: LaunchSource::NativeExe,
+        };
         Self {
             runner,
-            launch: Mutex::new(Some(LaunchCommand {
-                program: program.into(),
-                prefix_args,
-                source: LaunchSource::NativeExe,
-            })),
+            launch: Mutex::new(Some(launch.clone())),
+            discovery_override: Some(LaunchDiscovery {
+                candidates: vec![launch],
+                reviewed_npm_without_node: false,
+            }),
         }
     }
 
-    fn retained_launch(&self) -> std::io::Result<LaunchCommand> {
-        let mut retained = self
-            .launch
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(launch) = retained.as_ref() {
-            return Ok(launch.clone());
+    pub fn with_candidate_commands(
+        runner: Arc<dyn ProcessRunner>,
+        candidates: Vec<(PathBuf, Vec<String>, LaunchSource)>,
+        reviewed_npm_without_node: bool,
+    ) -> Self {
+        Self {
+            runner,
+            launch: Mutex::new(None),
+            discovery_override: Some(LaunchDiscovery {
+                candidates: candidates
+                    .into_iter()
+                    .map(|(program, prefix_args, source)| LaunchCommand {
+                        program,
+                        prefix_args,
+                        source,
+                    })
+                    .collect(),
+                reviewed_npm_without_node,
+            }),
         }
-        let path = std::env::var_os("PATH");
-        let launch = resolve_launch_command(Path::new("claude"), path.as_deref())?;
-        *retained = Some(launch.clone());
-        Ok(launch)
+    }
+
+    fn retained_launch(&self) -> Option<LaunchCommand> {
+        self.launch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 }
 
@@ -64,26 +87,26 @@ impl AgentAdapter for ClaudeCodeAdapter {
     }
 
     async fn detect(&self) -> TargetAvailability {
-        let launch = match self.retained_launch() {
-            Ok(launch) => launch,
-            Err(_) => return unavailable(self.kind()),
+        *self
+            .launch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        let working = match self.discovery_override.clone() {
+            Some(discovery) => probe_launch_candidates(discovery, Arc::clone(&self.runner)).await,
+            None => probe_provider_launches("claude", Arc::clone(&self.runner)).await,
         };
-        let version = match self
-            .runner
-            .run(
-                detection_spec(&launch, vec!["--version".into()]),
-                CancellationToken::new(),
-            )
-            .await
-        {
-            Ok(output) if output.exit_code == Some(0) => Some(output.stdout.trim().to_owned()),
-            _ => return unavailable(self.kind()),
+        let working = match working {
+            Ok(working) => working,
+            Err(status) => return unavailable(self.kind(), status),
         };
-
+        *self
+            .launch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(working.launch.clone());
         let auth_state = match self
             .runner
             .run(
-                detection_spec(&launch, vec!["auth".into(), "status".into()]),
+                detection_spec(&working.launch, vec!["auth".into(), "status".into()]),
                 CancellationToken::new(),
             )
             .await
@@ -95,13 +118,14 @@ impl AgentAdapter for ClaudeCodeAdapter {
         TargetAvailability {
             kind: self.kind(),
             installed: true,
-            version,
+            version: Some(working.version),
             auth_state,
-            status: match auth_state {
-                AuthState::NeedsLogin => AvailabilityStatus::NeedsLogin,
-                AuthState::Unknown | AuthState::Ready => AvailabilityStatus::Ready,
+            status: if auth_state == AuthState::NeedsLogin {
+                AvailabilityStatus::NeedsLogin
+            } else {
+                AvailabilityStatus::Ready
             },
-            source: Some(launch_source(&launch)),
+            source: Some(working.launch.source),
             prerequisites: Vec::new(),
         }
     }
@@ -111,9 +135,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
         request: ExecutionRequest,
         cancellation: CancellationToken,
     ) -> Result<AdapterCompletion, AdapterError> {
-        let launch = self
-            .retained_launch()
-            .map_err(|_| AdapterError::Unavailable)?;
+        let launch = self.retained_launch().ok_or(AdapterError::Unavailable)?;
         match self
             .runner
             .run(execution_spec(&launch, request), cancellation)
@@ -157,20 +179,16 @@ fn detection_spec(launch: &LaunchCommand, args: Vec<String>) -> ProcessSpec {
     }
 }
 
-fn unavailable(kind: TargetKind) -> TargetAvailability {
+fn unavailable(kind: TargetKind, status: AvailabilityStatus) -> TargetAvailability {
     TargetAvailability {
         kind,
         installed: false,
         version: None,
         auth_state: AuthState::Unknown,
-        status: AvailabilityStatus::NotFound,
+        status,
         source: None,
         prerequisites: Vec::new(),
     }
-}
-
-fn launch_source(launch: &LaunchCommand) -> LaunchSource {
-    launch.source
 }
 
 fn auth_state(exit_code: Option<i32>, stdout: &str) -> AuthState {

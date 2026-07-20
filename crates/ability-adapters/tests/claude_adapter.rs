@@ -1,6 +1,7 @@
 use ability_adapters::{
-    AdapterCompletion, AdapterError, AgentAdapter, AuthState, ClaudeCodeAdapter, ExecutionRequest,
-    OutputStream, ProcessEnvironment, ProcessError, ProcessOutput, ProcessRunner, ProcessSpec,
+    AdapterCompletion, AdapterError, AgentAdapter, AuthState, AvailabilityStatus,
+    ClaudeCodeAdapter, ExecutionRequest, LaunchSource, OutputStream, ProcessEnvironment,
+    ProcessError, ProcessOutput, ProcessRunner, ProcessSpec,
 };
 use ability_core::FailureKind;
 use async_trait::async_trait;
@@ -45,6 +46,83 @@ fn request() -> ExecutionRequest {
 
 fn test_adapter(runner: Arc<dyn ProcessRunner>) -> ClaudeCodeAdapter {
     ClaudeCodeAdapter::with_resolved_command(runner, "claude", Vec::new())
+}
+
+#[derive(Default)]
+struct OrderedCandidateRunner {
+    seen: Mutex<Vec<ProcessSpec>>,
+}
+
+impl OrderedCandidateRunner {
+    fn execution_used_reviewed_npm(&self) -> bool {
+        self.seen.lock().unwrap().iter().any(|spec| {
+            spec.program == PathBuf::from("node.exe")
+                && spec.args.first().map(String::as_str)
+                    == Some("npm/node_modules/@anthropic-ai/claude-code/cli.js")
+                && spec.args.get(1).map(String::as_str) == Some("-p")
+        })
+    }
+}
+
+#[async_trait]
+impl ProcessRunner for OrderedCandidateRunner {
+    async fn run(
+        &self,
+        spec: ProcessSpec,
+        _cancellation: CancellationToken,
+    ) -> Result<ProcessOutput, ProcessError> {
+        self.seen.lock().unwrap().push(spec.clone());
+        if spec.program == PathBuf::from("windows-app/claude.exe") {
+            return Err(ProcessError::Spawn(io::Error::from(
+                io::ErrorKind::PermissionDenied,
+            )));
+        }
+        let (exit_code, stdout) = match spec.args.last().map(String::as_str) {
+            Some("--version") => (Some(0), "2.1.211"),
+            Some("status") => (Some(0), r#"{"loggedIn":true}"#),
+            _ => (Some(0), "{\"type\":\"result\",\"subtype\":\"success\"}\n"),
+        };
+        Ok(ProcessOutput {
+            exit_code,
+            stdout: stdout.into(),
+            stderr: String::new(),
+            duration_ms: 1,
+        })
+    }
+}
+
+#[tokio::test]
+async fn claude_detection_skips_an_inaccessible_candidate_and_retains_npm() {
+    let runner = Arc::new(OrderedCandidateRunner::default());
+    let adapter = ClaudeCodeAdapter::with_candidate_commands(
+        runner.clone(),
+        vec![
+            (
+                PathBuf::from("windows-app/claude.exe"),
+                Vec::new(),
+                LaunchSource::NativeExe,
+            ),
+            (
+                PathBuf::from("node.exe"),
+                vec!["npm/node_modules/@anthropic-ai/claude-code/cli.js".into()],
+                LaunchSource::ReviewedNpm,
+            ),
+        ],
+        false,
+    );
+
+    let availability = adapter.detect().await;
+
+    assert!(availability.installed);
+    assert_eq!(availability.status, AvailabilityStatus::Ready);
+    assert_eq!(availability.auth_state, AuthState::Ready);
+    assert_eq!(availability.source, Some(LaunchSource::ReviewedNpm));
+    assert_eq!(availability.version.as_deref(), Some("2.1.211"));
+    adapter
+        .execute(request(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(runner.execution_used_reviewed_npm());
 }
 
 #[tokio::test]

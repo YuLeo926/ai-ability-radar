@@ -4,6 +4,7 @@ mod cli_run;
 mod codex;
 mod command_locator;
 mod process;
+mod provider_detection;
 mod verifier;
 
 pub use classify::*;
