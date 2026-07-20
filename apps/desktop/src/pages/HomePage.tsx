@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { useBackend } from "../api/BackendContext";
 import { useT } from "../i18n/I18nContext";
@@ -35,16 +35,15 @@ function visibleVersion(value: string | null | undefined): string | null {
 }
 
 function blocker(target: TargetAvailability): string | null {
-  if (!target.installed) {
-    return "未检测到安装";
-  }
-  if (target.authState === "needs_login") {
-    return isCli(target.kind) ? "需要先在终端登录" : "需要先登录";
-  }
   const missing = target.prerequisites.find(
     (prerequisite) => !prerequisite.available,
   );
-  return missing ? `缺少 ${missing.name}` : null;
+  if (missing) return `缺少 ${missing.name}`;
+  if (!target.installed) return "未检测到可执行入口";
+  if (target.authState === "needs_login") {
+    return isCli(target.kind) ? "需要先在终端登录" : "需要先登录";
+  }
+  return null;
 }
 
 function availableStatus(target: TargetAvailability): string {
@@ -118,12 +117,14 @@ function TargetGroup({
   targets,
   pack,
   id,
+  action,
 }: {
   title: string;
   description: string;
   targets: TargetAvailability[];
   pack: PackSummary;
   id: string;
+  action?: ReactNode;
 }) {
   const titleId = `${id}-title`;
 
@@ -134,9 +135,12 @@ function TargetGroup({
           <p className="section-kicker">{description}</p>
           <h2 id={titleId}>{title}</h2>
         </div>
-        <div className="pack-summary">
-          <p>{pack.title} · v{pack.version}</p>
-          <p>{pack.taskCount} 道任务 · 预计 {pack.estimatedMinutes} 分钟</p>
+        <div className="section-heading-actions">
+          <div className="pack-summary">
+            <p>{pack.title} · v{pack.version}</p>
+            <p>{pack.taskCount} 道任务 · 预计 {pack.estimatedMinutes} 分钟</p>
+          </div>
+          {action}
         </div>
       </header>
       <div className="target-grid">
@@ -236,6 +240,15 @@ export function HomePage() {
           pack={state.data.cliPack}
           targets={clis}
           title="编程 CLI"
+          action={
+            <button
+              className="secondary-action"
+              onClick={() => setAttempt((value) => value + 1)}
+              type="button"
+            >
+              重新检测 CLI
+            </button>
+          }
         />
       </div>
 

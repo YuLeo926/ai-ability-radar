@@ -382,7 +382,6 @@ button:disabled,
 }
 
 .pack-summary {
-  flex: 0 1 28rem;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
   text-align: right;
@@ -390,6 +389,27 @@ button:disabled,
 
 .pack-summary p {
   margin: 0;
+}
+
+.section-heading-actions {
+  display: flex;
+  flex: 0 1 36rem;
+  align-items: center;
+  justify-content: end;
+  gap: 0.75rem;
+}
+
+.secondary-action {
+  border-color: var(--border-strong);
+  background: var(--panel);
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.secondary-action:hover:not(:disabled) {
+  border-color: var(--mineral);
+  background: var(--surface-muted);
+  color: var(--text-primary);
 }
 
 .target-grid {
@@ -874,6 +894,12 @@ button:disabled,
 
   .pack-summary {
     text-align: left;
+  }
+
+  .section-heading-actions {
+    align-items: start;
+    justify-content: start;
+    flex-wrap: wrap;
   }
 
   .report-review-backdrop {
