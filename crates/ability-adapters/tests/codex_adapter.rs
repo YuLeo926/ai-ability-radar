@@ -8,7 +8,9 @@ use async_trait::async_trait;
 use std::collections::VecDeque;
 use std::io;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 struct FakeRunner {
@@ -140,6 +142,154 @@ async fn codex_detection_skips_an_inaccessible_candidate_and_retains_npm() {
 }
 
 #[tokio::test]
+async fn codex_candidate_override_starts_unavailable_before_detection() {
+    let adapter = CodexAdapter::with_candidate_commands(
+        Arc::new(OrderedCandidateRunner::default()),
+        vec![(
+            PathBuf::from("candidate-codex.exe"),
+            Vec::new(),
+            LaunchSource::NativeExe,
+        )],
+        false,
+    );
+
+    let error = adapter
+        .execute(request(), CancellationToken::new())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, AdapterError::Unavailable));
+}
+
+struct ConcurrentDetectionRunner {
+    first_version_calls: AtomicUsize,
+    first_auth_started: Semaphore,
+    release_first_auth: Semaphore,
+    execution_program: Mutex<Option<PathBuf>>,
+}
+
+impl Default for ConcurrentDetectionRunner {
+    fn default() -> Self {
+        Self {
+            first_version_calls: AtomicUsize::new(0),
+            first_auth_started: Semaphore::new(0),
+            release_first_auth: Semaphore::new(0),
+            execution_program: Mutex::new(None),
+        }
+    }
+}
+
+#[async_trait]
+impl ProcessRunner for ConcurrentDetectionRunner {
+    async fn run(
+        &self,
+        spec: ProcessSpec,
+        _cancellation: CancellationToken,
+    ) -> Result<ProcessOutput, ProcessError> {
+        if spec.args.last().map(String::as_str) == Some("--version") {
+            if spec.program == PathBuf::from("first-codex.exe") {
+                if self.first_version_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Ok(ProcessOutput {
+                        exit_code: Some(0),
+                        stdout: "codex-first 1.0".into(),
+                        stderr: String::new(),
+                        duration_ms: 1,
+                    });
+                }
+                return Err(ProcessError::Spawn(io::Error::from(
+                    io::ErrorKind::PermissionDenied,
+                )));
+            }
+            return Ok(ProcessOutput {
+                exit_code: Some(0),
+                stdout: "codex-second 2.0".into(),
+                stderr: String::new(),
+                duration_ms: 1,
+            });
+        }
+
+        if spec.args.last().map(String::as_str) == Some("status") {
+            if spec.program == PathBuf::from("first-codex.exe") {
+                self.first_auth_started.add_permits(1);
+                self.release_first_auth.acquire().await.unwrap().forget();
+            }
+            return Ok(ProcessOutput {
+                exit_code: Some(0),
+                stdout: "Logged in".into(),
+                stderr: String::new(),
+                duration_ms: 1,
+            });
+        }
+
+        *self.execution_program.lock().unwrap() = Some(spec.program);
+        Ok(ProcessOutput {
+            exit_code: Some(0),
+            stdout: concat!(
+                "{\"type\":\"thread.started\",\"thread_id\":\"abc\"}\n",
+                "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":12,\"output_tokens\":4}}\n"
+            )
+            .into(),
+            stderr: String::new(),
+            duration_ms: 1,
+        })
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn codex_concurrent_detection_keeps_returned_success_and_execution_coherent() {
+    let runner = Arc::new(ConcurrentDetectionRunner::default());
+    let adapter = Arc::new(CodexAdapter::with_candidate_commands(
+        runner.clone(),
+        vec![
+            (
+                PathBuf::from("first-codex.exe"),
+                Vec::new(),
+                LaunchSource::NativeExe,
+            ),
+            (
+                PathBuf::from("second-node.exe"),
+                vec!["reviewed/codex.js".into()],
+                LaunchSource::ReviewedNpm,
+            ),
+        ],
+        false,
+    ));
+
+    let first_adapter = Arc::clone(&adapter);
+    let first = tokio::spawn(async move {
+        let availability = first_adapter.detect().await;
+        let execution = first_adapter
+            .execute(request(), CancellationToken::new())
+            .await;
+        (availability, execution)
+    });
+    runner.first_auth_started.acquire().await.unwrap().forget();
+
+    let second_adapter = Arc::clone(&adapter);
+    let second = tokio::spawn(async move { second_adapter.detect().await });
+    tokio::task::yield_now().await;
+    runner.release_first_auth.add_permits(1);
+
+    let (first_availability, first_execution) = first.await.unwrap();
+    let second_availability = second.await.unwrap();
+
+    assert_eq!(
+        first_availability.version.as_deref(),
+        Some("codex-first 1.0")
+    );
+    assert_eq!(first_availability.source, Some(LaunchSource::NativeExe));
+    assert!(matches!(
+        first_execution,
+        Ok(AdapterCompletion::Completed { .. })
+    ));
+    assert_eq!(
+        *runner.execution_program.lock().unwrap(),
+        Some(PathBuf::from("first-codex.exe"))
+    );
+    assert_eq!(second_availability.source, Some(LaunchSource::ReviewedNpm));
+}
+
+#[tokio::test]
 async fn codex_uses_ephemeral_json_workspace_write() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let adapter = test_adapter(Arc::new(FakeRunner { seen: seen.clone() }));
@@ -268,6 +418,84 @@ async fn codex_detection_uses_the_cli_status_without_reading_auth_files() {
     assert!(availability.installed);
     assert_eq!(availability.version.as_deref(), Some("codex-cli 0.134.0"));
     assert_eq!(availability.auth_state, AuthState::Ready);
+}
+
+#[tokio::test]
+async fn codex_failed_redetection_clears_the_retained_launch() {
+    let runner = Arc::new(StaticRunner {
+        result: Mutex::new(VecDeque::from([
+            Ok(ProcessOutput {
+                exit_code: Some(0),
+                stdout: "codex-cli 1.0".into(),
+                stderr: String::new(),
+                duration_ms: 1,
+            }),
+            Ok(ProcessOutput {
+                exit_code: Some(0),
+                stdout: "Logged in".into(),
+                stderr: String::new(),
+                duration_ms: 1,
+            }),
+            Ok(ProcessOutput {
+                exit_code: Some(1),
+                stdout: "version probe failed".into(),
+                stderr: String::new(),
+                duration_ms: 1,
+            }),
+        ])),
+    });
+    let adapter = CodexAdapter::with_candidate_commands(
+        runner,
+        vec![(
+            PathBuf::from("candidate-codex.exe"),
+            Vec::new(),
+            LaunchSource::NativeExe,
+        )],
+        false,
+    );
+
+    assert!(adapter.detect().await.installed);
+    let failed = adapter.detect().await;
+    let execute_error = adapter
+        .execute(request(), CancellationToken::new())
+        .await
+        .unwrap_err();
+
+    assert!(!failed.installed);
+    assert_eq!(failed.status, AvailabilityStatus::VersionProbeFailed);
+    assert!(matches!(execute_error, AdapterError::Unavailable));
+}
+
+#[tokio::test]
+async fn codex_successful_version_with_unknown_auth_is_installed_and_ready() {
+    let runner = Arc::new(StaticRunner {
+        result: Mutex::new(VecDeque::from([
+            Ok(ProcessOutput {
+                exit_code: Some(0),
+                stdout: "codex-cli 1.0".into(),
+                stderr: String::new(),
+                duration_ms: 1,
+            }),
+            Err(ProcessError::TimedOut),
+        ])),
+    });
+    let adapter = CodexAdapter::with_candidate_commands(
+        runner,
+        vec![(
+            PathBuf::from("candidate-codex.exe"),
+            Vec::new(),
+            LaunchSource::NativeExe,
+        )],
+        false,
+    );
+
+    let availability = adapter.detect().await;
+
+    assert!(availability.installed);
+    assert_eq!(availability.version.as_deref(), Some("codex-cli 1.0"));
+    assert_eq!(availability.auth_state, AuthState::Unknown);
+    assert_eq!(availability.status, AvailabilityStatus::Ready);
+    assert_eq!(availability.source, Some(LaunchSource::NativeExe));
 }
 
 struct StaticRunner {

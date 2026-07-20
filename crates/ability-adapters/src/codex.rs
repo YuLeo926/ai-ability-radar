@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 pub struct CodexAdapter {
     runner: Arc<dyn ProcessRunner>,
     launch: Mutex<Option<LaunchCommand>>,
+    detection_guard: tokio::sync::Mutex<()>,
     discovery_override: Option<LaunchDiscovery>,
 }
 
@@ -26,6 +27,7 @@ impl CodexAdapter {
         Self {
             runner,
             launch: Mutex::new(None),
+            detection_guard: tokio::sync::Mutex::new(()),
             discovery_override: None,
         }
     }
@@ -43,6 +45,7 @@ impl CodexAdapter {
         Self {
             runner,
             launch: Mutex::new(Some(launch.clone())),
+            detection_guard: tokio::sync::Mutex::new(()),
             discovery_override: Some(LaunchDiscovery {
                 candidates: vec![launch],
                 reviewed_npm_without_node: false,
@@ -58,6 +61,7 @@ impl CodexAdapter {
         Self {
             runner,
             launch: Mutex::new(None),
+            detection_guard: tokio::sync::Mutex::new(()),
             discovery_override: Some(LaunchDiscovery {
                 candidates: candidates
                     .into_iter()
@@ -87,6 +91,7 @@ impl AgentAdapter for CodexAdapter {
     }
 
     async fn detect(&self) -> TargetAvailability {
+        let _detection = self.detection_guard.lock().await;
         *self
             .launch
             .lock()

@@ -225,6 +225,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spawn_not_found_and_supervision_are_entry_inaccessible() {
+        let errors = [
+            ProcessError::Spawn(io::Error::from(io::ErrorKind::NotFound)),
+            ProcessError::Supervision(io::Error::from(io::ErrorKind::Other)),
+        ];
+
+        for error in errors {
+            let result = probe_launch_candidates(
+                discovery(vec![launch("blocked.exe", LaunchSource::NativeExe)], false),
+                QueueRunner::new([Err(error)]),
+            )
+            .await;
+
+            assert!(matches!(result, Err(AvailabilityStatus::EntryInaccessible)));
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_process_errors_are_version_probe_failed_before_runtime_missing() {
+        let errors = [
+            ProcessError::TimedOut,
+            ProcessError::Cancelled,
+            ProcessError::Wait(io::Error::from(io::ErrorKind::Other)),
+            ProcessError::CaptureFailed,
+        ];
+
+        for error in errors {
+            let result = probe_launch_candidates(
+                discovery(vec![launch("provider.exe", LaunchSource::NativeExe)], true),
+                QueueRunner::new([Err(error)]),
+            )
+            .await;
+
+            assert!(matches!(
+                result,
+                Err(AvailabilityStatus::VersionProbeFailed)
+            ));
+        }
+    }
+
+    #[tokio::test]
     async fn version_probe_failure_has_highest_aggregation_precedence() {
         let result = probe_launch_candidates(
             discovery(
