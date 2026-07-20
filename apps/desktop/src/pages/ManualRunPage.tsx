@@ -333,7 +333,12 @@ function ResumeReviewPage({
         </div>
         <div>
           <dt>原模型</dt>
-          <dd>{formatReportedModel(run.target.reportedModel)}</dd>
+          <dd>
+            {formatReportedModel(
+              run.target.kind,
+              run.target.reportedModel,
+            )}
+          </dd>
         </div>
         <div>
           <dt>原推理档位</dt>

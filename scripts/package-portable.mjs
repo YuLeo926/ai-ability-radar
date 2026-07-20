@@ -756,16 +756,15 @@ function normalizeRawZipMember(name) {
 }
 
 function findRawZipEndRecord(bytes) {
-  const minimum = Math.max(0, bytes.length - 22 - 65_535);
-  for (let offset = bytes.length - 22; offset >= minimum; offset -= 1) {
-    if (
-      bytes.readUInt32LE(offset) === 0x06054b50 &&
-      offset + 22 + bytes.readUInt16LE(offset + 20) === bytes.length
-    ) {
-      return offset;
-    }
+  const offset = bytes.length - 22;
+  if (bytes.readUInt32LE(offset) !== 0x06054b50) {
+    rawZipError("classic end record is not immediately before EOF");
   }
-  rawZipError("end record is missing");
+  const commentLength = bytes.readUInt16LE(offset + 20);
+  if (commentLength !== 0 || offset + 22 + commentLength !== bytes.length) {
+    rawZipError("archive comments are unsupported");
+  }
+  return offset;
 }
 
 function expectedRawZipMembers(expectedEntries) {

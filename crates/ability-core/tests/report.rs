@@ -474,6 +474,78 @@ fn html_report_uses_the_complete_target_specific_effort_display_table() {
 }
 
 #[test]
+fn legacy_custom_effort_with_forbidden_display_text_fails_public_reports_closed() {
+    for effort in [
+        "\u{200b}",
+        "\u{202e}",
+        "\u{2060}",
+        "\u{200b}\u{2060}",
+        "\u{6269}\u{200b}\u{5c55}",
+    ] {
+        let (mut run, tasks) = sample_evidence("GPT-5.6");
+        run.target.reasoning_effort = Some(effort.into());
+        assert!(
+            matches!(
+                build_public_report(&run, &tasks),
+                Err(ReportError::InvalidData("reasoningEffort"))
+            ),
+            "build accepted {effort:?}"
+        );
+
+        let (valid_run, valid_tasks) = sample_evidence("GPT-5.6");
+        let mut report = build_public_report(&valid_run, &valid_tasks).unwrap();
+        report.target.reasoning_effort = Some(effort.into());
+        assert!(
+            matches!(
+                validate_public_report(&report),
+                Err(ReportError::InvalidData("reasoningEffort"))
+            ),
+            "validation accepted {effort:?}"
+        );
+        assert!(
+            matches!(
+                render_public_report_html(&report),
+                Err(ReportError::InvalidData("reasoningEffort"))
+            ),
+            "HTML accepted {effort:?}"
+        );
+    }
+}
+
+#[test]
+fn html_report_uses_target_kind_for_the_default_model_sentinel() {
+    let cases = [
+        (TargetKind::ChatGptClient, "ChatGPT 客户端", "default"),
+        (TargetKind::ClaudeClient, "Claude 客户端", "default"),
+        (
+            TargetKind::CodexCli,
+            "Codex CLI",
+            "\u{9ed8}\u{8ba4}\u{8def}\u{7531}\u{ff08}\u{672a}\u{56fa}\u{5b9a}\u{ff09}",
+        ),
+        (
+            TargetKind::ClaudeCode,
+            "Claude Code",
+            "\u{9ed8}\u{8ba4}\u{8def}\u{7531}\u{ff08}\u{672a}\u{56fa}\u{5b9a}\u{ff09}",
+        ),
+    ];
+
+    for (kind, target_label, model_label) in cases {
+        let (mut run, tasks) = sample_evidence("default");
+        run.target.kind = kind;
+
+        let report = build_public_report(&run, &tasks).unwrap();
+        assert_eq!(report.target.reported_model, "default");
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains(r#""reportedModel":"default""#));
+        let html = render_public_report_html(&report).unwrap();
+        assert!(
+            html.contains(&format!("<h1>{target_label} · {model_label}</h1>")),
+            "{kind:?} rendered the wrong model label"
+        );
+    }
+}
+
+#[test]
 fn html_report_preserves_and_escapes_custom_effort_labels() {
     let (mut run, tasks) = sample_evidence("Claude");
     run.target.kind = TargetKind::ClaudeClient;

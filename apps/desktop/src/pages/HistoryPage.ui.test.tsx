@@ -4,7 +4,11 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { describe, expect, test, vi } from "vitest";
 import { BackendProvider } from "../api/BackendContext";
 import type { Backend, RunRecord } from "../api/backend";
-import { CANONICAL_EFFORT_DISPLAY_CASES } from "../test/reasoningEffortCases";
+import {
+  CANONICAL_EFFORT_DISPLAY_CASES,
+  DEFAULT_MODEL_DISPLAY_CASES,
+  INVALID_LEGACY_EFFORT_CASES,
+} from "../test/reasoningEffortCases";
 import { HistoryPage } from "./HistoryPage";
 
 function makeRun(overrides: Partial<RunRecord> = {}): RunRecord {
@@ -224,6 +228,52 @@ test("renders a stable safe placeholder for an invalid legacy model name", async
   expect(document.body.textContent).toContain("模型名称不可显示");
   expect(document.body.textContent).not.toContain(unsafeModel);
 });
+
+test.each(DEFAULT_MODEL_DISPLAY_CASES)(
+  "history displays default for %s as target-aware model text",
+  async (kind, targetLabel, expectedLabel, expectsRoutingWarning) => {
+    renderHistory(
+      makeBackend(async () => [
+        makeRun({
+          target: {
+            ...makeRun().target,
+            kind,
+            reportedModel: "default",
+          },
+        }),
+      ]),
+    );
+
+    expect(
+      await screen.findByRole("heading", {
+        name: `${targetLabel} · ${expectedLabel}`,
+      }),
+    ).toBeInTheDocument();
+    const warning = screen.queryByText(/默认路由可能在服务侧切换实际模型/);
+    expect(Boolean(warning)).toBe(expectsRoutingWarning);
+  },
+);
+
+test.each(INVALID_LEGACY_EFFORT_CASES)(
+  "history safely hides legacy effort containing %s",
+  async (_name, effort) => {
+    renderHistory(
+      makeBackend(async () => [
+        makeRun({
+          target: {
+            ...makeRun().target,
+            reasoningEffort: effort,
+          },
+        }),
+      ]),
+    );
+
+    await screen.findByRole("link", { name: /查看本次结果/ });
+    const effortTerm = screen.getByText("推理档位");
+    expect(effortTerm.parentElement).toHaveTextContent("推理档位不可显示");
+    expect(effortTerm.parentElement?.textContent).not.toContain(effort);
+  },
+);
 
 test.each(CANONICAL_EFFORT_DISPLAY_CASES)(
   "history displays %s/%s as %s",

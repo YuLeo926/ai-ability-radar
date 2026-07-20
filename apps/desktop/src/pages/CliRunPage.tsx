@@ -791,7 +791,10 @@ function CliWizard({
                 <div>
                   <dt>原模型</dt>
                   <dd>
-                    {formatReportedModel(resumePreview.run.target.reportedModel)}
+                    {formatReportedModel(
+                      resumePreview.run.target.kind,
+                      resumePreview.run.target.reportedModel,
+                    )}
                   </dd>
                 </div>
                 <div>

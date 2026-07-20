@@ -1,6 +1,7 @@
 use crate::{
     Category, FailureKind, RunRecord, RunStatus, ScoreSummary, TargetKind, TaskOutcome, TaskResult,
-    grading::has_coherent_task_evidence, is_valid_reported_model, summarize_scores,
+    contains_forbidden_display_character, grading::has_coherent_task_evidence,
+    is_valid_reported_model, summarize_scores,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use regex::Regex;
@@ -110,11 +111,7 @@ pub fn build_public_report(
         target: PublicTarget {
             kind: run.target.kind,
             reported_model: required_reported_model(&run.target.reported_model)?,
-            reasoning_effort: optional_text(
-                run.target.reasoning_effort.as_deref(),
-                "reasoningEffort",
-                64,
-            )?,
+            reasoning_effort: optional_reasoning_effort(run.target.reasoning_effort.as_deref())?,
         },
         environment: PublicEnvironment {
             os_family: required_text(&run.environment.os_family, "osFamily", 120)?,
@@ -170,11 +167,7 @@ pub fn validate_public_report(report: &PublicReport) -> Result<(), ReportError> 
     }
 
     validate_reported_model(&report.target.reported_model)?;
-    validate_optional_text(
-        report.target.reasoning_effort.as_deref(),
-        "reasoningEffort",
-        64,
-    )?;
+    validate_optional_reasoning_effort(report.target.reasoning_effort.as_deref())?;
     validate_text(&report.environment.os_family, "osFamily", 120, true)?;
     validate_text(&report.environment.app_version, "appVersion", 120, true)?;
     validate_optional_text(report.environment.cli_version.as_deref(), "cliVersion", 160)?;
@@ -324,11 +317,22 @@ fn reasoning_effort_display(kind: TargetKind, value: Option<&str>) -> &str {
     labels.get(value).unwrap_or(value)
 }
 
+fn reported_model_display(kind: TargetKind, value: &str) -> &str {
+    if value == "default" && matches!(kind, TargetKind::CodexCli | TargetKind::ClaudeCode) {
+        "\u{9ed8}\u{8ba4}\u{8def}\u{7531}\u{ff08}\u{672a}\u{56fa}\u{5b9a}\u{ff09}"
+    } else {
+        value
+    }
+}
+
 pub fn render_public_report_html(report: &PublicReport) -> Result<String, ReportError> {
     validate_public_report(report)?;
     let embedded_json = script_safe_json(&serde_json::to_string(report)?);
     let target = html_escape(target_kind_name(report.target.kind));
-    let model = html_escape(&report.target.reported_model);
+    let model = html_escape(reported_model_display(
+        report.target.kind,
+        &report.target.reported_model,
+    ));
     let effort = html_escape(reasoning_effort_display(
         report.target.kind,
         report.target.reasoning_effort.as_deref(),
@@ -629,6 +633,13 @@ fn validate_optional_text(
     Ok(())
 }
 
+fn validate_optional_reasoning_effort(value: Option<&str>) -> Result<(), ReportError> {
+    if value.is_some_and(contains_forbidden_display_character) {
+        return Err(ReportError::InvalidData("reasoningEffort"));
+    }
+    validate_optional_text(value, "reasoningEffort", 64)
+}
+
 fn validate_reported_model(value: &str) -> Result<(), ReportError> {
     if !is_valid_reported_model(value) {
         return Err(ReportError::InvalidData("reportedModel"));
@@ -666,6 +677,12 @@ fn optional_text(
     }
     validate_text(trimmed, field, max_chars, true)?;
     Ok(Some(trimmed.to_owned()))
+}
+
+fn optional_reasoning_effort(value: Option<&str>) -> Result<Option<String>, ReportError> {
+    let value = optional_text(value, "reasoningEffort", 64)?;
+    validate_optional_reasoning_effort(value.as_deref())?;
+    Ok(value)
 }
 
 fn scan_text(field: &'static str, value: &str) -> Result<(), ReportError> {

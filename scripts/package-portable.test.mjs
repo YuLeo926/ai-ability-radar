@@ -265,6 +265,45 @@ function zipMutationCompressorScript({
   ].join("\n");
 }
 
+function archiveCommentCompressorScript({ ambiguous = false } = {}) {
+  const appendComment = ambiguous
+    ? [
+        "$comment = [byte[]]@(",
+        "  0x41, 0x41, 0x50, 0x4b, 0x05, 0x06,",
+        "  0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41,",
+        "  0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41,",
+        "  0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41,",
+        "  0x41, 0x41",
+        ")",
+        "$commentLength = [uint16]$comment.Length",
+        "[Buffer]::BlockCopy([BitConverter]::GetBytes($commentLength), 0, $bytes, $endOffset + 20, 2)",
+        "$output = New-Object byte[] ($bytes.Length + $comment.Length)",
+        "[Buffer]::BlockCopy($bytes, 0, $output, 0, $bytes.Length)",
+        "[Buffer]::BlockCopy($comment, 0, $output, $bytes.Length, $comment.Length)",
+      ]
+    : [
+        "$comment = [Text.Encoding]::UTF8.GetBytes('legacy archive comment')",
+        "$commentLength = [uint16]$comment.Length",
+        "[Buffer]::BlockCopy([BitConverter]::GetBytes($commentLength), 0, $bytes, $endOffset + 20, 2)",
+        "$output = New-Object byte[] ($bytes.Length + $comment.Length)",
+        "[Buffer]::BlockCopy($bytes, 0, $output, 0, $bytes.Length)",
+        "[Buffer]::BlockCopy($comment, 0, $output, $bytes.Length, $comment.Length)",
+      ];
+  return [
+    "param([string]$Source, [string]$Destination)",
+    "$ErrorActionPreference = 'Stop'",
+    "Compress-Archive -LiteralPath $Source -DestinationPath $Destination -CompressionLevel Optimal",
+    "$bytes = [IO.File]::ReadAllBytes($Destination)",
+    "$endOffset = $bytes.Length - 22",
+    "if ([BitConverter]::ToUInt32($bytes, $endOffset) -ne 0x06054b50) {",
+    "  throw 'standard compressor did not emit a classic EOCD at EOF'",
+    "}",
+    ...appendComment,
+    "[IO.File]::WriteAllBytes($Destination, $output)",
+    "",
+  ].join("\n");
+}
+
 function minimalZip({
   centralCompressedSize = 0,
   centralUncompressedSize = 0,
@@ -770,7 +809,7 @@ test("concurrent staging invocations use isolated owned directories", async () =
 });
 
 test(
-  "Windows compressor produces one archive root and removes staging",
+  "standard Windows compressor produces a comment-free archive accepted by raw validation",
   { skip: process.platform !== "win32" },
   async () => {
     const fixture = await createFixture({ cli: true });
@@ -796,6 +835,10 @@ test(
           name,
         );
       }
+      const archive = await readFile(archivePath);
+      const endOffset = archive.length - 22;
+      assert.equal(archive.readUInt32LE(endOffset), 0x06054b50);
+      assert.equal(archive.readUInt16LE(endOffset + 20), 0);
       await assert.rejects(lstat(join(fixture.bundleDir, ".stage")), {
         code: "ENOENT",
       });
@@ -809,6 +852,60 @@ test(
     }
   },
 );
+
+for (const [name, compressor] of [
+  [
+    "a nonzero classic archive comment",
+    archiveCommentCompressorScript(),
+  ],
+  [
+    "an archive comment containing an EOCD-like byte sequence",
+    archiveCommentCompressorScript({ ambiguous: true }),
+  ],
+]) {
+  test(
+    `raw ZIP validation rejects ${name} before extractor spawn`,
+    { skip: process.platform !== "win32" },
+    async () => {
+      const fixture = await createFixture({ cli: true });
+      try {
+        const preservedStage = join(fixture.bundleDir, ".stage");
+        await mkdir(preservedStage, { recursive: true });
+        await writeFile(join(preservedStage, "owner.txt"), "preserve\n");
+        await writeFile(
+          join(fixture.repoRoot, "scripts", "compress-portable.ps1"),
+          compressor,
+        );
+        const extractorMarker = join(fixture.root, "extractor-started.txt");
+        await writeFile(
+          join(fixture.repoRoot, "scripts", "extract-portable.ps1"),
+          [
+            "param([string]$Source, [string]$Destination)",
+            `Set-Content -LiteralPath '${extractorMarker.replaceAll("'", "''")}' -Value started`,
+            "throw 'extractor must not start for an invalid raw ZIP'",
+            "",
+          ].join("\n"),
+        );
+
+        const portable = await import("./package-portable.mjs");
+        await assert.rejects(
+          portable.packagePortableFromBuildForTest(fixture.repoRoot),
+          /portable packaging processing failed|raw ZIP/i,
+        );
+
+        await assertNoFinalArchive(fixture);
+        assert.equal(
+          await readFile(join(preservedStage, "owner.txt"), "utf8"),
+          "preserve\n",
+        );
+        assert.deepEqual(await readdir(fixture.bundleDir), [".stage"]);
+        await assert.rejects(lstat(extractorMarker), { code: "ENOENT" });
+      } finally {
+        await rm(fixture.root, { recursive: true, force: true });
+      }
+    },
+  );
+}
 
 test(
   "a successful package invokes the real runtime parser at all four checkpoints",

@@ -19,15 +19,24 @@ conflicting earlier step, example, test name, and code snippet below:
   reference, and content-seal validation remains in place.
 - Before extraction, the packager parses the raw ZIP central directory,
   rejects unsupported encodings/structures and unsafe Windows aliases, and
-  requires the exact staged file-member set. The helper executable is a build
-  tool and is never copied into the portable payload.
+  requires the exact staged file-member set. The classic EOCD must be the
+  final 22 bytes, have archive-comment length zero, and end exactly at EOF.
+  The helper executable is a build tool and is never copied into the portable
+  payload.
 - Manual custom effort text rejects Unicode `Cc`, `Cf`,
   `Default_Ignorable_Code_Point`, and bidi format controls; trimmed input must
   contain 1–40 visible characters. CLI safe-token normalization is unchanged.
 - Reported-model labels use the same Unicode rejection policy and a trimmed
   1–120-character limit in frontend start, backend start/resume, and public
   report validation. Invalid legacy labels render as a localized safe
-  placeholder without changing stored history.
+  placeholder in frontend history/resume/result surfaces without changing
+  stored history; public report creation fails closed.
+- Literal `default` is the default-route display sentinel only for Codex CLI
+  and Claude Code. ChatGPT and Claude client records display it literally.
+- Invalid legacy custom effort text remains stored unchanged, renders as the
+  localized safe placeholder `推理档位不可显示` on every frontend surface,
+  and makes public JSON/HTML report creation fail closed. Unknown visible
+  custom effort text remains displayable.
 - Each packaging invocation exclusively creates a UUID staging directory,
   records its identity, and cleans only that identity. A fixed or pre-existing
   `.stage` is never reused or deleted.

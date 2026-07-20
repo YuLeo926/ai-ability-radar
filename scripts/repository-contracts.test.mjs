@@ -473,6 +473,34 @@ test("portable compressor destination must remain the temporary archive", () => 
   );
 });
 
+test("portable raw ZIP contract pins a zero-comment classic EOCD to EOF", () => {
+  const mutations = [
+    (source) => source.replace(
+      "const offset = bytes.length - 22;",
+      "const offset = bytes.length - 23;",
+    ),
+    (source) => source.replace(
+      "commentLength !== 0",
+      "commentLength === 0",
+    ),
+    (source) => source.replace(
+      "offset + 22 + commentLength !== bytes.length",
+      "offset + 22 + commentLength === bytes.length",
+    ),
+  ];
+
+  for (const mutate of mutations) {
+    const result = runPortableMutation(
+      "scripts/package-portable.mjs",
+      mutate,
+    );
+    assertRejected(
+      result,
+      /portable Node AST allowlist.*classic EOCD.*zero archive comment.*EOF/i,
+    );
+  }
+});
+
 test("portable semantic checks tolerate harmless comments with reviewed seals", () => {
   const result = runNegativeFixture(
     (fixture) => {

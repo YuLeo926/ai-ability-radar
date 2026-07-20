@@ -1,3 +1,5 @@
+import type { TargetKind } from "../api/backend";
+
 const CONTROL_CHARACTER = /\p{Cc}/u;
 const FORBIDDEN_INVISIBLE_CHARACTER =
   /[\p{Cf}\p{Default_Ignorable_Code_Point}]/u;
@@ -23,10 +25,16 @@ export function isSafeStoredReportedModel(value: string): boolean {
 }
 
 export function formatReportedModel(
+  kind: TargetKind,
   value: string,
   defaultLabel = "默认路由（未固定）",
 ): string {
-  if (value === "default") return defaultLabel;
+  if (
+    value === "default" &&
+    (kind === "codex_cli" || kind === "claude_code")
+  ) {
+    return defaultLabel;
+  }
   return isSafeStoredReportedModel(value)
     ? value
     : INVALID_REPORTED_MODEL_LABEL;

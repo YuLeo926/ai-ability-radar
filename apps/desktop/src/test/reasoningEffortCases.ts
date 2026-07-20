@@ -56,3 +56,20 @@ export const CLI_EFFORT_DISPLAY_CASES =
       readonly ["codex_cli" | "claude_code", string, string]
     > => entry[0] === "codex_cli" || entry[0] === "claude_code",
   );
+
+export const INVALID_LEGACY_EFFORT_CASES = [
+  ["U+200B", "\u200b"],
+  ["U+202E", "\u202e"],
+  ["U+2060", "\u2060"],
+  ["a pure invisible sequence", "\u200b\u2060"],
+  ["mixed visible and invisible text", "扩\u200b展"],
+] as const;
+
+export const DEFAULT_MODEL_DISPLAY_CASES = [
+  ["chat_gpt_client", "ChatGPT 客户端", "default", false],
+  ["claude_client", "Claude 客户端", "default", false],
+  ["codex_cli", "Codex CLI", "默认路由（未固定）", true],
+  ["claude_code", "Claude Code", "默认路由（未固定）", true],
+] as const satisfies ReadonlyArray<
+  readonly [TargetKind, string, string, boolean]
+>;

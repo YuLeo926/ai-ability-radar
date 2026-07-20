@@ -110,6 +110,24 @@ test("manual custom validation requires visible Unicode text", () => {
   expect(reasoningEffortError("chat_gpt_client", "想".repeat(41))).toMatch(/40/);
 });
 
+test("legacy custom effort display replaces forbidden text without changing visible unknown values", () => {
+  for (const value of [
+    "\u200b",
+    "\u202e",
+    "\u2060",
+    "\u200b\u2060",
+    "扩\u200b展",
+  ]) {
+    expect(formatReasoningEffort("chat_gpt_client", value)).toBe(
+      "推理档位不可显示",
+    );
+  }
+
+  expect(formatReasoningEffort("chat_gpt_client", "扩展思考")).toBe(
+    "扩展思考",
+  );
+});
+
 test("known values normalize for every target and custom CLI values lowercase", () => {
   expect(normalizeReasoningEffortForTarget("chat_gpt_client", " XHIGH ")).toBe(
     "xhigh",

@@ -17,7 +17,11 @@ import type {
   RunRecord,
   TaskResult,
 } from "../api/backend";
-import { CANONICAL_EFFORT_DISPLAY_CASES } from "../test/reasoningEffortCases";
+import {
+  CANONICAL_EFFORT_DISPLAY_CASES,
+  DEFAULT_MODEL_DISPLAY_CASES,
+  INVALID_LEGACY_EFFORT_CASES,
+} from "../test/reasoningEffortCases";
 import { ResultPage } from "./ResultPage";
 
 const runId = "a8ecbc64-9160-448d-9426-e21c6839d219";
@@ -356,6 +360,47 @@ describe("ResultPage objective semantics", () => {
     expect(document.body.textContent).toContain("模型名称不可显示");
     expect(document.body.textContent).not.toContain(unsafeModel);
   });
+
+  test.each(DEFAULT_MODEL_DISPLAY_CASES)(
+    "result displays default for %s as target-aware model text",
+    async (kind, targetLabel, expectedLabel) => {
+      renderResult(
+        makeBackend(async () =>
+          makeDetail({
+            target: {
+              ...makeRun().target,
+              kind,
+              reportedModel: "default",
+            },
+          }),
+        ),
+      );
+
+      expect(
+        await screen.findByText(`${targetLabel} · ${expectedLabel}`),
+      ).toBeInTheDocument();
+    },
+  );
+
+  test.each(INVALID_LEGACY_EFFORT_CASES)(
+    "result safely hides legacy effort containing %s",
+    async (_name, effort) => {
+      renderResult(
+        makeBackend(async () =>
+          makeDetail({
+            target: {
+              ...makeRun().target,
+              reasoningEffort: effort,
+            },
+          }),
+        ),
+      );
+
+      await screen.findByRole("heading", { name: "本次客观结果" });
+      expect(document.body.textContent).toContain("推理档位不可显示");
+      expect(document.body.textContent).not.toContain(effort);
+    },
+  );
 
   test.each(CANONICAL_EFFORT_DISPLAY_CASES)(
     "result displays %s/%s as %s",

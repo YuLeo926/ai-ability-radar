@@ -148,7 +148,10 @@ function statusLabel(run: RunRecord): string {
 }
 
 function modelLabel(run: RunRecord): string {
-  return formatReportedModel(run.target.reportedModel);
+  return formatReportedModel(
+    run.target.kind,
+    run.target.reportedModel,
+  );
 }
 
 function deterministicDate(value: string): {
@@ -491,7 +494,10 @@ function HistorySeries({
   const backend = useBackend();
   const representative = group.records[0];
   const titleId = `history-series-${index}`;
-  const defaultRouting = representative.target.reportedModel === "default";
+  const defaultRouting =
+    (representative.target.kind === "codex_cli" ||
+      representative.target.kind === "claude_code") &&
+    representative.target.reportedModel === "default";
   const mounted = useRef(true);
   const deleting = useRef(false);
   const currentSnapshot = useRef(targetRunIds.join("\0"));

@@ -22,7 +22,11 @@ import type {
   RunRecord,
   TargetKind,
 } from "../api/backend";
-import { CLI_EFFORT_DISPLAY_CASES } from "../test/reasoningEffortCases";
+import {
+  CLI_EFFORT_DISPLAY_CASES,
+  DEFAULT_MODEL_DISPLAY_CASES,
+  INVALID_LEGACY_EFFORT_CASES,
+} from "../test/reasoningEffortCases";
 import { CliRunPage } from "./CliRunPage";
 
 const RUN_ID = "2cf59f48-f775-47ad-b595-8be91f593474";
@@ -204,6 +208,47 @@ test.each(CLI_EFFORT_DISPLAY_CASES)(
     await screen.findByRole("heading", { name: "确认恢复原体检" });
     const effortTerm = screen.getByText("原推理档位");
     expect(effortTerm.parentElement).toHaveTextContent(expectedLabel);
+  },
+);
+
+test.each(
+  DEFAULT_MODEL_DISPLAY_CASES.filter(
+    ([kind]) => kind === "codex_cli" || kind === "claude_code",
+  ),
+)(
+  "CLI resume treats default as the route sentinel for %s",
+  async (kind, _targetLabel, expectedLabel) => {
+    const cliKind = kind as "codex_cli" | "claude_code";
+    const preview = makeRun(cliKind, { status: "interrupted" });
+    preview.target.reportedModel = "default";
+    const backend = fakeBackend({
+      getBootstrap: vi.fn(async () => makeBootstrap(cliKind)),
+      getRunDetail: vi.fn(async () => detail(preview)),
+    });
+
+    renderWizard(backend, `/cli/${kind}?resume=${RUN_ID}`);
+
+    await screen.findByRole("heading", { name: "确认恢复原体检" });
+    const modelTerm = screen.getByText("原模型");
+    expect(modelTerm.parentElement).toHaveTextContent(expectedLabel);
+  },
+);
+
+test.each(INVALID_LEGACY_EFFORT_CASES)(
+  "CLI resume safely hides legacy effort containing %s",
+  async (_name, effort) => {
+    const preview = makeRun("codex_cli", { status: "interrupted" });
+    preview.target.reasoningEffort = effort;
+    const backend = fakeBackend({
+      getRunDetail: vi.fn(async () => detail(preview)),
+    });
+
+    renderWizard(backend, `/cli/codex_cli?resume=${RUN_ID}`);
+
+    await screen.findByRole("heading", { name: "确认恢复原体检" });
+    const effortTerm = screen.getByText("原推理档位");
+    expect(effortTerm.parentElement).toHaveTextContent("推理档位不可显示");
+    expect(effortTerm.parentElement?.textContent).not.toContain(effort);
   },
 );
 
@@ -426,10 +471,23 @@ test("uses provider-specific CLI efforts", async () => {
   });
   codex.unmount();
 
-  renderWizard(fakeBackend(), "/cli/claude_code");
+  const claudeBackend = fakeBackend({
+    getBootstrap: vi.fn(async () => makeBootstrap("claude_code")),
+    startCliRun: vi.fn(async () => makeRun("claude_code")),
+  });
+  renderWizard(claudeBackend, "/cli/claude_code");
   await screen.findByRole("heading", { name: "Claude Code 快速体检" });
   expect(screen.queryByRole("option", { name: "Ultra" })).not.toBeInTheDocument();
   expect(screen.queryByRole("option", { name: /ultracode/i })).not.toBeInTheDocument();
+  await acknowledgeAndStart(user);
+  expect(claudeBackend.startCliRun).toHaveBeenCalledWith({
+    target: {
+      kind: "claude_code",
+      reportedModel: "default",
+      reasoningEffort: null,
+    },
+    mode: "quick",
+  });
 });
 
 test.each(["chat_gpt_client", "claude_client", "unknown"])(

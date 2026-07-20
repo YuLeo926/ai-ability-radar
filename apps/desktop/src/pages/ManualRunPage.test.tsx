@@ -22,7 +22,11 @@ import type {
   TargetKind,
   TaskResult,
 } from "../api/backend";
-import { MANUAL_EFFORT_DISPLAY_CASES } from "../test/reasoningEffortCases";
+import {
+  DEFAULT_MODEL_DISPLAY_CASES,
+  INVALID_LEGACY_EFFORT_CASES,
+  MANUAL_EFFORT_DISPLAY_CASES,
+} from "../test/reasoningEffortCases";
 import { ManualRunPage } from "./ManualRunPage";
 import { ResultPage } from "./ResultPage";
 
@@ -189,6 +193,50 @@ test.each(MANUAL_EFFORT_DISPLAY_CASES)(
     await screen.findByRole("heading", { name: "确认恢复原体检" });
     const effortTerm = screen.getByText("原推理档位");
     expect(effortTerm.parentElement).toHaveTextContent(expectedLabel);
+  },
+);
+
+test.each(
+  DEFAULT_MODEL_DISPLAY_CASES.filter(
+    ([kind]) => kind === "chat_gpt_client" || kind === "claude_client",
+  ),
+)(
+  "manual resume treats default as a literal model for %s",
+  async (kind, _targetLabel, expectedLabel) => {
+    const preview = makeRun(kind);
+    preview.status = "interrupted";
+    preview.target.reportedModel = "default";
+    const backend = fakeBackend({
+      getRunDetail: vi.fn(async () => ({ run: preview, taskResults: [] })),
+    });
+
+    renderWizard(backend, `/manual/${kind}?resume=${RUN_ID}`);
+
+    await screen.findByRole("heading", { name: "确认恢复原体检" });
+    const modelTerm = screen.getByText("原模型");
+    expect(modelTerm.parentElement).toHaveTextContent(expectedLabel);
+  },
+);
+
+test.each(INVALID_LEGACY_EFFORT_CASES)(
+  "manual resume safely hides legacy effort containing %s",
+  async (_name, effort) => {
+    const preview = makeRun("chat_gpt_client");
+    preview.status = "interrupted";
+    preview.target.reasoningEffort = effort;
+    const backend = fakeBackend({
+      getRunDetail: vi.fn(async () => ({ run: preview, taskResults: [] })),
+    });
+
+    renderWizard(
+      backend,
+      `/manual/chat_gpt_client?resume=${RUN_ID}`,
+    );
+
+    await screen.findByRole("heading", { name: "确认恢复原体检" });
+    const effortTerm = screen.getByText("原推理档位");
+    expect(effortTerm.parentElement).toHaveTextContent("推理档位不可显示");
+    expect(effortTerm.parentElement?.textContent).not.toContain(effort);
   },
 );
 
@@ -458,6 +506,35 @@ test.each([
         kind,
         reportedModel: model,
         reasoningEffort: "high",
+      },
+      mode: "quick",
+    });
+  },
+);
+
+test.each([
+  ["chat_gpt_client", "ChatGPT 客户端"],
+  ["claude_client", "Claude 客户端"],
+] as const)(
+  "manual setup preserves default as a literal model for %s",
+  async (kind, label) => {
+    const user = userEvent.setup();
+    const backend = fakeBackend();
+    renderWizard(backend, `/manual/${kind}`);
+
+    expect(
+      screen.getByRole("heading", { name: `${label}快速体检` }),
+    ).toBeInTheDocument();
+    await completeSetup(user, "default");
+    await user.click(
+      screen.getByRole("button", { name: "开始快速体检" }),
+    );
+
+    expect(backend.startManualRun).toHaveBeenCalledWith({
+      target: {
+        kind,
+        reportedModel: "default",
+        reasoningEffort: null,
       },
       mode: "quick",
     });

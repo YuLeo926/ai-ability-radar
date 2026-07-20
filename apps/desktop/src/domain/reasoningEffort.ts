@@ -34,6 +34,8 @@ const FORBIDDEN_CUSTOM_CHARACTER =
 const SAFE_CLI_EFFORT = /^[A-Za-z0-9_-]{1,32}$/;
 const KNOWN_EFFORTS = new Set<string>(CANONICAL_EFFORTS);
 
+export const INVALID_REASONING_EFFORT_LABEL = "推理档位不可显示";
+
 export function effortOptionsFor(kind: TargetKind): readonly EffortOption[] {
   return offeredEfforts[kind].map((value) => ({
     value,
@@ -47,8 +49,11 @@ export function formatReasoningEffort(
   emptyLabel = "未记录",
 ): string {
   if (!value) return emptyLabel;
-  return KNOWN_EFFORTS.has(value)
-    ? displayPolicy[kind][value as CanonicalEffort]
+  if (KNOWN_EFFORTS.has(value)) {
+    return displayPolicy[kind][value as CanonicalEffort];
+  }
+  return FORBIDDEN_CUSTOM_CHARACTER.test(value)
+    ? INVALID_REASONING_EFFORT_LABEL
     : value;
 }
 

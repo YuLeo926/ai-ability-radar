@@ -653,6 +653,121 @@ function reviewPortableNodeAst(source) {
     return;
   }
 
+  const isIdentifier = (node, name) =>
+    Boolean(node) && ts.isIdentifier(node) && node.text === name;
+  const isNumber = (node, value) =>
+    Boolean(node) && ts.isNumericLiteral(node) && Number(node.text) === value;
+  const isProperty = (node, owner, name) =>
+    Boolean(node) &&
+    ts.isPropertyAccessExpression(node) &&
+    isIdentifier(node.expression, owner) &&
+    node.name.text === name;
+  const isBinary = (node, operator, left, right) =>
+    Boolean(node) &&
+    ts.isBinaryExpression(node) &&
+    node.operatorToken.kind === operator &&
+    left(node.left) &&
+    right(node.right);
+  const variableInitializer = (statement, name) => {
+    if (
+      !ts.isVariableStatement(statement) ||
+      !(statement.declarationList.flags & ts.NodeFlags.Const) ||
+      statement.declarationList.declarations.length !== 1
+    ) {
+      return undefined;
+    }
+    const declaration = statement.declarationList.declarations[0];
+    return isIdentifier(declaration.name, name)
+      ? declaration.initializer
+      : undefined;
+  };
+  const endRecordFunction = sourceFile.statements.find(
+    (statement) =>
+      ts.isFunctionDeclaration(statement) &&
+      statement.name?.text === "findRawZipEndRecord",
+  );
+  const endStatements = endRecordFunction?.body?.statements ?? [];
+  const offsetInitializer = variableInitializer(endStatements[0], "offset");
+  const signatureCondition = ts.isIfStatement(endStatements[1])
+    ? endStatements[1].expression
+    : undefined;
+  const commentInitializer = variableInitializer(
+    endStatements[2],
+    "commentLength",
+  );
+  const commentCondition = ts.isIfStatement(endStatements[3])
+    ? endStatements[3].expression
+    : undefined;
+  const finalReturn = endStatements[4];
+  const exactClassicEndRecord =
+    endStatements.length === 5 &&
+    offsetInitializer &&
+    isBinary(
+      offsetInitializer,
+      ts.SyntaxKind.MinusToken,
+      (node) => isProperty(node, "bytes", "length"),
+      (node) => isNumber(node, 22),
+    ) &&
+    signatureCondition &&
+    isBinary(
+      signatureCondition,
+      ts.SyntaxKind.ExclamationEqualsEqualsToken,
+      (node) =>
+        ts.isCallExpression(node) &&
+        isProperty(node.expression, "bytes", "readUInt32LE") &&
+        node.arguments.length === 1 &&
+        isIdentifier(node.arguments[0], "offset"),
+      (node) => isNumber(node, 0x06054b50),
+    ) &&
+    commentInitializer &&
+    ts.isCallExpression(commentInitializer) &&
+    isProperty(commentInitializer.expression, "bytes", "readUInt16LE") &&
+    commentInitializer.arguments.length === 1 &&
+    isBinary(
+      commentInitializer.arguments[0],
+      ts.SyntaxKind.PlusToken,
+      (node) => isIdentifier(node, "offset"),
+      (node) => isNumber(node, 20),
+    ) &&
+    commentCondition &&
+    isBinary(
+      commentCondition,
+      ts.SyntaxKind.BarBarToken,
+      (node) =>
+        isBinary(
+          node,
+          ts.SyntaxKind.ExclamationEqualsEqualsToken,
+          (left) => isIdentifier(left, "commentLength"),
+          (right) => isNumber(right, 0),
+        ),
+      (node) =>
+        isBinary(
+          node,
+          ts.SyntaxKind.ExclamationEqualsEqualsToken,
+          (left) =>
+            isBinary(
+              left,
+              ts.SyntaxKind.PlusToken,
+              (sum) =>
+                isBinary(
+                  sum,
+                  ts.SyntaxKind.PlusToken,
+                  (offset) => isIdentifier(offset, "offset"),
+                  (size) => isNumber(size, 22),
+                ),
+              (comment) => isIdentifier(comment, "commentLength"),
+            ),
+          (right) => isProperty(right, "bytes", "length"),
+        ),
+    ) &&
+    ts.isReturnStatement(finalReturn) &&
+    isIdentifier(finalReturn.expression, "offset");
+  if (!exactClassicEndRecord) {
+    portableAstFailure(
+      "requires a classic EOCD with zero archive comment at EOF",
+    );
+  }
+
   const expectedImports = new Map([
     ["node:crypto", ["createHash", "randomUUID"]],
     ["node:child_process", ["spawnSync"]],
@@ -872,7 +987,7 @@ function reviewPortableNodeAst(source) {
     ["plainObject", 2],
     ["publicationHook", 4],
     ["randomUUID", 4],
-    ["rawZipError", 24],
+    ["rawZipError", 25],
     ["readBoundedJson", 3],
     ["readFile", 7],
     ["readdir", 2],
@@ -932,7 +1047,6 @@ function reviewPortableNodeAst(source) {
     ["join", 6],
     ["keys", 1],
     ["map", 6],
-    ["max", 1],
     ["normalize", 2],
     ["parse", 2],
     ["push", 10],
@@ -999,10 +1113,9 @@ function reviewPortableNodeAst(source) {
     ["join", 6],
     ["key", 2],
     ["keys", 1],
-    ["length", 21],
+    ["length", 20],
     ["license", 1],
     ["map", 6],
-    ["max", 1],
     ["max_turns", 3],
     ["message", 1],
     ["name", 24],
@@ -1833,7 +1946,7 @@ if (
 const portableSourceSeals = new Map([
   [
     "scripts/package-portable.mjs",
-    "080def23093593f4b9fd9a01ffaad46302c70c0adbb6257bf63e1d9676715cb8",
+    "ba9da6599863f7dba9632fcc9261c74f7b8e2d7af76ff26b5e06bfbd43876058",
   ],
   [
     "scripts/compress-portable.ps1",
@@ -2852,10 +2965,13 @@ requireText("docs/methodology.md", [
   ["history recovery comparison normalization without migration", /写入历史.*恢复运行核对.*同条件比较.*不需要数据库迁移/si],
   ["existing low medium high remains readable", /已有 `low`、`medium`、`high` 历史.*仍可读取.*恢复.*比较/si],
   ["reported-model Unicode display policy", /1.?120.*`Cc`.*`Cf`.*`Default_Ignorable_Code_Point`/si],
+  ["target-aware default model sentinel", /只有.*Codex CLI.*Claude Code.*default.*ChatGPT 客户端.*Claude 客户端.*字面/si],
+  ["legacy effort safe display and report failure", /旧.*自定义推理档位.*推理档位不可显示.*公开 JSON\/HTML 报告.*失败关闭/si],
   ["shared target-aware effort policy", /schemas\/reasoning-effort-display\.json.*4.*8.*ChatGPT.*`low`.*轻度/si],
   ["runtime pack parser parity helper", /ability-pack-validator.*PackRegistry::parse.*PackLoader::load.*source.*staged.*pre-compression.*extracted/si],
   ["portable helper build-only boundary", /helper.*(?:build|构建).*payload/si],
   ["raw ZIP membership before extraction", /central directory.*Windows.*(?:member|成员).*(?:extract|提取)/si],
+  ["classic EOCD zero-comment EOF contract", /classic EOCD.*EOF.*22.*archive comment length.*0.*结束于 EOF/si],
 ]);
 const methodology = read("docs/methodology.md");
 if (/已知推理值保留输入大小写/.test(methodology)) {

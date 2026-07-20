@@ -158,7 +158,10 @@ function statusPresentation(status: RunStatus): {
 }
 
 function modelLabel(run: RunRecord): string {
-  return formatReportedModel(run.target.reportedModel);
+  return formatReportedModel(
+    run.target.kind,
+    run.target.reportedModel,
+  );
 }
 
 function technicalValue(value: string | null | undefined): string {
@@ -374,7 +377,12 @@ function ReportExportControls({ detail }: { detail: RunDetail }) {
                     </div>
                     <div>
                       <dt>用户填写模型</dt>
-                      <dd>{formatReportedModel(run.target.reportedModel)}</dd>
+                      <dd>
+                        {formatReportedModel(
+                          run.target.kind,
+                          run.target.reportedModel,
+                        )}
+                      </dd>
                     </div>
                     <div>
                       <dt>推理档位</dt>
