@@ -1591,7 +1591,7 @@ const workflowPaths = [
 const publicationWorkflowSeals = new Map([
   [
     ".github/workflows/release.yml",
-    "ce165a64435a551bd1fb43da7df0eeb99e3210cb0e329c6fae8516bcb9fcc2fc",
+    "ca7ec5eaccef18e5becda1dbd5f943cd8538429fd2c26c93029f6383d3b317e3",
   ],
   [
     ".github/workflows/pages.yml",
@@ -2003,22 +2003,28 @@ $config = Get-Content apps/desktop/src-tauri/tauri.conf.json -Raw | ConvertFrom-
 if ("v$($config.version)" -cne $tag) {
   throw "Release tag does not exactly match the Tauri application version."
 }`;
-const exactReleaseBody = `Windows 10/11 x64 v0.2 预览版。
+const exactReleaseBody = `Windows 10/11 x64 v0.2.1 预览版。
 
-**警告：安装程序未签名。** Windows SmartScreen 可能显示风险提示。
+**警告：安装程序和免安装 ZIP 均未签名。** Windows SmartScreen 可能显示风险提示。
 核心数据默认只保存在本机；真实 CLI 测试消耗运行者自己的订阅用量。
-下载后请使用随发布提供的 SHA256SUMS.txt 校验安装程序。`;
+下载后请使用随发布提供的 SHA256SUMS.txt 校验所有下载文件。`;
 const exactChecksumRun = `$files = Get-ChildItem target/release/bundle -Recurse -File |
-  Where-Object { $_.Extension -in ".exe", ".msi" } |
+  Where-Object { $_.Extension -in ".exe", ".msi", ".zip" } |
   Sort-Object FullName
 if (-not $files) {
-  throw "No Windows installer was produced; refusing to publish an empty checksum file."
+  throw "No Windows release asset was produced; refusing to publish an empty checksum file."
 }
 $lines = foreach ($file in $files) {
   $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
   "$hash  $($file.Name)"
 }
 Set-Content -LiteralPath SHA256SUMS.txt -Value $lines -Encoding utf8NoBOM`;
+const exactPortableUploadRun = `$version = $env:RELEASE_TAG.Substring(1)
+$portable = "target/release/bundle/portable/ability-radar_\${version}_windows-x64-portable.zip"
+if (-not (Test-Path -LiteralPath $portable -PathType Leaf)) {
+  throw "The exact portable archive is missing."
+}
+gh release upload $env:RELEASE_TAG $portable SHA256SUMS.txt --clobber`;
 const exactReleaseSteps = [
   {
     name: "Check out tagged revision",
@@ -2079,14 +2085,18 @@ const exactReleaseSteps = [
     extra: { id: "tauri" },
   },
   {
+    name: "Build portable archive from reviewed release output",
+    run: "npm run package:portable:from-build",
+  },
+  {
     name: "Generate SHA-256 checksums",
     run: exactChecksumRun,
     extra: { shell: "pwsh" },
   },
   {
-    name: "Upload checksums to the draft prerelease",
-    label: "checksum upload",
-    run: "gh release upload $env:RELEASE_TAG SHA256SUMS.txt --clobber",
+    name: "Upload portable archive and checksums to the draft prerelease",
+    label: "portable archive and checksum upload",
+    run: exactPortableUploadRun,
     env: { GH_TOKEN: "${{ github.token }}" },
     extra: { shell: "pwsh" },
   },
@@ -2273,6 +2283,12 @@ if (
 const expectedTauriResources = {
   "../../../benchmark-packs/": "benchmark-packs/",
 };
+if (
+  JSON.stringify(tauriConfig.bundle?.targets) !==
+  JSON.stringify(["nsis", "msi"])
+) {
+  fail("Tauri bundle targets must be exactly NSIS and MSI");
+}
 if (!exactObject(tauriConfig.bundle?.resources, expectedTauriResources)) {
   fail("Tauri resource allowlist must contain only the sealed benchmark packs");
 }
@@ -2300,6 +2316,7 @@ const site = requireText("site/index.html", [
   ["privacy link", /href="docs\/privacy\.md"/],
   ["security link", /href="docs\/security\.md"/],
   ["v0.2.1 prerelease link", /\/releases\/tag\/v0\.2\.1/],
+  ["v0.2.1 免安装 ZIP download copy", /v0\.2\.1 安装程序和免安装 ZIP/],
 ]);
 if (/\/releases\/latest/.test(site)) {
   fail("site/index.html must not link a prerelease download through /releases/latest");
@@ -2317,7 +2334,7 @@ for (const [label, pattern] of forbiddenSitePatterns) {
   if (pattern.test(site)) fail(`site/index.html contains forbidden ${label}`);
 }
 
-requireText("README.md", [
+const readme = requireText("README.md", [
   ["v0.2 Windows preview status", /v0\.2.*Windows.*预览/],
   ["exact client task count", /8\s*道/],
   ["exact CLI task count", /2\s*(?:个|项)/],
@@ -2325,9 +2342,17 @@ requireText("README.md", [
   ["runner billing boundary", /GitHub.*runner.*仓库所有者.*GitHub.*计划/si],
   ["volunteer real-CLI cost boundary", /自愿.*测试.*自己的订阅/si],
   ["checksum verification", /SHA-?256/],
+  ["npm ci and npm start commands", /```powershell\r?\nnpm ci\r?\nnpm start\r?\n```/],
+  ["package:portable command", /```powershell\r?\nnpm run package:portable\r?\n```/],
+  ["Tauri desktop development window", /npm start.*Tauri 桌面开发窗口/si],
+  ["normal browser is incomplete", /普通浏览器.*http:\/\/localhost:1420.*不是完整产品/si],
+  ["portable APPDATA location", /免安装 ZIP.*%APPDATA%\\com\.aiability\.radar/si],
   ["design link", /docs\/superpowers\/specs\/2026-07-17-ai-ability-radar-design\.md/],
   ["plan link", /docs\/superpowers\/plans\/2026-07-17-ai-ability-radar-desktop-mvp\.md/],
 ]);
+if (/normal browser is the complete product/i.test(readme)) {
+  fail("README.md must not describe localhost:1420 in a normal browser as the complete product");
+}
 requireText("docs/methodology.md", [
   ["category-equal weighting", /类别等权/],
   ["original first-party tasks", /原创.*第一方/],
@@ -2345,6 +2370,10 @@ requireText("docs/methodology.md", [
   ["pack schema version", /pack schema.*1/i],
   ["public report schema version", /public report schema.*1/i],
   ["backup schema version", /backup schema.*1/i],
+  ["provider effort matrix ChatGPT", /\| ChatGPT 客户端 \|[^|]*轻度[^|]*中[^|]*高[^|]*极高[^|]*最高[^|]*Ultra[^|]*原样填写[^|]*\|/],
+  ["provider effort matrix Claude", /\| Claude 客户端 \|[^|]*低[^|]*中[^|]*高[^|]*极高[^|]*最高[^|]*原样填写[^|]*\|/],
+  ["provider effort matrix Codex", /\| Codex CLI \|[^|]*`minimal`[^|]*`low`[^|]*`medium`[^|]*`high`[^|]*`xhigh`[^|]*`max`[^|]*`ultra`[^|]*自定义 \|/],
+  ["provider effort matrix Claude Code", /\| Claude Code \|[^|]*`low`[^|]*`medium`[^|]*`high`[^|]*`xhigh`[^|]*`max`[^|]*自定义 \|/],
 ]);
 for (const path of ["docs/privacy.md", "docs/security.md"]) {
   requireText(path, [
@@ -2369,6 +2398,20 @@ requireText("docs/troubleshooting.md", [
   ["SmartScreen", /SmartScreen/],
   ["interrupted recovery", /中断.*恢复/si],
   ["local app data placeholder", /%APPDATA%/],
+  ["npm shim checks with codex.cmd --version", /```powershell\r?\nGet-Command codex -All\r?\nwhere\.exe codex\r?\ncodex\.cmd --version\r?\n```/],
+  ["--version sends no model request", /`--version`.*不会发送模型请求/si],
+  ["in-app 重新检测 CLI path", /重新检测 CLI/],
+]);
+requireText("docs/release-checklist.md", [
+  ["portable archive gates", /免安装 ZIP.*Windows 10.*Windows 11/si],
+  ["portable APPDATA gate", /免安装 ZIP.*%APPDATA%\\com\.aiability\.radar/si],
+  ["outer checksum release assets", /外层 `SHA256SUMS\.txt`.*NSIS.*MSI.*portable ZIP/si],
+  ["release upload ownership", /Tauri action.*唯一.*安装程序上传者.*gh release upload/si],
+]);
+requireText("docs/test-matrix.md", [
+  ["Portable ZIP launch Windows matrix row", /^\| Portable ZIP launch \| Yes \| Yes \| No \| Yes \|$/m],
+  ["Portable APPDATA Windows matrix row", /^\| Portable data remains in `%APPDATA%\\com\.aiability\.radar` \| Yes \| Yes \| No \| Yes \|$/m],
+  ["Portable checksum Windows matrix row", /^\| Portable inner checksum verification \| Yes \| Yes \| Yes \| Yes \|$/m],
 ]);
 requireText("SECURITY.md", [
   ["private GitHub advisory reporting", /Security.*Advisory.*Report a vulnerability/si],
@@ -2381,6 +2424,7 @@ requireText(".github/ISSUE_TEMPLATE/bug.yml", [
   ["task pack version", /题包版本/],
   ["redacted category", /脱敏.*错误类别/],
   ["raw log warning", /不要.*原始日志.*(?:令牌|token)/si],
+  ["v0.2.1 app version example", /placeholder:\s*例如 0\.2\.1/],
 ]);
 requireText(".github/pull_request_template.md", [
   ["tests checklist", /测试.*(?:新增|更新)/],

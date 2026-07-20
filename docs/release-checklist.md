@@ -32,6 +32,9 @@ and Windows 11 VM evidence is still Pending.
 - [ ] cargo fmt, clippy, tests, npm tests, build, and axe pass.
 - [ ] Windows 10 and 11 acceptance matrix is complete.
 - [ ] NSIS and MSI install, launch, and uninstall.
+- [ ] 免安装 ZIP 在干净的 Windows 10 和 Windows 11 x64 VM 中解压并启动。
+- [ ] 免安装 ZIP 不创建安装项，数据仍写入 `%APPDATA%\com.aiability.radar`。
+- [ ] 免安装 ZIP 内部 `SHA256SUMS.txt` 与解压后的文件逐一匹配。
 - [ ] 100–200% scaling and keyboard-only operation pass.
 - [ ] Offline client-only use works without Node.js.
 
@@ -39,7 +42,9 @@ and Windows 11 VM evidence is still Pending.
 
 - [ ] Version matches tag and documentation.
 - [ ] THIRD_PARTY_NOTICES is current.
-- [ ] SHA256SUMS.txt matches every installer.
-- [ ] Draft notes state unsigned preview / SmartScreen behavior.
+- [ ] 外层 `SHA256SUMS.txt` 覆盖 NSIS、MSI 和带精确版本号的 portable ZIP。
+- [ ] Tauri action 是唯一的安装程序上传者；精确的 `gh release upload` 只上传 portable ZIP 和校验文件。
+- [ ] 免安装归档只在 Tauri action 创建草稿预发布之后构建。
+- [ ] 发布说明明确安装程序和免安装 ZIP 均未签名，并要求校验所有下载文件。
 - [ ] Updater remains disabled.
 - [ ] Pages links point to the correct repository and release.

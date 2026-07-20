@@ -69,31 +69,39 @@ jobs:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: AI 能力雷达 ${{ env.RELEASE_TAG }}
           releaseBody: |
-            Windows 10/11 x64 v0.2 预览版。
+            Windows 10/11 x64 v0.2.1 预览版。
 
-            **警告：安装程序未签名。** Windows SmartScreen 可能显示风险提示。
+            **警告：安装程序和免安装 ZIP 均未签名。** Windows SmartScreen 可能显示风险提示。
             核心数据默认只保存在本机；真实 CLI 测试消耗运行者自己的订阅用量。
-            下载后请使用随发布提供的 SHA256SUMS.txt 校验安装程序。
+            下载后请使用随发布提供的 SHA256SUMS.txt 校验所有下载文件。
           releaseDraft: true
           prerelease: true
           uploadUpdaterJson: false
           uploadUpdaterSignatures: false
+      - name: Build portable archive from reviewed release output
+        run: npm run package:portable:from-build
       - name: Generate SHA-256 checksums
         shell: pwsh
         run: |
           $files = Get-ChildItem target/release/bundle -Recurse -File |
-            Where-Object { $_.Extension -in ".exe", ".msi" } |
+            Where-Object { $_.Extension -in ".exe", ".msi", ".zip" } |
             Sort-Object FullName
           if (-not $files) {
-            throw "No Windows installer was produced; refusing to publish an empty checksum file."
+            throw "No Windows release asset was produced; refusing to publish an empty checksum file."
           }
           $lines = foreach ($file in $files) {
             $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
             "$hash  $($file.Name)"
           }
           Set-Content -LiteralPath SHA256SUMS.txt -Value $lines -Encoding utf8NoBOM
-      - name: Upload checksums to the draft prerelease
+      - name: Upload portable archive and checksums to the draft prerelease
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload $env:RELEASE_TAG SHA256SUMS.txt --clobber
+        run: |
+          $version = $env:RELEASE_TAG.Substring(1)
+          $portable = "target/release/bundle/portable/ability-radar_${version}_windows-x64-portable.zip"
+          if (-not (Test-Path -LiteralPath $portable -PathType Leaf)) {
+            throw "The exact portable archive is missing."
+          }
+          gh release upload $env:RELEASE_TAG $portable SHA256SUMS.txt --clobber

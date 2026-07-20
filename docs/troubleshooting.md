@@ -5,8 +5,18 @@
 
 ## CLI 未找到
 
-确认所选 CLI 已由你本人安装，且在新开的 PowerShell 中能通过其官方只读版本命令被系统找到。然后
-完全退出并重启应用，让它继承更新后的 `PATH`。应用不会替你安装真实 CLI。
+Windows 上已确认的一种症状是：CLI 通过 npm 安装，PowerShell 能找到 `codex`，但 npm 生成的
+`codex.cmd` shim 没有被旧版检测路径识别。先在新开的 PowerShell 中运行以下只读检查：
+
+```powershell
+Get-Command codex -All
+where.exe codex
+codex.cmd --version
+```
+
+这些命令只检查命令解析和本地版本；`--version` 不会发送模型请求，也不会消耗模型订阅用量。
+不要为排错运行真实提示词。确认 CLI 路径和版本正常后，在应用的编程 CLI 区域点击
+“重新检测 CLI”，无需重启应用。应用不会替你安装真实 CLI。
 
 ## 未登录或登录失效
 
@@ -31,8 +41,9 @@ turn 上限或输出预算耗尽属于 agent-budget failure，会按既定预算
 
 ## SmartScreen 提示
 
-v0.2 预览安装程序未签名，SmartScreen 可能显示“未知发布者”。只从仓库 Releases 下载，并在继续前
-用 `Get-FileHash -Algorithm SHA256` 对照 `SHA256SUMS.txt`。如果校验值不同，不要运行该文件。
+v0.2.1 预览安装程序和免安装 ZIP 均未签名，SmartScreen 可能显示“未知发布者”。只从仓库 Releases
+下载，并在继续前用 `Get-FileHash -Algorithm SHA256` 对照 `SHA256SUMS.txt`。如果校验值不同，
+不要运行该文件。
 
 ## 中断与恢复
 

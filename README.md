@@ -28,17 +28,19 @@
 
 ## 安装与校验
 
-1. 从仓库的 **Releases** 页面下载 v0.2 Windows x64 预览安装程序和 `SHA256SUMS.txt`。
+1. 从仓库的 **Releases** 页面下载 v0.2.1 Windows x64 预览安装程序或
+   `ability-radar_0.2.1_windows-x64-portable.zip`，并下载 `SHA256SUMS.txt`。
 2. 在 PowerShell 中计算下载文件的 SHA-256：
 
    ```powershell
    Get-FileHash -Algorithm SHA256 -LiteralPath .\ability-radar_0.2.1_x64-setup.exe
    ```
 
-3. 将输出与 `SHA256SUMS.txt` 中同名文件的值逐字符比较。
+3. 将输出与 `SHA256SUMS.txt` 中同名文件的值逐字符比较。下载多个文件时逐一校验。
 
-预览安装程序未签名，Windows SmartScreen 可能提示“未知发布者”。校验值证明下载内容与草稿发布中
-上传的构建产物一致，但不替代商业代码签名。项目当前没有 Tauri updater 插件或更新清单。
+预览安装程序和免安装 ZIP 均未签名，Windows SmartScreen 可能提示“未知发布者”。校验值证明下载
+内容与草稿发布中上传的构建产物一致，但不替代商业代码签名。免安装 ZIP 不创建安装/卸载项，
+历史和设置仍写入 `%APPDATA%\com.aiability.radar`。项目当前没有 Tauri updater 插件或更新清单。
 
 ## 本地开发
 
@@ -49,10 +51,25 @@
 - `rust-toolchain.toml` 指定的 Rust 工具链；
 - Tauri Windows 构建所需的 Microsoft C++ Build Tools 与 WebView2。
 
-常用命令：
+安装依赖并打开完整的 Tauri 桌面开发窗口：
 
 ```powershell
 npm ci
+npm start
+```
+
+`npm start` 会打开 Tauri 桌面开发窗口。单独在普通浏览器中打开 `http://localhost:1420`
+不是完整产品：浏览器页面没有经过审查的 Tauri IPC 和本地桌面能力。
+
+从当前源码构建 release 可执行文件并生成 Windows x64 免安装 ZIP：
+
+```powershell
+npm run package:portable
+```
+
+其他常用检查命令：
+
+```powershell
 npm run validate:repository
 npm test
 npm run build

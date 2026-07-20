@@ -596,6 +596,112 @@ test("preview CTA must target the exact v0.2.1 release tag", () => {
   assertRejected(result, /releases\/tag\/v0\.2\.1|releases\/latest/);
 });
 
+test("README requires the exact Tauri source start commands", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, "README.md"), (source) =>
+      source.replace(
+        "npm ci\nnpm start",
+        "npm install\nnpm start",
+      ));
+  });
+  assertRejected(result, /README\.md.*npm ci.*npm start/si);
+});
+
+test("README rejects treating the Vite URL as the complete product", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, "README.md"), (source) =>
+      `${source}\nOpening http://localhost:1420 in a normal browser is the complete product.\n`);
+  });
+  assertRejected(result, /README\.md.*localhost:1420.*complete product|完整产品/si);
+});
+
+test("README requires the portable packaging command", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, "README.md"), (source) =>
+      source.replace(
+        "npm run package:portable",
+        "npm run package:portable-old",
+      ));
+  });
+  assertRejected(result, /README\.md.*package:portable/i);
+});
+
+test("troubleshooting requires the confirmed npm shim checks", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, "docs", "troubleshooting.md"), (source) =>
+      source.replace("codex.cmd --version", "codex --version"));
+  });
+  assertRejected(result, /troubleshooting\.md.*npm.*shim|codex\.cmd --version/si);
+});
+
+test("troubleshooting must say the version check sends no model request", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, "docs", "troubleshooting.md"), (source) =>
+      source.replace(
+        /`--version`[^\n]*(?:不会|不发送)[^\n]*(?:模型请求|model request)[^\n]*/i,
+        "",
+      ));
+  });
+  assertRejected(result, /troubleshooting\.md.*--version.*model request|模型请求/si);
+});
+
+test("troubleshooting requires the in-app CLI recheck path", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, "docs", "troubleshooting.md"), (source) =>
+      source.replace("重新检测 CLI", "重新启动应用"));
+  });
+  assertRejected(result, /troubleshooting\.md.*重新检测 CLI/);
+});
+
+test("methodology requires all four provider effort matrices", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, "docs", "methodology.md"), (source) =>
+      source.replace(
+        "| Codex CLI | CLI 默认、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`、`ultra`，以及自定义 |",
+        "| Codex CLI | `low`、`medium`、`high` |",
+      ));
+  });
+  assertRejected(result, /methodology\.md.*provider effort matrix|推理档位矩阵/i);
+});
+
+test("release checklist requires portable archive gates", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, "docs", "release-checklist.md"), (source) =>
+      source.replace(
+        /- \[ \] 免安装 ZIP[^\n]*\n/g,
+        "",
+      ));
+  });
+  assertRejected(result, /release-checklist\.md.*portable|免安装 ZIP/si);
+});
+
+test("Windows acceptance matrix requires portable launch rows", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, "docs", "test-matrix.md"), (source) =>
+      source.replace(
+        /^\| Portable ZIP launch[^\n]*\n/gm,
+        "",
+      ));
+  });
+  assertRejected(result, /test-matrix\.md.*Portable ZIP launch/i);
+});
+
+test("site download copy includes the v0.2.1 portable ZIP", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, "site", "index.html"), (source) =>
+      source.replace("v0.2.1 安装程序和免安装 ZIP", "v0.2.1 安装程序"));
+  });
+  assertRejected(result, /site\/index\.html.*v0\.2\.1.*免安装 ZIP/si);
+});
+
+test("bug report example requires version 0.2.1", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, ".github", "ISSUE_TEMPLATE", "bug.yml"), (source) =>
+      source.replace("例如 0.2.1", "例如 0.2.0"));
+  });
+  assertRejected(result, /bug\.yml.*0\.2\.1/i);
+});
+
 test("npm license metadata rejects missing resolved and integrity lock provenance", () => {
   const result = runNegativeFixture((fixture) => {
     const reportPath = join(
@@ -1380,12 +1486,85 @@ test("Tauri resource allowlist rejects unrelated bundle roots", () => {
   assertRejected(result, /Tauri resource allowlist/i);
 });
 
+test("Tauri release bundle targets are exactly NSIS and MSI", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(
+      join(fixture, "apps", "desktop", "src-tauri", "tauri.conf.json"),
+      (source) =>
+        source.replace(
+          '"targets": ["nsis", "msi"]',
+          '"targets": ["nsis", "msi", "updater"]',
+        ),
+    );
+  });
+  assertRejected(result, /Tauri bundle targets.*NSIS.*MSI/i);
+});
+
+test("release checksum set must include the portable ZIP", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, ".github", "workflows", "release.yml"), (source) =>
+      source.replace(
+        'Where-Object { $_.Extension -in ".exe", ".msi", ".zip" }',
+        'Where-Object { $_.Extension -in ".exe", ".msi" }',
+      ));
+  });
+  assertRejected(result, /checksum.*zip|Generate SHA-256 checksums.*exact/i);
+});
+
+for (const [label, uploadSource] of [
+  ["wildcard", '"target/release/bundle/*"'],
+  ["raw target directory", "target/release"],
+]) {
+  test(`portable archive upload rejects a ${label} source`, () => {
+    const result = runNegativeFixture((fixture) => {
+      replace(join(fixture, ".github", "workflows", "release.yml"), (source) =>
+        source.replace(
+          "$portable SHA256SUMS.txt --clobber",
+          `${uploadSource} SHA256SUMS.txt --clobber`,
+        ));
+    });
+    assertRejected(
+      result,
+      /portable archive.*upload.*exact|release step sequence.*exact/i,
+    );
+  });
+}
+
+test("portable archive build must follow the Tauri draft release", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, ".github", "workflows", "release.yml"), (source) => {
+      const portable =
+        "      - name: Build portable archive from reviewed release output\n        run: npm run package:portable:from-build\n";
+      return source.includes(portable)
+        ? source
+            .replace(portable, "")
+            .replace("      - name: Build unsigned draft prerelease\n", `${portable}      - name: Build unsigned draft prerelease\n`)
+        : source;
+    });
+  });
+  assertRejected(result, /release step sequence.*exact|portable.*after.*Tauri/i);
+});
+
+test("uploaded portable ZIP filename must derive from the manifest version", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, ".github", "workflows", "release.yml"), (source) =>
+      source.replace(
+        "ability-radar_${version}_windows-x64-portable.zip",
+        "ability-radar_0.2.0_windows-x64-portable.zip",
+      ));
+  });
+  assertRejected(
+    result,
+    /portable archive.*upload.*exact|manifest version|release step sequence.*exact/i,
+  );
+});
+
 test("checksum upload step rejects an extra release upload source", () => {
   const result = runNegativeFixture((fixture) => {
     replace(join(fixture, ".github", "workflows", "release.yml"), (source) =>
       source.replace(
-        "        run: gh release upload $env:RELEASE_TAG SHA256SUMS.txt --clobber",
-        "        run: |\n          gh release upload $env:RELEASE_TAG SHA256SUMS.txt --clobber\n          gh release upload $env:RELEASE_TAG target/release/ability-radar.exe --clobber",
+        "          gh release upload $env:RELEASE_TAG $portable SHA256SUMS.txt --clobber",
+        "          gh release upload $env:RELEASE_TAG $portable SHA256SUMS.txt --clobber\n          gh release upload $env:RELEASE_TAG target/release/ability-radar.exe --clobber",
       ),
     );
   });
@@ -1411,8 +1590,8 @@ test("checksum upload owner rejects conditional bypass controls", () => {
   const result = runNegativeFixture((fixture) => {
     replace(join(fixture, ".github", "workflows", "release.yml"), (source) =>
       source.replace(
-        "      - name: Upload checksums to the draft prerelease\n        shell:",
-        "      - name: Upload checksums to the draft prerelease\n        if: false\n        shell:",
+        "      - name: Upload portable archive and checksums to the draft prerelease\n        shell:",
+        "      - name: Upload portable archive and checksums to the draft prerelease\n        if: false\n        shell:",
       ),
     );
   });
@@ -1432,8 +1611,8 @@ test("release workflow rejects an extra gh api upload step with token ownership"
   const result = runNegativeFixture((fixture) => {
     replace(join(fixture, ".github", "workflows", "release.yml"), (source) =>
       source.replace(
-        "      - name: Upload checksums to the draft prerelease",
-        "      - name: Alternate API upload\n        env:\n          GH_TOKEN: ${{ github.token }}\n        run: gh api repos/${{ github.repository }}/releases\n      - name: Upload checksums to the draft prerelease",
+        "      - name: Upload portable archive and checksums to the draft prerelease",
+        "      - name: Alternate API upload\n        env:\n          GH_TOKEN: ${{ github.token }}\n        run: gh api repos/${{ github.repository }}/releases\n      - name: Upload portable archive and checksums to the draft prerelease",
       ),
     );
   });
@@ -1528,4 +1707,15 @@ test("CI installer upload owner rejects continue-on-error controls", () => {
     );
   });
   assertRejected(result, /CI artifact.*fields|control/i);
+});
+
+test("CI debug installer path rejects the previous 0.2.0 version", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, ".github", "workflows", "ci.yml"), (source) =>
+      source.replace(
+        "target/debug/bundle/nsis/ability-radar_0.2.1_x64-setup.exe",
+        "target/debug/bundle/nsis/ability-radar_0.2.0_x64-setup.exe",
+      ));
+  });
+  assertRejected(result, /CI artifact.*0\.2\.1|exact debug NSIS installer/i);
 });

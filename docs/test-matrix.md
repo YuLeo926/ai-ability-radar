@@ -9,6 +9,9 @@ and a pass/fail evidence link. Code inspection is never a manual pass.
 |---|---:|---:|---:|---:|
 | Install / uninstall NSIS | Yes | Yes | No | Yes |
 | MSI installation | Yes | Yes | No | Yes |
+| Portable ZIP launch | Yes | Yes | No | Yes |
+| Portable data remains in `%APPDATA%\com.aiability.radar` | Yes | Yes | No | Yes |
+| Portable inner checksum verification | Yes | Yes | Yes | Yes |
 | Client run without Node.js | Yes | Yes | Partial | Yes |
 | Codex fake CLI 2/2 | Yes | Yes | Yes | Yes |
 | Claude fake CLI 2/2 | Yes | Yes | Yes | Yes |
@@ -40,6 +43,9 @@ applicable manual cell therefore remains Pending.
 |---|---|---|
 | Install / uninstall NSIS | Pending — tester/date/app commit/OS build/pass-fail link: not recorded; clean VM unavailable | Pending — tester/date/app commit/OS build/pass-fail link: not recorded; clean VM unavailable |
 | MSI installation | Pending — tester/date/app commit/OS build/pass-fail link: not recorded; clean VM unavailable | Pending — tester/date/app commit/OS build/pass-fail link: not recorded; clean VM unavailable |
+| Portable ZIP launch | Pending — tester/date/app commit/OS build/pass-fail link: not recorded; clean VM unavailable | Pending — tester/date/app commit/OS build/pass-fail link: not recorded; clean VM unavailable |
+| Portable data remains in `%APPDATA%\com.aiability.radar` | Pending — tester/date/app commit/OS build/pass-fail link: not recorded; clean VM unavailable | Pending — tester/date/app commit/OS build/pass-fail link: not recorded; clean VM unavailable |
+| Portable inner checksum verification | Pending — tester/date/app commit/OS build/pass-fail link: not recorded; clean VM unavailable | Pending — tester/date/app commit/OS build/pass-fail link: not recorded; clean VM unavailable |
 | Client run without Node.js | Pending — tester/date/app commit/OS build/pass-fail link: not recorded; clean VM unavailable | Pending — tester/date/app commit/OS build/pass-fail link: not recorded; clean VM unavailable |
 | Codex fake CLI 2/2 | Pending — tester/date/app commit/OS build/pass-fail link: not recorded; clean VM unavailable | Pending — tester/date/app commit/OS build/pass-fail link: not recorded; clean VM unavailable |
 | Claude fake CLI 2/2 | Pending — tester/date/app commit/OS build/pass-fail link: not recorded; clean VM unavailable | Pending — tester/date/app commit/OS build/pass-fail link: not recorded; clean VM unavailable |
