@@ -165,8 +165,9 @@ pub(crate) fn discover_provider_commands(
         }
     }
 
-    candidates.dedup_by(|left, right| {
-        left.program == right.program && left.prefix_args == right.prefix_args
+    let mut seen = std::collections::HashSet::new();
+    candidates.retain(|candidate| {
+        seen.insert((candidate.program.clone(), candidate.prefix_args.clone()))
     });
     Ok(LaunchDiscovery {
         candidates,
@@ -265,6 +266,34 @@ mod tests {
         assert_eq!(discovery.candidates.len(), 2);
         assert_eq!(discovery.candidates[0].source, LaunchSource::ReviewedNpm);
         assert_eq!(discovery.candidates[1].source, LaunchSource::NativeExe);
+    }
+
+    #[test]
+    fn duplicate_path_directory_keeps_only_first_native_and_reviewed_npm_candidates() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("provider-bin");
+        std::fs::create_dir_all(directory.join("node_modules/@openai/codex/bin")).unwrap();
+        std::fs::write(directory.join("codex.cmd"), "@echo off").unwrap();
+        std::fs::write(
+            directory.join("node_modules/@openai/codex/bin/codex.js"),
+            "console.log('fake')",
+        )
+        .unwrap();
+        write_package_metadata(
+            &directory.join("node_modules/@openai/codex"),
+            "@openai/codex",
+            "codex",
+            "bin/codex.js",
+        );
+        write_executable(&directory.join("codex.exe"));
+        write_executable(&directory.join("node.exe"));
+        let path = std::env::join_paths([&directory, &directory]).unwrap();
+
+        let discovery = discover_provider_commands("codex", Some(&path)).unwrap();
+
+        assert_eq!(discovery.candidates.len(), 2);
+        assert_eq!(discovery.candidates[0].source, LaunchSource::NativeExe);
+        assert_eq!(discovery.candidates[1].source, LaunchSource::ReviewedNpm);
     }
 
     #[test]
