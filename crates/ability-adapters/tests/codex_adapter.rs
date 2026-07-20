@@ -7,7 +7,7 @@ use ability_core::FailureKind;
 use async_trait::async_trait;
 use std::collections::VecDeque;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Semaphore;
@@ -61,7 +61,7 @@ struct OrderedCandidateRunner {
 impl OrderedCandidateRunner {
     fn execution_used_reviewed_npm(&self) -> bool {
         self.seen.lock().unwrap().iter().any(|spec| {
-            spec.program == PathBuf::from("node.exe")
+            spec.program == Path::new("node.exe")
                 && spec.args.first().map(String::as_str)
                     == Some("npm/node_modules/@openai/codex/bin/codex.js")
                 && spec.args.get(1).map(String::as_str) == Some("exec")
@@ -77,7 +77,7 @@ impl ProcessRunner for OrderedCandidateRunner {
         _cancellation: CancellationToken,
     ) -> Result<ProcessOutput, ProcessError> {
         self.seen.lock().unwrap().push(spec.clone());
-        if spec.program == PathBuf::from("windows-app/codex.exe") {
+        if spec.program == Path::new("windows-app/codex.exe") {
             return Err(ProcessError::Spawn(io::Error::from(
                 io::ErrorKind::PermissionDenied,
             )));
@@ -187,7 +187,7 @@ impl ProcessRunner for ConcurrentDetectionRunner {
         _cancellation: CancellationToken,
     ) -> Result<ProcessOutput, ProcessError> {
         if spec.args.last().map(String::as_str) == Some("--version") {
-            if spec.program == PathBuf::from("first-codex.exe") {
+            if spec.program == Path::new("first-codex.exe") {
                 if self.first_version_calls.fetch_add(1, Ordering::SeqCst) == 0 {
                     return Ok(ProcessOutput {
                         exit_code: Some(0),
@@ -209,7 +209,7 @@ impl ProcessRunner for ConcurrentDetectionRunner {
         }
 
         if spec.args.last().map(String::as_str) == Some("status") {
-            if spec.program == PathBuf::from("first-codex.exe") {
+            if spec.program == Path::new("first-codex.exe") {
                 self.first_auth_started.add_permits(1);
                 self.release_first_auth.acquire().await.unwrap().forget();
             }
