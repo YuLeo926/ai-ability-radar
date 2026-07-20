@@ -37,6 +37,7 @@ impl CodexAdapter {
             launch: Mutex::new(Some(LaunchCommand {
                 program: program.into(),
                 prefix_args,
+                source: LaunchSource::NativeExe,
             })),
         }
     }
@@ -180,11 +181,7 @@ fn unavailable(kind: TargetKind) -> TargetAvailability {
 }
 
 fn launch_source(launch: &LaunchCommand) -> LaunchSource {
-    if launch.prefix_args.is_empty() {
-        LaunchSource::NativeExe
-    } else {
-        LaunchSource::ReviewedNpm
-    }
+    launch.source
 }
 
 fn execution_spec(launch: &LaunchCommand, request: ExecutionRequest) -> ProcessSpec {

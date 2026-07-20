@@ -124,6 +124,7 @@ impl ProcessRunner for TokioProcessRunner {
             crate::command_locator::LaunchCommand {
                 program: resolve_from_parent_path(&spec.program),
                 prefix_args: Vec::new(),
+                source: crate::LaunchSource::NativeExe,
             }
         } else {
             let effective_path = effective_inherited_path(&spec.env);
