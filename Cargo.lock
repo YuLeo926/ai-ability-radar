@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "ability-adapters"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ability-core",
  "async-trait",
@@ -21,7 +21,7 @@ dependencies = [
 
 [[package]]
 name = "ability-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chrono",
  "jsonschema",
@@ -39,7 +39,7 @@ dependencies = [
 
 [[package]]
 name = "ability-radar"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ability-adapters",
  "ability-core",

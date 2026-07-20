@@ -1,63 +1,147 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import {
+  copyFile,
+  lstat,
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { stagePortable } from "./package-portable.mjs";
 
-test("stages one rooted no-install package with deterministic checksums", async () => {
+const scriptsDir = dirname(fileURLToPath(import.meta.url));
+const packageScript = join(scriptsDir, "package-portable.mjs");
+const compressorScript = join(scriptsDir, "compress-portable.ps1");
+const fileContents = new Map([
+  ["README.txt", "no install\n"],
+  ["ability-radar.exe", "fake-exe"],
+  ["benchmark-packs/client-quick-v1/manifest.json", "{}\n"],
+  ["benchmark-packs/client-quick-v1/payload.txt", "alpha\n"],
+  ["benchmark-packs/cli-quick-v1/manifest.json", "{}\n"],
+  ["benchmark-packs/registry.json", '{"schema_version":1,"packs":[]}\n'],
+]);
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+async function createFixture({ cli = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "ability-radar-portable-"));
+  const repoRoot = join(root, "repo");
+  const targetDir = cli
+    ? join(repoRoot, "target", "release")
+    : join(root, "target", "release");
+  const bundleDir = join(targetDir, "bundle", "portable");
+  await mkdir(join(repoRoot, "packaging", "windows-portable"), {
+    recursive: true,
+  });
+  await mkdir(join(targetDir, "benchmark-packs", "client-quick-v1"), {
+    recursive: true,
+  });
+  await mkdir(join(targetDir, "benchmark-packs", "cli-quick-v1"), {
+    recursive: true,
+  });
+  await writeFile(join(targetDir, "ability-radar.exe"), "fake-exe");
+  await writeFile(
+    join(targetDir, "benchmark-packs", "registry.json"),
+    '{"schema_version":1,"packs":[]}\n',
+  );
+  await writeFile(
+    join(targetDir, "benchmark-packs", "client-quick-v1", "manifest.json"),
+    "{}\n",
+  );
+  await writeFile(
+    join(targetDir, "benchmark-packs", "client-quick-v1", "payload.txt"),
+    "alpha\n",
+  );
+  await writeFile(
+    join(targetDir, "benchmark-packs", "cli-quick-v1", "manifest.json"),
+    "{}\n",
+  );
+  await writeFile(
+    join(repoRoot, "packaging", "windows-portable", "README.txt"),
+    "no install\n",
+  );
+  if (cli) {
+    await mkdir(join(repoRoot, "scripts"), { recursive: true });
+    await copyFile(packageScript, join(repoRoot, "scripts", "package-portable.mjs"));
+    await copyFile(
+      compressorScript,
+      join(repoRoot, "scripts", "compress-portable.ps1"),
+    );
+    await writeFile(
+      join(repoRoot, "package.json"),
+      '{"name":"portable-fixture","version":"0.2.1","private":true}\n',
+    );
+  }
+  return { root, repoRoot, targetDir, bundleDir };
+}
+
+async function entriesUnder(root, current = root) {
+  const result = [];
+  for (const entry of await readdir(current, { withFileTypes: true })) {
+    const path = join(current, entry.name);
+    const name = relative(root, path).replaceAll("\\", "/");
+    if (entry.isDirectory()) {
+      result.push(`${name}/`, ...await entriesUnder(root, path));
+    } else {
+      result.push(name);
+    }
+  }
+  return result.sort();
+}
+
+function runCli(repoRoot) {
+  return spawnSync(process.execPath, [join(repoRoot, "scripts", "package-portable.mjs")], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
+}
+
+test("stages the exact rooted tree and complete deterministic checksums", async () => {
+  const fixture = await createFixture();
   try {
-    const repoRoot = join(root, "repo");
-    const targetDir = join(root, "target", "release");
-    const bundleDir = join(targetDir, "bundle", "portable");
-    await mkdir(join(repoRoot, "packaging", "windows-portable"), {
-      recursive: true,
-    });
-    await mkdir(join(targetDir, "benchmark-packs", "client-quick-v1"), {
-      recursive: true,
-    });
-    await mkdir(join(targetDir, "benchmark-packs", "cli-quick-v1"), {
-      recursive: true,
-    });
-    await writeFile(join(targetDir, "ability-radar.exe"), "fake-exe");
-    await writeFile(
-      join(targetDir, "benchmark-packs", "registry.json"),
-      '{"schema_version":1,"packs":[]}\n',
-    );
-    await writeFile(
-      join(targetDir, "benchmark-packs", "client-quick-v1", "manifest.json"),
-      "{}\n",
-    );
-    await writeFile(
-      join(targetDir, "benchmark-packs", "cli-quick-v1", "manifest.json"),
-      "{}\n",
-    );
-    await writeFile(
-      join(repoRoot, "packaging", "windows-portable", "README.txt"),
-      "no install\n",
-    );
-
-    const result = await stagePortable({
-      repoRoot,
-      targetDir,
-      bundleDir,
-      version: "0.2.1",
-    });
-
-    assert.equal(
-      result.archivePath,
-      join(bundleDir, "ability-radar_0.2.1_windows-x64-portable.zip"),
-    );
-    const checksums = await readFile(
-      join(result.stageRoot, "SHA256SUMS.txt"),
+    const first = await stagePortable({ ...fixture, version: "0.2.1" });
+    assert.deepEqual(await entriesUnder(first.stageRoot), [
+      "README.txt",
+      "SHA256SUMS.txt",
+      "ability-radar.exe",
+      "benchmark-packs/",
+      "benchmark-packs/cli-quick-v1/",
+      "benchmark-packs/cli-quick-v1/manifest.json",
+      "benchmark-packs/client-quick-v1/",
+      "benchmark-packs/client-quick-v1/manifest.json",
+      "benchmark-packs/client-quick-v1/payload.txt",
+      "benchmark-packs/registry.json",
+    ]);
+    const expectedChecksums = [...fileContents]
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .map(([name, contents]) => `${sha256(contents)}  ${name}`)
+      .join("\n") + "\n";
+    const firstChecksums = await readFile(
+      join(first.stageRoot, "SHA256SUMS.txt"),
       "utf8",
     );
-    assert.match(checksums, /  ability-radar\.exe$/m);
-    assert.match(checksums, /  benchmark-packs\/registry\.json$/m);
-    assert.doesNotMatch(checksums, /SHA256SUMS\.txt/);
+    assert.equal(firstChecksums, expectedChecksums);
+    assert.doesNotMatch(firstChecksums, /SHA256SUMS\.txt/);
+
+    const second = await stagePortable({ ...fixture, version: "0.2.1" });
+    assert.equal(
+      await readFile(join(second.stageRoot, "SHA256SUMS.txt"), "utf8"),
+      firstChecksums,
+    );
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await rm(fixture.root, { recursive: true, force: true });
   }
 });
 
@@ -72,3 +156,197 @@ test("refuses an output directory outside the selected target tree", async () =>
     /inside target directory/,
   );
 });
+
+test("rejects invalid or path-shaped versions inside stagePortable", async () => {
+  const fixture = await createFixture();
+  try {
+    for (const version of [
+      "../0.2.1",
+      "0.2.1/escape",
+      "0.2.1\\escape",
+      "v0.2.1",
+      "01.2.3",
+      "0.2",
+      "0.2.1-beta",
+      "",
+    ]) {
+      await assert.rejects(
+        stagePortable({ ...fixture, version }),
+        /strict semantic version/,
+        version,
+      );
+    }
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("rejects a junction in the selected target path before reading inputs", async () => {
+  const fixture = await createFixture();
+  try {
+    const realTarget = join(fixture.root, "real-target");
+    await rename(fixture.targetDir, realTarget);
+    await symlink(realTarget, fixture.targetDir, "junction");
+    await assert.rejects(
+      stagePortable({ ...fixture, version: "0.2.1" }),
+      /indirection|reparse|symbolic link/i,
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("rejects a junction in the README input path", async () => {
+  const fixture = await createFixture();
+  try {
+    const readmeParent = join(
+      fixture.repoRoot,
+      "packaging",
+      "windows-portable",
+    );
+    const realReadmeParent = join(fixture.root, "real-readme");
+    await rename(readmeParent, realReadmeParent);
+    await symlink(realReadmeParent, readmeParent, "junction");
+    await assert.rejects(
+      stagePortable({ ...fixture, version: "0.2.1" }),
+      /indirection|reparse|symbolic link/i,
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("rejects a recursive benchmark-pack junction", async () => {
+  const fixture = await createFixture();
+  try {
+    const outside = join(fixture.root, "outside-pack");
+    await mkdir(outside);
+    await writeFile(join(outside, "payload.txt"), "outside\n");
+    await symlink(
+      outside,
+      join(fixture.targetDir, "benchmark-packs", "linked"),
+      "junction",
+    );
+    await assert.rejects(
+      stagePortable({ ...fixture, version: "0.2.1" }),
+      /indirection|reparse|symbolic link/i,
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("rejects junctioned bundle and stage roots before recursive removal", async () => {
+  for (const kind of ["bundle", "stage"]) {
+    const fixture = await createFixture();
+    try {
+      const outside = join(fixture.root, `outside-${kind}`);
+      await mkdir(outside);
+      if (kind === "bundle") {
+        await mkdir(dirname(fixture.bundleDir), { recursive: true });
+        await symlink(outside, fixture.bundleDir, "junction");
+      } else {
+        await mkdir(fixture.bundleDir, { recursive: true });
+        await symlink(outside, join(fixture.bundleDir, ".stage"), "junction");
+      }
+      await assert.rejects(
+        stagePortable({ ...fixture, version: "0.2.1" }),
+        /indirection|reparse|symbolic link/i,
+        kind,
+      );
+      assert.deepEqual(await readdir(outside), []);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test(
+  "Windows compressor produces one archive root and removes staging",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const fixture = await createFixture({ cli: true });
+    try {
+      const result = runCli(fixture.repoRoot);
+      assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+      const archivePath = join(
+        fixture.bundleDir,
+        "ability-radar_0.2.1_windows-x64-portable.zip",
+      );
+      const listing = spawnSync("tar.exe", ["-tf", archivePath], {
+        encoding: "utf8",
+      });
+      assert.equal(listing.status, 0, listing.stderr);
+      const entries = listing.stdout.trim().split(/\r?\n/);
+      assert.ok(entries.length >= fileContents.size + 1);
+      assert.ok(
+        entries.every((entry) => entry.startsWith("ability-radar-portable/")),
+      );
+      for (const name of [...fileContents.keys(), "SHA256SUMS.txt"]) {
+        assert.ok(
+          entries.includes(`ability-radar-portable/${name}`),
+          name,
+        );
+      }
+      await assert.rejects(lstat(join(fixture.bundleDir, ".stage")), {
+        code: "ENOENT",
+      });
+      assert.deepEqual(
+        (await readdir(fixture.bundleDir)).filter((name) => name !==
+          "ability-radar_0.2.1_windows-x64-portable.zip"),
+        [],
+      );
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "compression failure removes temporary ZIP and stage without a partial final",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const fixture = await createFixture({ cli: true });
+    try {
+      await writeFile(
+        join(fixture.repoRoot, "scripts", "compress-portable.ps1"),
+        [
+          "param([string]$Source, [string]$Destination)",
+          '[System.IO.File]::WriteAllText($Destination, "partial")',
+          "exit 9",
+          "",
+        ].join("\n"),
+      );
+      const result = runCli(fixture.repoRoot);
+      assert.notEqual(result.status, 0);
+      const entries = await readdir(fixture.bundleDir);
+      assert.deepEqual(entries, []);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "existing final archive is preserved and never overwritten",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const fixture = await createFixture({ cli: true });
+    try {
+      await mkdir(fixture.bundleDir, { recursive: true });
+      const archivePath = join(
+        fixture.bundleDir,
+        "ability-radar_0.2.1_windows-x64-portable.zip",
+      );
+      await writeFile(archivePath, "existing-final");
+      const result = runCli(fixture.repoRoot);
+      assert.notEqual(result.status, 0);
+      assert.equal(await readFile(archivePath, "utf8"), "existing-final");
+      assert.deepEqual(await readdir(fixture.bundleDir), [
+        "ability-radar_0.2.1_windows-x64-portable.zip",
+      ]);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  },
+);

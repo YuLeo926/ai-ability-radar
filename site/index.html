@@ -230,7 +230,7 @@
     const [projectPath] = location.pathname.split("/").filter(Boolean);
     const repository = projectPath || `${owner}.github.io`;
     const repositoryUrl = `https://github.com/${owner}/${repository}`;
-    const releaseUrl = `${repositoryUrl}/releases/tag/v0.2.0`;
+    const releaseUrl = `${repositoryUrl}/releases/tag/v0.2.1`;
     for (const id of ["source-nav", "source-link", "footer-source"]) {
       document.querySelector(`#${id}`).href = repositoryUrl;
     }

@@ -395,7 +395,7 @@ const requiredFiles = [
 ];
 for (const path of requiredFiles) read(path);
 
-const expectedVersion = "0.2.0";
+const expectedVersion = "0.2.1";
 const rootPackage = json("package.json");
 const desktopPackage = json("apps/desktop/package.json");
 const tauriConfig = json("apps/desktop/src-tauri/tauri.conf.json");
@@ -426,57 +426,209 @@ const portableSources = new Map([
   ["scripts/package-portable.mjs", read("scripts/package-portable.mjs")],
   ["scripts/compress-portable.ps1", read("scripts/compress-portable.ps1")],
 ]);
-const combinedPortableSource = [...portableSources.values()].join("\n");
-if (
-  /(?:^|[^\w])(?:codex|claude|gemini|openai|anthropic)(?:\.exe)?(?:[^\w]|$)/i.test(
-    combinedPortableSource,
-  )
-) {
-  fail("portable entry points must not contain a provider invocation");
-}
-if (
-  /\b(?:curl(?:\.exe)?|wget(?:\.exe)?|Invoke-WebRequest|Invoke-RestMethod|Start-BitsTransfer|scp(?:\.exe)?|ftp(?:\.exe)?|gh\s+(?:api|release\s+upload))\b/i.test(
-    combinedPortableSource,
-  )
-) {
-  fail("portable entry points must not contain a network upload command");
-}
 const portableNodeSource = portableSources.get("scripts/package-portable.mjs");
 const portablePowerShellSource = portableSources.get(
   "scripts/compress-portable.ps1",
 );
+
+function canonicalStatement(source) {
+  return source.replace(/\s+/g, " ").trim();
+}
+
+const portableNodeImports =
+  portableNodeSource.match(/import\s+[\s\S]*?\s+from\s+"[^"]+";/g) ?? [];
+const expectedPortableNodeImports = [
+  'import { createHash, randomUUID } from "node:crypto";',
+  'import { spawnSync } from "node:child_process";',
+  'import { copyFile, lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile, } from "node:fs/promises";',
+  'import { fileURLToPath } from "node:url";',
+  'import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep, } from "node:path";',
+].map(canonicalStatement).sort();
+const actualPortableNodeImports =
+  portableNodeImports.map(canonicalStatement).sort();
 if (
-  !/const targetDir = join\(repoRoot, "target", "release"\);/.test(
+  JSON.stringify(actualPortableNodeImports) !==
+    JSON.stringify(expectedPortableNodeImports) ||
+  /\bimport\s*\(|\brequire\s*\(|\bprocess\.binding\s*\(/.test(
     portableNodeSource,
   ) ||
-  !/const bundleDir = join\(targetDir, "bundle", "portable"\);/.test(
+  /\b(?:fetch|WebSocket|XMLHttpRequest|EventSource)\s*\(|\bsendBeacon\s*\(/.test(
     portableNodeSource,
-  ) ||
-  /\b(?:copyFile|cp|mkdir|rm|writeFile)\s*\(\s*(?:repoRoot|targetDir|join\s*\(\s*(?:repoRoot|targetDir))/m.test(
-    portableNodeSource,
-  ) ||
-  /\b(?:Out-File|Set-Content|Add-Content|Copy-Item|Move-Item|Remove-Item)\b/i.test(
-    portablePowerShellSource,
-  ) ||
-  !/New-Item -ItemType Directory -Force -Path \$destinationDirectory/.test(
-    portablePowerShellSource,
-  ) ||
-  !/Compress-Archive[\s\S]*-LiteralPath \$sourcePath[\s\S]*-DestinationPath \$destinationPath/.test(
-    portablePowerShellSource,
   )
 ) {
   fail(
-    "portable entry points must not contain writes outside target/release/bundle/portable",
+    "portable Node import allowlist permits only reviewed core filesystem, path, crypto, URL, and child-process imports; network and dynamic imports are forbidden",
+  );
+}
+if (/\b(?:Reflect|globalThis|eval|Function)\b/.test(portableNodeSource)) {
+  fail(
+    "portable Node operation allowlist forbids indirect or computed execution, network, and write access",
+  );
+}
+
+const expectedPortableCallCounts = new Map([
+  ["copyFile", 3],
+  ["lstat", 6],
+  ["mkdir", 1],
+  ["randomUUID", 1],
+  ["readFile", 3],
+  ["readdir", 1],
+  ["realpath", 2],
+  ["rename", 1],
+  ["rm", 2],
+  ["spawnSync", 1],
+  ["writeFile", 1],
+]);
+for (const [operation, expected] of expectedPortableCallCounts) {
+  const count = [...portableNodeSource.matchAll(
+    new RegExp(`\\b${operation}\\s*\\(`, "g"),
+  )].length;
+  if (count !== expected) {
+    fail(
+      `portable Node operation allowlist requires ${operation} exactly ${expected} time(s); found ${count}`,
+    );
+  }
+}
+if (
+  !portableNodeSource.includes(
+    'const targetDir = join(repoRoot, "target", "release");',
+  ) ||
+  !portableNodeSource.includes(
+    'const bundleDir = join(targetDir, "bundle", "portable");',
+  ) ||
+  !portableNodeSource.includes(
+    'await copyFile(executable, join(stageRoot, "ability-radar.exe"));',
+  ) ||
+  !portableNodeSource.includes(
+    'await copyFile(readme, join(stageRoot, "README.txt"));',
+  ) ||
+  !portableNodeSource.includes("await copyFile(entry.path, destination);") ||
+  !portableNodeSource.includes("await rename(temporaryArchive, archivePath);") ||
+  !portableNodeSource.includes("await rm(path, { recursive: true });") ||
+  !portableNodeSource.includes("await rm(path);")
+) {
+  fail(
+    "portable Node operation allowlist rejects copyFile, rename, or removal destinations outside the reviewed target/release/bundle/portable flow",
+  );
+}
+const exactPortableSpawn = `spawnSync(
+      "powershell.exe",
+      [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        join(repoRoot, "scripts", "compress-portable.ps1"),
+        "-Source",
+        stageRoot,
+        "-Destination",
+        temporaryArchive,
+      ],
+      { cwd: repoRoot, stdio: "inherit" },
+    )`;
+if (!portableNodeSource.includes(exactPortableSpawn)) {
+  fail(
+    "portable Node child process allowlist permits only powershell.exe with the reviewed compressor, stage source, and temporary archive destination",
+  );
+}
+
+const reviewedPowerShell = portablePowerShellSource
+  .replace(/^\s*#.*$/gm, "")
+  .replace(/\r\n?/g, "\n");
+const expectedPowerShellCounts = new Map([
+  ["Compress-Archive", 1],
+  ["Get-Item", 2],
+  ["Split-Path", 1],
+  ["Test-Path", 3],
+]);
+for (const [operation, expected] of expectedPowerShellCounts) {
+  const count = [...reviewedPowerShell.matchAll(
+    new RegExp(`\\b${operation}\\b`, "g"),
+  )].length;
+  if (count !== expected) {
+    fail(
+      `portable PowerShell operation allowlist requires ${operation} exactly ${expected} time(s); found ${count}`,
+    );
+  }
+}
+const allowedPowerShellStatements = new Set([
+  "param(",
+  "[Parameter(Mandatory = $true)]",
+  "[string]$Source,",
+  "[string]$Destination",
+  ")",
+  '$ErrorActionPreference = "Stop"',
+  "$sourcePath = [System.IO.Path]::GetFullPath($Source)",
+  "$destinationPath = [System.IO.Path]::GetFullPath($Destination)",
+  "if (-not (Test-Path -LiteralPath $sourcePath -PathType Container)) {",
+  'throw "Portable source directory does not exist."',
+  "}",
+  'if ([System.IO.Path]::GetExtension($destinationPath) -cne ".zip") {',
+  'throw "Portable destination must be a .zip file."',
+  "$destinationDirectory = Split-Path -Parent $destinationPath",
+  "if (-not (Test-Path -LiteralPath $destinationDirectory -PathType Container)) {",
+  'throw "Portable destination directory does not exist."',
+  "if (Test-Path -LiteralPath $destinationPath) {",
+  'throw "Portable destination already exists."',
+  "$sourceItem = Get-Item -LiteralPath $sourcePath",
+  "$destinationDirectoryItem = Get-Item -LiteralPath $destinationDirectory",
+  "if (",
+  "($sourceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or",
+  "($destinationDirectoryItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)",
+  ") {",
+  'throw "Portable compressor paths must not be reparse points."',
+  "Compress-Archive `",
+  "-LiteralPath $sourcePath `",
+  "-DestinationPath $destinationPath `",
+  "-CompressionLevel Optimal",
+]);
+for (const statement of reviewedPowerShell
+  .split("\n")
+  .map((line) => line.trim())
+  .filter(Boolean)) {
+  if (!allowedPowerShellStatements.has(statement)) {
+    fail(
+      `portable PowerShell operation allowlist rejects unsupported statement: ${statement}`,
+    );
+  }
+}
+if (
+  /(?:^|[\s;|])(?:&|\.|Invoke-Expression|iex|Set-Alias|New-Alias|Get-Command)(?:\s|$)/im.test(
+    reviewedPowerShell,
+  ) ||
+  !reviewedPowerShell.includes(
+    "$sourcePath = [System.IO.Path]::GetFullPath($Source)",
+  ) ||
+  !reviewedPowerShell.includes(
+    "$destinationPath = [System.IO.Path]::GetFullPath($Destination)",
+  ) ||
+  !reviewedPowerShell.includes(
+    "$destinationDirectory = Split-Path -Parent $destinationPath",
+  ) ||
+  !reviewedPowerShell.includes(
+    "$sourceItem = Get-Item -LiteralPath $sourcePath",
+  ) ||
+  !reviewedPowerShell.includes(
+    "$destinationDirectoryItem = Get-Item -LiteralPath $destinationDirectory",
+  ) ||
+  !reviewedPowerShell.includes(
+    "Compress-Archive `\n  -LiteralPath $sourcePath `\n  -DestinationPath $destinationPath `\n  -CompressionLevel Optimal",
+  )
+) {
+  fail(
+    "portable PowerShell operation allowlist permits only direct path validation and one direct Compress-Archive invocation",
   );
 }
 const portableSourceSeals = new Map([
   [
     "scripts/package-portable.mjs",
-    "ac19f8ed6e7b1c9712d9c1c6ec804042c0e64e474574b1e8dab234244306d8ad",
+    "cd93b1290f7739ca721336b585885803f01606de9526be68016ae4a57858e505",
   ],
   [
     "scripts/compress-portable.ps1",
-    "69105005d5febcbebd1e2790bd359851e099a7f45a2a6885fdc503428fc8e6e6",
+    "d42425e9544bd0d4e4c9d021d1ec8b8ce13b328d93da3f5e5d4a3417f81c550a",
   ],
 ]);
 for (const [path, expected] of portableSourceSeals) {
@@ -1004,7 +1156,7 @@ const ciArtifact = actionSteps(ciWorkflow, "actions/upload-artifact")[0];
 requireExactStepFields(ciPath, ciArtifact, [], "CI artifact owner");
 const expectedCiArtifactInputs = {
   name: "ability-radar-windows-debug-nsis",
-  path: "target/debug/bundle/nsis/ability-radar_0.2.0_x64-setup.exe",
+  path: "target/debug/bundle/nsis/ability-radar_0.2.1_x64-setup.exe",
   "if-no-files-found": "error",
   "retention-days": "7",
 };
@@ -1354,7 +1506,7 @@ const site = requireText("site/index.html", [
   ["methodology link", /href="docs\/methodology\.md"/],
   ["privacy link", /href="docs\/privacy\.md"/],
   ["security link", /href="docs\/security\.md"/],
-  ["v0.2.0 prerelease link", /\/releases\/tag\/v0\.2\.0/],
+  ["v0.2.1 prerelease link", /\/releases\/tag\/v0\.2\.1/],
 ]);
 if (/\/releases\/latest/.test(site)) {
   fail("site/index.html must not link a prerelease download through /releases/latest");

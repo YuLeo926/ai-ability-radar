@@ -32,7 +32,7 @@
 2. 在 PowerShell 中计算下载文件的 SHA-256：
 
    ```powershell
-   Get-FileHash -Algorithm SHA256 -LiteralPath .\ability-radar_0.2.0_x64-setup.exe
+   Get-FileHash -Algorithm SHA256 -LiteralPath .\ability-radar_0.2.1_x64-setup.exe
    ```
 
 3. 将输出与 `SHA256SUMS.txt` 中同名文件的值逐字符比较。
