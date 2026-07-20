@@ -386,6 +386,10 @@ const requiredFiles = [
   "tools/fake-cli/src/main.rs",
   "tools/fake-cli/tests/fake_cli.rs",
   "apps/desktop/src-tauri/tests/fake_cli_e2e.rs",
+  "scripts/package-portable.mjs",
+  "scripts/package-portable.test.mjs",
+  "scripts/compress-portable.ps1",
+  "packaging/windows-portable/README.txt",
   "site/index.html",
   "site/.nojekyll",
 ];
@@ -398,6 +402,89 @@ const tauriConfig = json("apps/desktop/src-tauri/tauri.conf.json");
 const npmLock = json("package-lock.json");
 if (rootPackage.scripts?.tauri !== "npm run tauri --workspace apps/desktop --") {
   fail("package.json tauri script must preserve the argument separator for workspace forwarding");
+}
+const expectedPortableScripts = {
+  start: "npm run tauri -- dev",
+  "package:portable":
+    "npm run tauri -- build --no-bundle && npm run package:portable:from-build",
+  "package:portable:from-build": "node scripts/package-portable.mjs",
+};
+for (const [name, expected] of Object.entries(expectedPortableScripts)) {
+  if (rootPackage.scripts?.[name] !== expected) {
+    fail(`package.json ${name} script must be exactly: ${expected}`);
+  }
+}
+if (
+  !rootPackage.scripts?.test
+    ?.split(" && ")
+    .includes("node --test scripts/package-portable.test.mjs")
+) {
+  fail("package.json test script must run scripts/package-portable.test.mjs");
+}
+
+const portableSources = new Map([
+  ["scripts/package-portable.mjs", read("scripts/package-portable.mjs")],
+  ["scripts/compress-portable.ps1", read("scripts/compress-portable.ps1")],
+]);
+const combinedPortableSource = [...portableSources.values()].join("\n");
+if (
+  /(?:^|[^\w])(?:codex|claude|gemini|openai|anthropic)(?:\.exe)?(?:[^\w]|$)/i.test(
+    combinedPortableSource,
+  )
+) {
+  fail("portable entry points must not contain a provider invocation");
+}
+if (
+  /\b(?:curl(?:\.exe)?|wget(?:\.exe)?|Invoke-WebRequest|Invoke-RestMethod|Start-BitsTransfer|scp(?:\.exe)?|ftp(?:\.exe)?|gh\s+(?:api|release\s+upload))\b/i.test(
+    combinedPortableSource,
+  )
+) {
+  fail("portable entry points must not contain a network upload command");
+}
+const portableNodeSource = portableSources.get("scripts/package-portable.mjs");
+const portablePowerShellSource = portableSources.get(
+  "scripts/compress-portable.ps1",
+);
+if (
+  !/const targetDir = join\(repoRoot, "target", "release"\);/.test(
+    portableNodeSource,
+  ) ||
+  !/const bundleDir = join\(targetDir, "bundle", "portable"\);/.test(
+    portableNodeSource,
+  ) ||
+  /\b(?:copyFile|cp|mkdir|rm|writeFile)\s*\(\s*(?:repoRoot|targetDir|join\s*\(\s*(?:repoRoot|targetDir))/m.test(
+    portableNodeSource,
+  ) ||
+  /\b(?:Out-File|Set-Content|Add-Content|Copy-Item|Move-Item|Remove-Item)\b/i.test(
+    portablePowerShellSource,
+  ) ||
+  !/New-Item -ItemType Directory -Force -Path \$destinationDirectory/.test(
+    portablePowerShellSource,
+  ) ||
+  !/Compress-Archive[\s\S]*-LiteralPath \$sourcePath[\s\S]*-DestinationPath \$destinationPath/.test(
+    portablePowerShellSource,
+  )
+) {
+  fail(
+    "portable entry points must not contain writes outside target/release/bundle/portable",
+  );
+}
+const portableSourceSeals = new Map([
+  [
+    "scripts/package-portable.mjs",
+    "ac19f8ed6e7b1c9712d9c1c6ec804042c0e64e474574b1e8dab234244306d8ad",
+  ],
+  [
+    "scripts/compress-portable.ps1",
+    "69105005d5febcbebd1e2790bd359851e099a7f45a2a6885fdc503428fc8e6e6",
+  ],
+]);
+for (const [path, expected] of portableSourceSeals) {
+  if (normalizedSourceSha256(portableSources.get(path)) !== expected) {
+    fail(
+      `${path} portable source seal mismatch; review provider invocations, network uploads, and writes outside target/release/bundle/portable`,
+    );
+  }
 }
 if (
   JSON.stringify(rootPackage.allowScripts) !==

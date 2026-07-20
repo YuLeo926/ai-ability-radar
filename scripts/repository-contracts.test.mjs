@@ -83,6 +83,56 @@ function assertRejected(result, expected) {
   assert.match(`${result.stdout}\n${result.stderr}`, expected);
 }
 
+test("source start command cannot point to Vite", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, "package.json"), (source) => {
+      const manifest = JSON.parse(source);
+      manifest.scripts.start = "vite";
+      return `${JSON.stringify(manifest, null, 2)}\n`;
+    });
+  });
+  assertRejected(result, /start.*npm run tauri -- dev/i);
+});
+
+test("portable package command cannot skip the Tauri no-bundle build", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, "package.json"), (source) => {
+      const manifest = JSON.parse(source);
+      manifest.scripts["package:portable"] =
+        "npm run package:portable:from-build";
+      return `${JSON.stringify(manifest, null, 2)}\n`;
+    });
+  });
+  assertRejected(result, /package:portable.*tauri.*build.*--no-bundle/i);
+});
+
+test("portable entry points reject real provider invocations", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, "scripts", "package-portable.mjs"), (source) =>
+      `${source}\nspawnSync("codex", ["exec", "forbidden"]);\n`,
+    );
+  });
+  assertRejected(result, /portable.*provider invocation/i);
+});
+
+test("portable entry points reject network upload commands", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, "scripts", "compress-portable.ps1"), (source) =>
+      `${source}\ncurl.exe -T $destinationPath https://example.invalid/upload\n`,
+    );
+  });
+  assertRejected(result, /portable.*network upload/i);
+});
+
+test("portable entry points reject writes outside the portable bundle", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, "scripts", "package-portable.mjs"), (source) =>
+      `${source}\nawait writeFile(join(repoRoot, "escaped.txt"), "forbidden");\n`,
+    );
+  });
+  assertRejected(result, /portable.*writes outside.*target\/release\/bundle\/portable/i);
+});
+
 test("comment-only action cannot satisfy a required workflow action", () => {
   const result = runNegativeFixture((fixture) => {
     replace(join(fixture, ".github", "workflows", "ci.yml"), (source) =>

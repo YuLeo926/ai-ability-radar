@@ -11,7 +11,10 @@
   ],
   "scripts": {
     "build": "npm run build --workspace apps/desktop",
-    "test": "node --test scripts/repository-contracts.test.mjs && npm run test --workspace apps/desktop",
+    "test": "node --test scripts/package-portable.test.mjs && node --test scripts/repository-contracts.test.mjs && npm run test --workspace apps/desktop",
+    "start": "npm run tauri -- dev",
+    "package:portable": "npm run tauri -- build --no-bundle && npm run package:portable:from-build",
+    "package:portable:from-build": "node scripts/package-portable.mjs",
     "tauri": "npm run tauri --workspace apps/desktop --",
     "validate:repository": "node scripts/validate-repository.mjs",
     "licenses:generate": "node scripts/generate-license-metadata.mjs"
