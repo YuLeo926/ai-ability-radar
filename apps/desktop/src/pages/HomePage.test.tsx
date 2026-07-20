@@ -39,6 +39,9 @@ function readyBootstrap(): Bootstrap {
             ? "claude 2.0.0"
             : null,
       authState: kind === "codex_cli" || kind === "claude_code" ? "ready" : "unknown",
+      status: "ready",
+      source:
+        kind === "codex_cli" || kind === "claude_code" ? "reviewed_npm" : null,
       prerequisites:
         kind === "codex_cli" || kind === "claude_code"
           ? [{ name: "Node.js 22/24 LTS", available: true, version: "v22.22.0" }]
@@ -169,7 +172,7 @@ test("an unavailable CLI disables only that target", async () => {
   const bootstrap = readyBootstrap();
   bootstrap.targets = bootstrap.targets.map((target) =>
     target.kind === "codex_cli"
-      ? { ...target, installed: false, version: null }
+      ? { ...target, installed: false, version: null, status: "not_found" }
       : target,
   );
   const user = userEvent.setup();
@@ -198,7 +201,7 @@ test("re-detects CLI availability and explains inherited PATH limits", async () 
   const first = readyBootstrap();
   first.targets = first.targets.map((target) =>
     target.kind === "codex_cli"
-      ? { ...target, installed: false, version: null }
+      ? { ...target, installed: false, version: null, status: "not_found" }
       : target,
   );
   const second = readyBootstrap();
@@ -233,6 +236,7 @@ test("missing Node takes precedence over an npm CLI detection failure", async ()
       ? {
           ...target,
           installed: false,
+          status: "runtime_missing",
           prerequisites: [
             { name: "Node.js 22/24 LTS", available: false, version: null },
           ],

@@ -1,8 +1,8 @@
 use crate::command_locator::{LaunchCommand, resolve_launch_command};
 use crate::{
-    AdapterCompletion, AdapterError, AgentAdapter, AuthState, ExecutionRequest, ProcessEnvironment,
-    ProcessError, ProcessOutput, ProcessRunner, ProcessSpec, TargetAvailability,
-    classify_cli_failure, is_agent_budget_exhaustion,
+    AdapterCompletion, AdapterError, AgentAdapter, AuthState, AvailabilityStatus, ExecutionRequest,
+    LaunchSource, ProcessEnvironment, ProcessError, ProcessOutput, ProcessRunner, ProcessSpec,
+    TargetAvailability, classify_cli_failure, is_agent_budget_exhaustion,
 };
 use ability_core::{FailureKind, TargetKind};
 use async_trait::async_trait;
@@ -96,6 +96,11 @@ impl AgentAdapter for ClaudeCodeAdapter {
             installed: true,
             version,
             auth_state,
+            status: match auth_state {
+                AuthState::NeedsLogin => AvailabilityStatus::NeedsLogin,
+                AuthState::Unknown | AuthState::Ready => AvailabilityStatus::Ready,
+            },
+            source: Some(launch_source(&launch)),
             prerequisites: Vec::new(),
         }
     }
@@ -157,7 +162,17 @@ fn unavailable(kind: TargetKind) -> TargetAvailability {
         installed: false,
         version: None,
         auth_state: AuthState::Unknown,
+        status: AvailabilityStatus::NotFound,
+        source: None,
         prerequisites: Vec::new(),
+    }
+}
+
+fn launch_source(launch: &LaunchCommand) -> LaunchSource {
+    if launch.prefix_args.is_empty() {
+        LaunchSource::NativeExe
+    } else {
+        LaunchSource::ReviewedNpm
     }
 }
 

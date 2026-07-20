@@ -1276,7 +1276,9 @@ fn send_event(
 #[cfg(test)]
 mod cancellation_copy_tests {
     use super::*;
-    use crate::{AuthState, PrerequisiteStatus, TargetAvailability};
+    use crate::{
+        AuthState, AvailabilityStatus, LaunchSource, PrerequisiteStatus, TargetAvailability,
+    };
     use ability_core::PackLoader;
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1299,6 +1301,8 @@ mod cancellation_copy_tests {
                 installed: true,
                 version: None,
                 auth_state: AuthState::Unknown,
+                status: AvailabilityStatus::Ready,
+                source: Some(LaunchSource::ReviewedNpm),
                 prerequisites: Vec::<PrerequisiteStatus>::new(),
             }
         }

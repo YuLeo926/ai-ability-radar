@@ -5,6 +5,16 @@ export type TargetKind =
   | "claude_code";
 
 export type RunMode = "quick" | "deep";
+export type AvailabilityStatus =
+  | "ready"
+  | "needs_login"
+  | "not_found"
+  | "runtime_missing"
+  | "entry_inaccessible"
+  | "version_probe_failed";
+
+export type LaunchSource = "native_exe" | "reviewed_npm";
+
 export type RunStatus =
   | "created"
   | "running"
@@ -47,6 +57,8 @@ export interface TargetAvailability {
   installed: boolean;
   version?: string | null;
   authState: "unknown" | "ready" | "needs_login";
+  status: AvailabilityStatus;
+  source?: LaunchSource | null;
   prerequisites: PrerequisiteStatus[];
 }
 

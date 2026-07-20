@@ -1,7 +1,7 @@
 use ability_adapters::{
-    AdapterCompletion, AdapterError, AgentAdapter, AuthState, CliRunError, CliRunService,
-    ExecutionRequest, PrerequisiteStatus, RunEvent, RunEventKind, TargetAvailability,
-    VerificationGrade, WorkspaceVerifier, adapter_error_grade,
+    AdapterCompletion, AdapterError, AgentAdapter, AuthState, AvailabilityStatus, CliRunError,
+    CliRunService, ExecutionRequest, LaunchSource, PrerequisiteStatus, RunEvent, RunEventKind,
+    TargetAvailability, VerificationGrade, WorkspaceVerifier, adapter_error_grade,
 };
 use ability_core::{
     EnvironmentFingerprint, FailureKind, LoadedPack, PackLoader, RunMode, RunRepository, RunStatus,
@@ -65,6 +65,8 @@ impl AgentAdapter for FakeAdapter {
             installed: true,
             version: Some("fake-cli".into()),
             auth_state: AuthState::Unknown,
+            status: AvailabilityStatus::Ready,
+            source: Some(LaunchSource::ReviewedNpm),
             prerequisites: vec![PrerequisiteStatus {
                 name: "fake-runtime".into(),
                 available: true,

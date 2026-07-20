@@ -102,6 +102,8 @@ function bootstrap(): Bootstrap {
         installed: true,
         version: null,
         authState: "unknown",
+        status: "ready",
+        source: null,
         prerequisites: [],
       },
       {
@@ -109,6 +111,8 @@ function bootstrap(): Bootstrap {
         installed: true,
         version: "codex 1.2.3",
         authState: "ready",
+        status: "ready",
+        source: "reviewed_npm",
         prerequisites: [
           { name: "Node.js 22/24 LTS", available: true, version: "v22.22.0" },
         ],

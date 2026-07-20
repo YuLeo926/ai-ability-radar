@@ -19,6 +19,24 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AvailabilityStatus {
+    Ready,
+    NeedsLogin,
+    NotFound,
+    RuntimeMissing,
+    EntryInaccessible,
+    VersionProbeFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchSource {
+    NativeExe,
+    ReviewedNpm,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TargetAvailability {
@@ -26,6 +44,8 @@ pub struct TargetAvailability {
     pub installed: bool,
     pub version: Option<String>,
     pub auth_state: AuthState,
+    pub status: AvailabilityStatus,
+    pub source: Option<LaunchSource>,
     pub prerequisites: Vec<PrerequisiteStatus>,
 }
 
@@ -85,4 +105,28 @@ pub trait AgentAdapter: Send + Sync {
         request: ExecutionRequest,
         cancellation: CancellationToken,
     ) -> Result<AdapterCompletion, AdapterError>;
+}
+
+#[cfg(test)]
+mod availability_contract_tests {
+    use super::*;
+    use ability_core::TargetKind;
+    use serde_json::json;
+
+    #[test]
+    fn availability_serializes_stable_status_and_source_values() {
+        let value = serde_json::to_value(TargetAvailability {
+            kind: TargetKind::CodexCli,
+            installed: true,
+            version: Some("codex-cli 0.142.5".into()),
+            auth_state: AuthState::Ready,
+            status: AvailabilityStatus::Ready,
+            source: Some(LaunchSource::ReviewedNpm),
+            prerequisites: Vec::new(),
+        })
+        .unwrap();
+
+        assert_eq!(value["status"], json!("ready"));
+        assert_eq!(value["source"], json!("reviewed_npm"));
+    }
 }

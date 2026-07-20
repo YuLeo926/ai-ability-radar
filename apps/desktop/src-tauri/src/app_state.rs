@@ -1,7 +1,7 @@
 use ability_adapters::{
-    AgentAdapter, AuthState, ClaudeCodeAdapter, CliRunService, CodexAdapter, NodeVerifier,
-    PrerequisiteStatus, ProcessEnvironment, ProcessRunner, ProcessSpec, TargetAvailability,
-    TokioProcessRunner, WorkspaceVerifier,
+    AgentAdapter, AuthState, AvailabilityStatus, ClaudeCodeAdapter, CliRunService, CodexAdapter,
+    NodeVerifier, PrerequisiteStatus, ProcessEnvironment, ProcessRunner, ProcessSpec,
+    TargetAvailability, TokioProcessRunner, WorkspaceVerifier,
 };
 use ability_core::{
     ArtifactStore, LoadedPack, ManualRunService, PackLoader, PackRegistry, RunRepository,
@@ -302,6 +302,8 @@ impl AppState {
                 installed: true,
                 version: None,
                 auth_state: AuthState::Unknown,
+                status: AvailabilityStatus::Ready,
+                source: None,
                 prerequisites: Vec::new(),
             },
             TargetAvailability {
@@ -309,6 +311,8 @@ impl AppState {
                 installed: true,
                 version: None,
                 auth_state: AuthState::Unknown,
+                status: AvailabilityStatus::Ready,
+                source: None,
                 prerequisites: Vec::new(),
             },
         ];

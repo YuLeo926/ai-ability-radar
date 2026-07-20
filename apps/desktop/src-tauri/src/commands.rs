@@ -2200,9 +2200,9 @@ mod tests {
     use crate::app_state::CancellationRegistry;
     use crate::dto::{StartRunInput, TargetSelectionInput};
     use ability_adapters::{
-        AdapterCompletion, AdapterError, AuthState, CliRunService, ExecutionRequest,
-        PrerequisiteStatus, ProcessError, ProcessOutput, ProcessRunner, ProcessSpec,
-        TargetAvailability,
+        AdapterCompletion, AdapterError, AuthState, AvailabilityStatus, CliRunService,
+        ExecutionRequest, LaunchSource, PrerequisiteStatus, ProcessError, ProcessOutput,
+        ProcessRunner, ProcessSpec, TargetAvailability,
     };
     use ability_core::{
         summarize_scores, Category, EnvironmentFingerprint, FailureKind, LoadedPack,
@@ -2233,6 +2233,8 @@ mod tests {
                 installed: true,
                 version: Some("codex-cli 1.2.3".into()),
                 auth_state: AuthState::Ready,
+                status: AvailabilityStatus::Ready,
+                source: Some(LaunchSource::ReviewedNpm),
                 prerequisites: Vec::new(),
             }
         }
@@ -2693,6 +2695,8 @@ mod tests {
                 installed: true,
                 version: Some("codex-cli 1.2.3".into()),
                 auth_state: AuthState::Ready,
+                status: AvailabilityStatus::Ready,
+                source: Some(LaunchSource::ReviewedNpm),
                 prerequisites: Vec::new(),
             },
             PrerequisiteStatus {
@@ -2742,6 +2746,15 @@ mod tests {
                 installed,
                 version: version.map(str::to_owned),
                 auth_state,
+                status: if installed {
+                    match auth_state {
+                        AuthState::NeedsLogin => AvailabilityStatus::NeedsLogin,
+                        AuthState::Unknown | AuthState::Ready => AvailabilityStatus::Ready,
+                    }
+                } else {
+                    AvailabilityStatus::NotFound
+                },
+                source: installed.then_some(LaunchSource::ReviewedNpm),
                 prerequisites: Vec::new(),
             };
 

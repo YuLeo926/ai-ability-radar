@@ -56,6 +56,8 @@ function makeBootstrap(
         installed: true,
         version: kind === "codex_cli" ? "codex 1.2.3" : "claude 2.0.0",
         authState: "unknown",
+        status: "ready",
+        source: "reviewed_npm",
         prerequisites: [
           {
             name: "Node.js 22/24 LTS",
@@ -542,7 +544,9 @@ test("shows safe bootstrap loading/failure/retry and ignores stale completion", 
   ).toBeInTheDocument();
 
   await act(async () => {
-    first.resolve(makeBootstrap("codex_cli", { installed: false }));
+    first.resolve(
+      makeBootstrap("codex_cli", { installed: false, status: "not_found" }),
+    );
     await first.promise;
   });
   expect(
@@ -561,12 +565,12 @@ const blockedAvailabilityCases: Array<
 > = [
   [
     "not-installed",
-    { installed: false, version: null },
+    { installed: false, version: null, status: "not_found" },
     "未检测到 Codex CLI，暂时无法开始。",
   ],
   [
     "needs-login",
-    { authState: "needs_login" as const },
+    { authState: "needs_login" as const, status: "needs_login" },
     "需要先在终端完成 Codex CLI 登录。",
   ],
   [
@@ -593,6 +597,8 @@ test.each(blockedAvailabilityCases)(
       installed: true,
       version: "claude 2.0.0",
       authState: "ready",
+      status: "ready",
+      source: "reviewed_npm",
       prerequisites: [],
     });
     const backend = fakeBackend({
