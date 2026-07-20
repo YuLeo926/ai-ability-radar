@@ -49,6 +49,7 @@ function syncPortableSourceSeals(fixture) {
   const paths = [
     "scripts/package-portable.mjs",
     "scripts/compress-portable.ps1",
+    "scripts/extract-portable.ps1",
   ];
   replace(join(fixture, "scripts", "validate-repository.mjs"), (source) => {
     let changed = source;
@@ -404,6 +405,49 @@ test("portable AST rejects unknown direct callees", () => {
     (source) => `${source}\nmysteryPortableOperation();\n`,
   );
   assertRejected(result, /portable Node.*(?:AST|syntax|unknown|callee)/i);
+});
+
+test("portable AST rejects block-local imported-name shadowing", () => {
+  const result = runPortableMutation(
+    "scripts/package-portable.mjs",
+    (source) => source.replace(
+      'const targetDir = join(repoRoot, "target", "release");',
+      '{\n    const join = () => repoRoot;\n    const targetDir = join(repoRoot, "target", "release");\n  }',
+    ),
+  );
+  assertRejected(result, /portable Node AST.*(?:binding|shadow|declaration)/i);
+});
+
+test("portable AST rejects imported-name parameter shadowing", () => {
+  const result = runPortableMutation(
+    "scripts/package-portable.mjs",
+    (source) => `${source}\nfunction shadowImportedJoin(join) { return join; }\n`,
+  );
+  assertRejected(result, /portable Node AST.*(?:binding|shadow|parameter)/i);
+});
+
+test("portable AST rejects destructured imported-name shadowing", () => {
+  const result = runPortableMutation(
+    "scripts/package-portable.mjs",
+    (source) => `${source}\n{ const { join } = {}; }\n`,
+  );
+  assertRejected(result, /portable Node AST.*(?:binding|shadow|destructur)/i);
+});
+
+test("portable AST rejects imported-name assignment shadowing", () => {
+  const result = runPortableMutation(
+    "scripts/package-portable.mjs",
+    (source) => `${source}\njoin = () => repoRoot;\n`,
+  );
+  assertRejected(result, /portable Node AST.*(?:binding|shadow|assignment)/i);
+});
+
+test("portable AST rejects parenthesized imported-name aliases", () => {
+  const result = runPortableMutation(
+    "scripts/package-portable.mjs",
+    (source) => `${source}\nconst portableJoin = (join);\n`,
+  );
+  assertRejected(result, /portable Node AST.*(?:binding|shadow|alias)/i);
 });
 
 test("portable PowerShell operation allowlist rejects ScriptBlock creation", () => {

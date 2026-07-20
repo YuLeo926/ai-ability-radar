@@ -23,6 +23,7 @@ import { stagePortable } from "./package-portable.mjs";
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
 const packageScript = join(scriptsDir, "package-portable.mjs");
 const compressorScript = join(scriptsDir, "compress-portable.ps1");
+const extractorScript = join(scriptsDir, "extract-portable.ps1");
 const fileContents = new Map([
   ["README.txt", "no install\n"],
   ["ability-radar.exe", "fake-exe"],
@@ -38,6 +39,17 @@ function sha256(value) {
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function portableArchivePath(fixture) {
+  return join(
+    fixture.bundleDir,
+    "ability-radar_0.2.1_windows-x64-portable.zip",
+  );
+}
+
+async function assertNoFinalArchive(fixture) {
+  await assert.rejects(lstat(portableArchivePath(fixture)), { code: "ENOENT" });
 }
 
 async function createFixture({ cli = false } = {}) {
@@ -83,6 +95,10 @@ async function createFixture({ cli = false } = {}) {
     await copyFile(
       compressorScript,
       join(repoRoot, "scripts", "compress-portable.ps1"),
+    );
+    await copyFile(
+      extractorScript,
+      join(repoRoot, "scripts", "extract-portable.ps1"),
     );
     await writeFile(
       join(repoRoot, "package.json"),
@@ -256,7 +272,7 @@ test("rejects junctioned bundle and stage roots before recursive removal", async
       }
       await assert.rejects(
         stagePortable({ ...fixture, version: "0.2.1" }),
-        /indirection|reparse|symbolic link/i,
+        /indirection|reparse|symbolic link|ownership/i,
         kind,
       );
       assert.deepEqual(await readdir(outside), []);
@@ -566,14 +582,184 @@ test(
         caught = error;
       }
       assert.ok(caught, "primary failure must reject packaging");
-      assert.match(caught.message, /primary publication-boundary failure/i);
+      assert.match(caught.message, /processing failed/i);
       assert.match(caught.message, /cleanup incomplete.*2 operations/i);
       assert.doesNotMatch(caught.message, new RegExp(escapeRegExp(fixture.root)));
+      assert.match(caught.cause?.message ?? "", /primary publication-boundary failure/i);
       const archivePath = join(
         fixture.bundleDir,
         "ability-radar_0.2.1_windows-x64-portable.zip",
       );
       await assert.rejects(lstat(archivePath), { code: "ENOENT" });
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  },
+);
+
+for (const [name, mutateStage] of [
+  [
+    "modified staged payload",
+    async ({ stageRoot }) => {
+      await writeFile(join(stageRoot, "README.txt"), "tampered payload\n");
+    },
+  ],
+  [
+    "extra staged file",
+    async ({ stageRoot }) => {
+      await writeFile(join(stageRoot, "unexpected.txt"), "unexpected\n");
+    },
+  ],
+  [
+    "modified checksum manifest",
+    async ({ stageRoot }) => {
+      await writeFile(join(stageRoot, "SHA256SUMS.txt"), "forged checksums\n");
+    },
+  ],
+]) {
+  test(
+    `archive verification rejects ${name} before publication`,
+    { skip: process.platform !== "win32" },
+    async () => {
+      const fixture = await createFixture({ cli: true });
+      try {
+        const portable = await import("./package-portable.mjs");
+        await assert.rejects(
+          portable.packagePortableFromBuildForTest(
+            fixture.repoRoot,
+            async (context) => {
+              if (context.phase === "beforeCompression") {
+                await mutateStage(context);
+              }
+            },
+          ),
+          /archive verification|processing failed/i,
+        );
+        await assertNoFinalArchive(fixture);
+        assert.deepEqual(await readdir(fixture.bundleDir), []);
+      } finally {
+        await rm(fixture.root, { recursive: true, force: true });
+      }
+    },
+  );
+}
+
+test(
+  "archive verification rejects a raced staged subtree junction",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const fixture = await createFixture({ cli: true });
+    const external = join(fixture.root, "external-client-pack");
+    try {
+      await mkdir(external);
+      await writeFile(join(external, "manifest.json"), '{"external":true}\n');
+      await writeFile(join(external, "marker.txt"), "attacker-owned\n");
+      const portable = await import("./package-portable.mjs");
+      await assert.rejects(
+        portable.packagePortableFromBuildForTest(
+          fixture.repoRoot,
+          async ({ phase, stageRoot }) => {
+            if (phase !== "beforeCompression") return;
+            const clientPack = join(
+              stageRoot,
+              "benchmark-packs",
+              "client-quick-v1",
+            );
+            await rm(clientPack, { recursive: true });
+            await symlink(external, clientPack, "junction");
+          },
+        ),
+        /archive verification|processing failed|cleanup incomplete/i,
+      );
+      await assertNoFinalArchive(fixture);
+      assert.equal(await readFile(join(external, "marker.txt"), "utf8"), "attacker-owned\n");
+      const entries = await readdir(fixture.bundleDir);
+      assert.equal(entries.some((entry) => entry.endsWith(".tmp.zip")), false);
+      assert.equal(entries.some((entry) => entry.startsWith(".verify.")), false);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "identity-replaced stage is left untouched while other cleanup completes",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const fixture = await createFixture({ cli: true });
+    const external = join(fixture.root, "attacker-stage");
+    try {
+      await mkdir(external);
+      await writeFile(join(external, "marker.txt"), "do-not-delete\n");
+      const portable = await import("./package-portable.mjs");
+      let verificationDirectory;
+      let temporaryArchive;
+      let caught;
+      try {
+        await portable.packagePortableFromBuildForTest(
+          fixture.repoRoot,
+          async (context) => {
+            if (context.phase !== "beforeCompression") return;
+            ({ verificationDirectory, temporaryArchive } = context);
+            await rm(context.stageParent, { recursive: true });
+            await symlink(external, context.stageParent, "junction");
+            throw new Error("simulated post-staging validation failure");
+          },
+        );
+      } catch (error) {
+        caught = error;
+      }
+      assert.ok(caught);
+      assert.match(caught.message, /processing failed.*cleanup incomplete/i);
+      assert.doesNotMatch(caught.message, new RegExp(escapeRegExp(fixture.root)));
+      assert.equal(await readFile(join(external, "marker.txt"), "utf8"), "do-not-delete\n");
+      assert.equal((await lstat(join(fixture.bundleDir, ".stage"))).isSymbolicLink(), true);
+      await assert.rejects(lstat(verificationDirectory), { code: "ENOENT" });
+      await assert.rejects(lstat(temporaryArchive), { code: "ENOENT" });
+      await assertNoFinalArchive(fixture);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "published processing and three cleanup failures are all reported",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const fixture = await createFixture({ cli: true });
+    try {
+      const portable = await import("./package-portable.mjs");
+      let caught;
+      try {
+        await portable.packagePortableFromBuildForTest(
+          fixture.repoRoot,
+          async ({
+            phase,
+            temporaryArchive,
+            verificationDirectory,
+            stageParent,
+          }) => {
+            if (phase !== "afterLink") return;
+            await rm(temporaryArchive);
+            await mkdir(temporaryArchive);
+            await rm(verificationDirectory, { recursive: true });
+            await writeFile(verificationDirectory, "blocks verification cleanup");
+            await rm(stageParent, { recursive: true });
+            await writeFile(stageParent, "blocks stage cleanup");
+            throw new Error("simulated post-publication processing failure");
+          },
+        );
+      } catch (error) {
+        caught = error;
+      }
+      assert.ok(caught);
+      assert.match(caught.message, /published.*processing failed.*cleanup incomplete.*3/i);
+      assert.doesNotMatch(caught.message, new RegExp(escapeRegExp(fixture.root)));
+      assert.deepEqual(
+        [...(await readFile(portableArchivePath(fixture))).subarray(0, 2)],
+        [0x50, 0x4b],
+      );
     } finally {
       await rm(fixture.root, { recursive: true, force: true });
     }

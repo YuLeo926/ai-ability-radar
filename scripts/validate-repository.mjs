@@ -390,6 +390,7 @@ const requiredFiles = [
   "scripts/package-portable.mjs",
   "scripts/package-portable.test.mjs",
   "scripts/compress-portable.ps1",
+  "scripts/extract-portable.ps1",
   "packaging/windows-portable/README.txt",
   "site/index.html",
   "site/.nojekyll",
@@ -439,10 +440,14 @@ if (
 const portableSources = new Map([
   ["scripts/package-portable.mjs", read("scripts/package-portable.mjs")],
   ["scripts/compress-portable.ps1", read("scripts/compress-portable.ps1")],
+  ["scripts/extract-portable.ps1", read("scripts/extract-portable.ps1")],
 ]);
 const portableNodeSource = portableSources.get("scripts/package-portable.mjs");
 const portablePowerShellSource = portableSources.get(
   "scripts/compress-portable.ps1",
+);
+const portableExtractorSource = portableSources.get(
+  "scripts/extract-portable.ps1",
 );
 
 function portableAstFailure(message) {
@@ -526,6 +531,7 @@ function reviewPortableNodeAst(source) {
         "readFile",
         "readdir",
         "realpath",
+        "rename",
         "rm",
         "writeFile",
       ],
@@ -577,65 +583,171 @@ function reviewPortableNodeAst(source) {
     portableAstFailure("requires the exact reviewed core import specifiers");
   }
 
+  const reviewedImportNames = new Set(
+    [...expectedImports.values()].flat(),
+  );
+  const reviewedLocalFunctions = new Set([
+    "archiveLeaf",
+    "assertArchiveCandidate",
+    "assertInside",
+    "canonicalExisting",
+    "captureOwnedDirectory",
+    "comparable",
+    "copyValidatedTree",
+    "ensureDirectory",
+    "entriesUnder",
+    "fileIdentity",
+    "main",
+    "packagePortableFromBuild",
+    "packagePortableFromBuildForTest",
+    "pathInfo",
+    "requireDirectory",
+    "requireFile",
+    "requireOwnedDirectoryIdentity",
+    "requireOwnedFileIdentity",
+    "safeRemoveOwnedFile",
+    "safeRemoveOwnedTree",
+    "sameIdentity",
+    "samePath",
+    "settlePortableCleanup",
+    "sha256",
+    "stagePortable",
+    "validateExtractedArchive",
+  ]);
+  const reviewedBindingNames = new Set([
+    ...reviewedImportNames,
+    ...reviewedLocalFunctions,
+    "publicationHook",
+  ]);
+  const callableImportNames = new Set(
+    [...reviewedImportNames].filter((name) => name !== "sep"),
+  );
+  const callableBindingNames = new Set([
+    ...callableImportNames,
+    ...reviewedLocalFunctions,
+    "publicationHook",
+  ]);
+
+  function boundIdentifiers(name) {
+    if (!name) return [];
+    if (ts.isIdentifier(name)) return [name];
+    if (ts.isObjectBindingPattern(name) || ts.isArrayBindingPattern(name)) {
+      return name.elements.flatMap((element) =>
+        ts.isBindingElement(element) ? boundIdentifiers(element.name) : [],
+      );
+    }
+    return [];
+  }
+
+  function assignmentIdentifiers(target) {
+    if (ts.isIdentifier(target)) return [target];
+    if (ts.isParenthesizedExpression(target)) {
+      return assignmentIdentifiers(target.expression);
+    }
+    if (ts.isArrayLiteralExpression(target)) {
+      return target.elements.flatMap((element) =>
+        ts.isSpreadElement(element)
+          ? assignmentIdentifiers(element.expression)
+          : assignmentIdentifiers(element),
+      );
+    }
+    if (ts.isObjectLiteralExpression(target)) {
+      return target.properties.flatMap((property) => {
+        if (ts.isShorthandPropertyAssignment(property)) return [property.name];
+        if (ts.isPropertyAssignment(property)) {
+          return assignmentIdentifiers(property.initializer);
+        }
+        if (ts.isSpreadAssignment(property)) {
+          return assignmentIdentifiers(property.expression);
+        }
+        return [];
+      });
+    }
+    return [];
+  }
+
+  function rejectReviewedBinding(nodes, context, allowed = () => false) {
+    for (const identifier of nodes) {
+      if (
+        reviewedBindingNames.has(identifier.text) &&
+        !allowed(identifier)
+      ) {
+        portableAstFailure(
+          `rejects ${context} binding or shadow of ${identifier.text}`,
+        );
+      }
+    }
+  }
+
   const expectedDirectCalls = new Map([
     ["archiveLeaf", 1],
-    ["assertArchiveCandidate", 3],
-    ["assertInside", 17],
-    ["basename", 5],
-    ["canonicalExisting", 5],
+    ["assertArchiveCandidate", 4],
+    ["assertInside", 20],
+    ["basename", 6],
+    ["canonicalExisting", 9],
+    ["captureOwnedDirectory", 3],
     ["comparable", 2],
     ["copyFile", 3],
     ["copyValidatedTree", 1],
     ["createHash", 1],
-    ["dirname", 5],
-    ["ensureDirectory", 5],
-    ["entriesUnder", 4],
+    ["dirname", 6],
+    ["ensureDirectory", 6],
+    ["entriesUnder", 5],
+    ["fileIdentity", 2],
     ["fileURLToPath", 2],
     ["isAbsolute", 1],
-    ["join", 25],
+    ["join", 31],
     ["link", 1],
-    ["lstat", 6],
+    ["lstat", 9],
     ["main", 1],
     ["mkdir", 1],
     ["packagePortableFromBuild", 2],
     ["parse", 1],
-    ["pathInfo", 6],
-    ["publicationHook", 2],
-    ["randomUUID", 1],
-    ["readFile", 3],
+    ["pathInfo", 10],
+    ["publicationHook", 4],
+    ["randomUUID", 3],
+    ["readFile", 4],
     ["readdir", 1],
     ["realpath", 2],
-    ["relative", 4],
-    ["requireDirectory", 13],
-    ["requireFile", 9],
-    ["resolve", 9],
+    ["relative", 6],
+    ["rename", 1],
+    ["requireDirectory", 11],
+    ["requireFile", 8],
+    ["requireOwnedDirectoryIdentity", 3],
+    ["requireOwnedFileIdentity", 3],
+    ["resolve", 10],
     ["rm", 2],
-    ["safeRemoveFile", 1],
-    ["safeRemoveTree", 3],
+    ["safeRemoveOwnedFile", 1],
+    ["safeRemoveOwnedTree", 4],
+    ["sameIdentity", 5],
     ["samePath", 3],
     ["settlePortableCleanup", 1],
-    ["sha256", 1],
-    ["spawnSync", 1],
+    ["sha256", 2],
+    ["spawnSync", 2],
     ["stagePortable", 1],
+    ["validateExtractedArchive", 1],
     ["writeFile", 1],
   ]);
   const expectedMemberCalls = new Map([
-    ["allSettled", 1],
+    ["allSettled", 2],
     ["catch", 1],
+    ["compare", 1],
     ["digest", 1],
-    ["filter", 3],
+    ["filter", 4],
+    ["from", 1],
     ["includes", 2],
-    ["isDirectory", 2],
-    ["isFile", 4],
-    ["isSymbolicLink", 4],
-    ["join", 2],
-    ["map", 1],
+    ["isDirectory", 6],
+    ["isFile", 5],
+    ["isSymbolicLink", 9],
+    ["join", 4],
+    ["map", 4],
     ["parse", 1],
-    ["push", 5],
+    ["push", 7],
     ["reverse", 1],
-    ["sort", 1],
-    ["split", 2],
+    ["sort", 3],
+    ["split", 5],
     ["startsWith", 1],
+    ["stringify", 2],
     ["subarray", 1],
     ["test", 1],
     ["toLowerCase", 1],
@@ -644,38 +756,47 @@ function reviewPortableNodeAst(source) {
   ]);
   const expectedProperties = new Map([
     ["NODE_TEST_CONTEXT", 1],
-    ["allSettled", 1],
+    ["allSettled", 2],
     ["argv", 2],
     ["catch", 1],
+    ["checksumManifest", 1],
     ["code", 1],
+    ["compare", 1],
+    ["dev", 3],
     ["digest", 1],
     ["directory", 1],
+    ["entries", 1],
     ["env", 1],
-    ["error", 2],
+    ["error", 4],
     ["exitCode", 1],
-    ["filter", 3],
+    ["filter", 4],
+    ["from", 1],
     ["includes", 2],
-    ["isDirectory", 2],
-    ["isFile", 4],
-    ["isSymbolicLink", 4],
-    ["join", 2],
-    ["length", 1],
-    ["map", 1],
-    ["message", 2],
-    ["name", 5],
+    ["ino", 3],
+    ["isDirectory", 6],
+    ["isFile", 5],
+    ["isSymbolicLink", 9],
+    ["join", 4],
+    ["length", 2],
+    ["map", 4],
+    ["message", 1],
+    ["name", 10],
     ["parse", 1],
     ["path", 2],
+    ["payloads", 1],
     ["platform", 2],
-    ["push", 5],
+    ["push", 7],
     ["reverse", 1],
     ["root", 1],
+    ["sha256", 1],
     ["size", 1],
-    ["sort", 1],
-    ["split", 2],
+    ["sort", 3],
+    ["split", 5],
     ["startsWith", 1],
-    ["status", 1],
+    ["status", 2],
     ["stderr", 1],
     ["stdout", 1],
+    ["stringify", 2],
     ["subarray", 1],
     ["test", 1],
     ["toLowerCase", 1],
@@ -692,6 +813,7 @@ function reviewPortableNodeAst(source) {
     "readFile",
     "readdir",
     "realpath",
+    "rename",
     "rm",
     "spawnSync",
     "writeFile",
@@ -719,6 +841,85 @@ function reviewPortableNodeAst(source) {
   }
 
   function visit(node) {
+    if (ts.isVariableDeclaration(node)) {
+      rejectReviewedBinding(
+        boundIdentifiers(node.name),
+        "variable declaration",
+      );
+    }
+    if (ts.isParameter(node)) {
+      rejectReviewedBinding(
+        boundIdentifiers(node.name),
+        "parameter",
+        (identifier) =>
+          identifier.text === "publicationHook" &&
+          ts.isFunctionDeclaration(node.parent) &&
+          [
+            "packagePortableFromBuild",
+            "packagePortableFromBuildForTest",
+          ].includes(node.parent.name?.text) &&
+          node.parent.parameters[1] === node,
+      );
+    }
+    if (ts.isCatchClause(node) && node.variableDeclaration) {
+      rejectReviewedBinding(
+        boundIdentifiers(node.variableDeclaration.name),
+        "catch",
+      );
+    }
+    if (ts.isFunctionDeclaration(node)) {
+      rejectReviewedBinding(
+        node.name ? [node.name] : [],
+        "function declaration",
+        (identifier) =>
+          reviewedLocalFunctions.has(identifier.text) &&
+          node.parent === sourceFile,
+      );
+    }
+    if (ts.isFunctionExpression(node)) {
+      rejectReviewedBinding(
+        node.name ? [node.name] : [],
+        "function expression",
+      );
+    }
+    if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) {
+      rejectReviewedBinding(
+        node.name ? [node.name] : [],
+        "class declaration",
+      );
+    }
+    if (
+      ts.isPropertyDeclaration(node) ||
+      ts.isMethodDeclaration(node) ||
+      ts.isGetAccessorDeclaration(node) ||
+      ts.isSetAccessorDeclaration(node)
+    ) {
+      rejectReviewedBinding(
+        ts.isIdentifier(node.name) ? [node.name] : [],
+        "class member",
+      );
+    }
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+      node.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+    ) {
+      rejectReviewedBinding(
+        assignmentIdentifiers(node.left),
+        "assignment",
+      );
+    }
+    if (
+      (ts.isPrefixUnaryExpression(node) ||
+        ts.isPostfixUnaryExpression(node)) &&
+      (node.operator === ts.SyntaxKind.PlusPlusToken ||
+        node.operator === ts.SyntaxKind.MinusMinusToken)
+    ) {
+      rejectReviewedBinding(
+        assignmentIdentifiers(node.operand),
+        "update assignment",
+      );
+    }
     if (ts.isIdentifier(node)) {
       if (forbiddenIdentifiers.has(node.text)) {
         portableAstFailure(`rejects forbidden capability identifier ${node.text}`);
@@ -730,6 +931,51 @@ function reviewPortableNodeAst(source) {
           ts.isCallExpression(node.parent) && node.parent.expression === node;
         if (!imported && !directCallee) {
           portableAstFailure(`rejects aliases of capability ${node.text}`);
+        }
+      }
+      if (callableBindingNames.has(node.text)) {
+        const imported =
+          ts.isImportSpecifier(node.parent) && node.parent.name === node;
+        const localDeclaration =
+          ts.isFunctionDeclaration(node.parent) &&
+          node.parent.name === node &&
+          reviewedLocalFunctions.has(node.text) &&
+          node.parent.parent === sourceFile;
+        const publicationParameter =
+          ts.isParameter(node.parent) &&
+          node.parent.name === node &&
+          node.text === "publicationHook" &&
+          ts.isFunctionDeclaration(node.parent.parent) &&
+          [
+            "packagePortableFromBuild",
+            "packagePortableFromBuildForTest",
+          ].includes(node.parent.parent.name?.text);
+        const directCallee =
+          ts.isCallExpression(node.parent) && node.parent.expression === node;
+        const propertyName =
+          (ts.isPropertyAccessExpression(node.parent) &&
+            node.parent.name === node) ||
+          ((ts.isPropertyAssignment(node.parent) ||
+            ts.isMethodDeclaration(node.parent) ||
+            ts.isPropertyDeclaration(node.parent)) &&
+            node.parent.name === node);
+        const reviewedForwarding =
+          node.text === "publicationHook" &&
+          ts.isCallExpression(node.parent) &&
+          node.parent.arguments[1] === node &&
+          ts.isIdentifier(node.parent.expression) &&
+          node.parent.expression.text === "packagePortableFromBuild";
+        if (
+          !imported &&
+          !localDeclaration &&
+          !publicationParameter &&
+          !directCallee &&
+          !propertyName &&
+          !reviewedForwarding
+        ) {
+          portableAstFailure(
+            `rejects alias reference to reviewed binding ${node.text}`,
+          );
         }
       }
     }
@@ -855,11 +1101,15 @@ function reviewPortableNodeAst(source) {
     ],
     ["mkdir", [[["identifier", "current"]]]],
     [
+      "rename",
+      [[["identifier", "path"], ["identifier", "quarantine"]]],
+    ],
+    [
       "rm",
       [
         [["identifier", "path"]],
         [
-          ["identifier", "path"],
+          ["identifier", "quarantine"],
           ["object", [["recursive", ["boolean", true]]]],
         ],
       ],
@@ -895,48 +1145,79 @@ function reviewPortableNodeAst(source) {
     portableAstFailure("rejects unreviewed writeFile destinations or options");
   }
 
-  const spawnCall = directCallNodes.get("spawnSync")?.[0];
-  const expectedSpawnArguments = [
-    ["string", "powershell.exe"],
+  const powerShellOptions = [
+    "object",
     [
-      "array",
-      [
-        ["string", "-NoLogo"],
-        ["string", "-NoProfile"],
-        ["string", "-NonInteractive"],
-        ["string", "-ExecutionPolicy"],
-        ["string", "Bypass"],
-        ["string", "-File"],
-        [
-          "call",
-          ["identifier", "join"],
-          [
-            ["identifier", "repoRoot"],
-            ["string", "scripts"],
-            ["string", "compress-portable.ps1"],
-          ],
-        ],
-        ["string", "-Source"],
-        ["identifier", "stageRoot"],
-        ["string", "-Destination"],
-        ["identifier", "temporaryArchive"],
-      ],
-    ],
-    [
-      "object",
-      [
-        ["cwd", ["identifier", "repoRoot"]],
-        ["stdio", ["string", "inherit"]],
-      ],
+      ["cwd", ["identifier", "repoRoot"]],
+      ["stdio", ["string", "inherit"]],
     ],
   ];
+  const powerShellPrefix = [
+    ["string", "-NoLogo"],
+    ["string", "-NoProfile"],
+    ["string", "-NonInteractive"],
+    ["string", "-ExecutionPolicy"],
+    ["string", "Bypass"],
+    ["string", "-File"],
+  ];
+  const expectedSpawnArguments = [
+    [
+      ["string", "powershell.exe"],
+      [
+        "array",
+        [
+          ...powerShellPrefix,
+          [
+            "call",
+            ["identifier", "join"],
+            [
+              ["identifier", "repoRoot"],
+              ["string", "scripts"],
+              ["string", "compress-portable.ps1"],
+            ],
+          ],
+          ["string", "-Source"],
+          ["identifier", "stageRoot"],
+          ["string", "-Destination"],
+          ["identifier", "temporaryArchive"],
+        ],
+      ],
+      powerShellOptions,
+    ],
+    [
+      ["string", "powershell.exe"],
+      [
+        "array",
+        [
+          ...powerShellPrefix,
+          [
+            "call",
+            ["identifier", "join"],
+            [
+              ["identifier", "repoRoot"],
+              ["string", "scripts"],
+              ["string", "extract-portable.ps1"],
+            ],
+          ],
+          ["string", "-Source"],
+          ["identifier", "temporaryArchive"],
+          ["string", "-Destination"],
+          ["identifier", "verificationDirectory"],
+        ],
+      ],
+      powerShellOptions,
+    ],
+  ];
+  const actualSpawnArguments = (directCallNodes.get("spawnSync") ?? [])
+    .map((call) => call.arguments.map(expressionShape))
+    .map(shapeKey)
+    .sort();
   if (
-    !spawnCall ||
-    shapeKey(spawnCall.arguments.map(expressionShape)) !==
-      shapeKey(expectedSpawnArguments)
+    shapeKey(actualSpawnArguments) !==
+    shapeKey(expectedSpawnArguments.map(shapeKey).sort())
   ) {
     portableAstFailure(
-      "permits only the exact reviewed powershell.exe compressor invocation",
+      "permits only the exact reviewed powershell.exe compressor and extractor invocations",
     );
   }
 }
@@ -1030,14 +1311,117 @@ if (
     "portable PowerShell operation allowlist permits only direct path validation and one direct Compress-Archive invocation",
   );
 }
+const reviewedExtractor = portableExtractorSource
+  .replace(/^\s*#.*$/gm, "")
+  .replace(/\r\n?/g, "\n");
+const expectedExtractorCounts = new Map([
+  ["Add-Type", 1],
+  ["Expand-Archive", 1],
+  ["Get-ChildItem", 1],
+  ["Get-Item", 2],
+  ["OpenRead", 1],
+  ["Test-Path", 2],
+]);
+for (const [operation, expected] of expectedExtractorCounts) {
+  const count = [...reviewedExtractor.matchAll(
+    new RegExp(`\\b${operation}\\b`, "g"),
+  )].length;
+  if (count !== expected) {
+    fail(
+      `portable extractor allowlist requires ${operation} exactly ${expected} time(s); found ${count}`,
+    );
+  }
+}
+const allowedExtractorStatements = new Set([
+  "param(",
+  "[Parameter(Mandatory = $true)]",
+  "[string]$Source,",
+  "[string]$Destination",
+  ")",
+  '$ErrorActionPreference = "Stop"',
+  "Add-Type -AssemblyName System.IO.Compression.FileSystem",
+  "$sourcePath = [System.IO.Path]::GetFullPath($Source)",
+  "$destinationPath = [System.IO.Path]::GetFullPath($Destination)",
+  "if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {",
+  'throw "Portable archive source does not exist."',
+  "}",
+  'if ([System.IO.Path]::GetExtension($sourcePath) -cne ".zip") {',
+  'throw "Portable archive source must be a .zip file."',
+  "if (-not (Test-Path -LiteralPath $destinationPath -PathType Container)) {",
+  'throw "Portable verification directory does not exist."',
+  "$sourceItem = Get-Item -LiteralPath $sourcePath",
+  "$destinationItem = Get-Item -LiteralPath $destinationPath",
+  "if (",
+  "($sourceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or",
+  "($destinationItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)",
+  ") {",
+  'throw "Portable extractor paths must not be reparse points."',
+  "if ((Get-ChildItem -LiteralPath $destinationPath).Count -ne 0) {",
+  'throw "Portable verification directory must be empty."',
+  "$separator = [System.IO.Path]::DirectorySeparatorChar",
+  "$destinationPrefix = $destinationPath.TrimEnd($separator) + $separator",
+  "$seen = [System.Collections.Generic.HashSet[string]]::new(",
+  "[System.StringComparer]::OrdinalIgnoreCase",
+  ")",
+  "$archive = [System.IO.Compression.ZipFile]::OpenRead($sourcePath)",
+  "try {",
+  "foreach ($entry in $archive.Entries) {",
+  '$entryName = $entry.FullName.Replace("\\", "/").TrimEnd("/")',
+  "if ([string]::IsNullOrWhiteSpace($entryName)) {",
+  'throw "Portable archive contains an empty entry name."',
+  "if (-not $seen.Add($entryName)) {",
+  'throw "Portable archive contains a duplicate entry."',
+  "$entryPath = [System.IO.Path]::GetFullPath(",
+  "[System.IO.Path]::Combine(",
+  "$destinationPath,",
+  '$entryName.Replace("/", $separator)',
+  ")",
+  "if (-not $entryPath.StartsWith(",
+  "$destinationPrefix,",
+  "[System.StringComparison]::OrdinalIgnoreCase",
+  ")) {",
+  'throw "Portable archive entry escapes the verification directory."',
+  "finally {",
+  "$archive.Dispose()",
+  "Expand-Archive `",
+  "-LiteralPath $sourcePath `",
+  "-DestinationPath $destinationPath",
+]);
+for (const statement of reviewedExtractor
+  .split("\n")
+  .map((line) => line.trim())
+  .filter(Boolean)) {
+  if (!allowedExtractorStatements.has(statement)) {
+    fail(`portable extractor allowlist rejects unsupported statement: ${statement}`);
+  }
+}
+if (
+  /(?:^|[\s;|])(?:&|\.|Invoke-Expression|iex|Set-Alias|New-Alias|Get-Command|Start-Process|curl|wget|Invoke-WebRequest)(?:\s|$)/im.test(
+    reviewedExtractor,
+  ) ||
+  !reviewedExtractor.includes(
+    "$archive = [System.IO.Compression.ZipFile]::OpenRead($sourcePath)",
+  ) ||
+  !reviewedExtractor.includes(
+    "Expand-Archive `\n  -LiteralPath $sourcePath `\n  -DestinationPath $destinationPath",
+  )
+) {
+  fail(
+    "portable extractor allowlist permits only the reviewed duplicate/path validation and direct extraction destination",
+  );
+}
 const portableSourceSeals = new Map([
   [
     "scripts/package-portable.mjs",
-    "f3948b4c05974db195daa6aa7602cf088d5e858ee4b3cd053c4bf15a3c594643",
+    "8470ec7c9651153a9900168749bb5aeeca2c8454631c89d67ddbfaed4544761a",
   ],
   [
     "scripts/compress-portable.ps1",
     "d42425e9544bd0d4e4c9d021d1ec8b8ce13b328d93da3f5e5d4a3417f81c550a",
+  ],
+  [
+    "scripts/extract-portable.ps1",
+    "5d8076986a54331e0c3f2c2603630772cd025a87212f9a41f10f6891e21ff49e",
   ],
 ]);
 for (const [path, expected] of portableSourceSeals) {

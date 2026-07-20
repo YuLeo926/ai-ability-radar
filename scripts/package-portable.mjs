@@ -8,6 +8,7 @@ import {
   readFile,
   readdir,
   realpath,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -148,19 +149,102 @@ async function entriesUnder(root, current = root) {
   return result;
 }
 
-async function safeRemoveTree(path, canonicalRoot, label) {
-  if (!(await pathInfo(path))) return;
-  const canonical = await requireDirectory(path, label);
-  assertInside(canonicalRoot, canonical, label);
-  await entriesUnder(path);
-  await rm(path, { recursive: true });
+function fileIdentity(info) {
+  return { dev: info.dev, ino: info.ino };
 }
 
-async function safeRemoveFile(path, canonicalRoot, label) {
+function sameIdentity(info, identity) {
+  return info.dev === identity?.dev && info.ino === identity?.ino;
+}
+
+async function captureOwnedDirectory(path, canonicalRoot, label) {
+  const info = await lstat(path);
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    throw new Error(`${label} ownership could not be established`);
+  }
+  const canonical = await canonicalExisting(path, label);
+  assertInside(canonicalRoot, canonical, label);
+  return fileIdentity(info);
+}
+
+async function requireOwnedDirectoryIdentity(
+  path,
+  canonicalRoot,
+  label,
+  identity,
+) {
+  const info = await lstat(path);
+  if (
+    info.isSymbolicLink() ||
+    !info.isDirectory() ||
+    !sameIdentity(info, identity)
+  ) {
+    throw new Error(`${label} ownership identity changed`);
+  }
+  const canonical = await canonicalExisting(path, label);
+  assertInside(canonicalRoot, canonical, label);
+}
+
+async function requireOwnedFileIdentity(path, canonicalRoot, label, identity) {
+  const info = await lstat(path);
+  if (
+    info.isSymbolicLink() ||
+    !info.isFile() ||
+    !sameIdentity(info, identity)
+  ) {
+    throw new Error(`${label} ownership identity changed`);
+  }
+  const canonical = await canonicalExisting(path, label);
+  assertInside(canonicalRoot, canonical, label);
+}
+
+async function safeRemoveOwnedTree(path, canonicalRoot, label, identity) {
   const info = await pathInfo(path);
   if (!info) return;
-  if (info.isSymbolicLink() || !info.isFile()) {
-    throw new Error(`${label} must be a non-indirect regular file`);
+  if (
+    !identity ||
+    info.isSymbolicLink() ||
+    !info.isDirectory() ||
+    !sameIdentity(info, identity)
+  ) {
+    throw new Error(`${label} cleanup authority could not be established`);
+  }
+  const canonicalParent = await requireDirectory(dirname(path), `${label} parent`);
+  assertInside(canonicalRoot, resolve(path), label);
+  const quarantine = join(
+    dirname(path),
+    `.${basename(path)}.${randomUUID()}.quarantine`,
+  );
+  assertInside(canonicalRoot, quarantine, `${label} quarantine`);
+  if (await pathInfo(quarantine)) {
+    throw new Error(`${label} quarantine unexpectedly exists`);
+  }
+  await rename(path, quarantine);
+  const movedInfo = await lstat(quarantine);
+  if (
+    movedInfo.isSymbolicLink() ||
+    !movedInfo.isDirectory() ||
+    !sameIdentity(movedInfo, identity)
+  ) {
+    throw new Error(`${label} cleanup identity changed`);
+  }
+  const canonicalQuarantine = await canonicalExisting(quarantine, label);
+  assertInside(canonicalParent, canonicalQuarantine, `${label} quarantine`);
+  await entriesUnder(quarantine);
+  await rm(quarantine, { recursive: true });
+}
+
+async function safeRemoveOwnedFile(path, canonicalRoot, label, identity) {
+  if (!path) return;
+  const info = await pathInfo(path);
+  if (!info) return;
+  if (
+    !identity ||
+    info.isSymbolicLink() ||
+    !info.isFile() ||
+    !sameIdentity(info, identity)
+  ) {
+    throw new Error(`${label} cleanup authority could not be established`);
   }
   const canonical = await canonicalExisting(path, label);
   assertInside(canonicalRoot, canonical, label);
@@ -169,19 +253,31 @@ async function safeRemoveFile(path, canonicalRoot, label) {
 
 async function settlePortableCleanup({
   temporaryArchive,
+  temporaryIdentity,
+  verificationDirectory,
+  verificationIdentity,
   stageParent,
+  stageIdentity,
   canonicalBundle,
 }) {
   const results = await Promise.allSettled([
-    safeRemoveFile(
+    safeRemoveOwnedFile(
       temporaryArchive,
       canonicalBundle,
       "portable temporary archive",
+      temporaryIdentity,
     ),
-    safeRemoveTree(
+    safeRemoveOwnedTree(
+      verificationDirectory,
+      canonicalBundle,
+      "portable verification directory",
+      verificationIdentity,
+    ),
+    safeRemoveOwnedTree(
       stageParent,
       canonicalBundle,
       "portable stage directory",
+      stageIdentity,
     ),
   ]);
   return results.filter(({ status }) => status === "rejected").length;
@@ -228,6 +324,47 @@ async function copyValidatedTree(sourceRoot, destinationRoot, entries) {
 async function sha256(path) {
   await requireFile(path, "portable checksum input");
   return createHash("sha256").update(await readFile(path)).digest("hex");
+}
+
+async function validateExtractedArchive(
+  verificationDirectory,
+  expectedArchive,
+) {
+  const extractedEntries = await entriesUnder(verificationDirectory);
+  const actualEntries = extractedEntries.map(({ path, directory }) => ({
+    name: relative(verificationDirectory, path).split(sep).join("/"),
+    directory,
+  }));
+  const expectedEntries = [
+    { name: "ability-radar-portable", directory: true },
+    ...expectedArchive.entries.map(({ name, directory }) => ({
+      name: `ability-radar-portable/${name}`,
+      directory,
+    })),
+  ];
+  const byName = (left, right) =>
+    left.name < right.name ? -1 : left.name > right.name ? 1 : 0;
+  actualEntries.sort(byName);
+  expectedEntries.sort(byName);
+  if (JSON.stringify(actualEntries) !== JSON.stringify(expectedEntries)) {
+    throw new Error("portable archive verification found unexpected entries");
+  }
+  const extractedRoot = join(
+    verificationDirectory,
+    "ability-radar-portable",
+  );
+  for (const payload of expectedArchive.payloads) {
+    const extractedPath = join(extractedRoot, ...payload.name.split("/"));
+    if ((await sha256(extractedPath)) !== payload.sha256) {
+      throw new Error("portable archive verification found a payload mismatch");
+    }
+  }
+  const extractedChecksums = await readFile(
+    join(extractedRoot, "SHA256SUMS.txt"),
+  );
+  if (Buffer.compare(extractedChecksums, expectedArchive.checksumManifest) !== 0) {
+    throw new Error("portable archive verification found a checksum mismatch");
+  }
 }
 
 export async function stagePortable({
@@ -284,16 +421,28 @@ export async function stagePortable({
   assertInside(canonicalBundle, stageParent, "portable stage directory");
 
   let ownsStage = false;
+  let stageIdentity;
   try {
     if (await pathInfo(stageParent)) {
-      await safeRemoveTree(
+      const previousIdentity = await captureOwnedDirectory(
         stageParent,
         canonicalBundle,
-        "portable stage directory",
+        "portable preexisting stage directory",
+      );
+      await safeRemoveOwnedTree(
+        stageParent,
+        canonicalBundle,
+        "portable preexisting stage directory",
+        previousIdentity,
       );
     }
     await ensureDirectory(stageRoot, "portable stage root");
     ownsStage = true;
+    stageIdentity = await captureOwnedDirectory(
+      stageParent,
+      canonicalBundle,
+      "portable stage directory",
+    );
     const canonicalStageRoot = await requireDirectory(
       stageRoot,
       "portable stage root",
@@ -317,26 +466,57 @@ export async function stagePortable({
       .filter(({ directory }) => !directory)
       .map(({ path }) => path);
     const lines = [];
+    const payloads = [];
     for (const file of files) {
       const name = relative(stageRoot, file).split(sep).join("/");
-      lines.push(`${await sha256(file)}  ${name}`);
+      const hash = await sha256(file);
+      lines.push(`${hash}  ${name}`);
+      payloads.push({ name, sha256: hash });
     }
+    const checksumManifest = Buffer.from(`${lines.join("\n")}\n`, "utf8");
     await writeFile(
       join(stageRoot, "SHA256SUMS.txt"),
-      `${lines.join("\n")}\n`,
+      checksumManifest,
       { flag: "wx" },
     );
     await requireFile(
       join(stageRoot, "SHA256SUMS.txt"),
       "portable checksum manifest",
     );
-    return { archivePath, stageRoot };
+    const entries = stagedEntries.map(({ path, directory }) => ({
+      name: relative(stageRoot, path).split(sep).join("/"),
+      directory,
+    }));
+    entries.push({ name: "SHA256SUMS.txt", directory: false });
+    return {
+      archivePath,
+      canonicalBundle,
+      checksumManifest,
+      entries,
+      payloads,
+      stageIdentity,
+      stageParent,
+      stageRoot,
+    };
   } catch (error) {
+    let cleanupFailureCount = 0;
     if (ownsStage) {
-      await safeRemoveTree(
-        stageParent,
-        canonicalBundle,
-        "portable stage directory",
+      const results = await Promise.allSettled([
+        safeRemoveOwnedTree(
+          stageParent,
+          canonicalBundle,
+          "portable stage directory",
+          stageIdentity,
+        ),
+      ]);
+      cleanupFailureCount = results.filter(
+        ({ status }) => status === "rejected",
+      ).length;
+    }
+    if (cleanupFailureCount > 0) {
+      throw new Error(
+        `portable staging processing failed; cleanup incomplete (${cleanupFailureCount} operation)`,
+        { cause: error },
       );
     }
     throw error;
@@ -350,47 +530,94 @@ async function packagePortableFromBuild(repoRoot, publicationHook) {
   const version = packageManifest.version;
   const targetDir = join(repoRoot, "target", "release");
   const bundleDir = join(targetDir, "bundle", "portable");
-  const { archivePath, stageRoot } = await stagePortable({
+  const expectedArchive = await stagePortable({
     repoRoot,
     targetDir,
     bundleDir,
     version,
   });
-  const canonicalBundle = await requireDirectory(
-    bundleDir,
-    "portable bundle directory",
-  );
-  await assertArchiveCandidate(
-    canonicalBundle,
+  const {
     archivePath,
-    "portable final archive",
-  );
-  const stageParent = dirname(stageRoot);
-  const canonicalStageParent = await requireDirectory(
-    stageParent,
-    "portable stage directory",
-  );
-  assertInside(canonicalBundle, canonicalStageParent, "portable stage directory");
-  const temporaryArchive = join(
-    bundleDir,
-    `.${basename(archivePath, ".zip")}.${randomUUID()}.tmp.zip`,
-  );
-  await assertArchiveCandidate(
     canonicalBundle,
-    temporaryArchive,
-    "portable temporary archive",
-  );
-
+    stageIdentity,
+    stageParent,
+    stageRoot,
+  } = expectedArchive;
+  let temporaryArchive;
+  let temporaryIdentity;
+  let verificationDirectory;
+  let verificationIdentity;
   let published = false;
   let primaryError;
   try {
+    await publicationHook?.({
+      phase: "afterChecksums",
+      archivePath,
+      stageParent,
+      stageRoot,
+    });
+    await assertArchiveCandidate(
+      canonicalBundle,
+      archivePath,
+      "portable final archive",
+    );
+    await requireOwnedDirectoryIdentity(
+      stageParent,
+      canonicalBundle,
+      "portable stage directory",
+      stageIdentity,
+    );
+    temporaryArchive = join(
+      bundleDir,
+      `.${basename(archivePath, ".zip")}.${randomUUID()}.tmp.zip`,
+    );
+    verificationDirectory = join(bundleDir, `.verify.${randomUUID()}`);
+    await assertArchiveCandidate(
+      canonicalBundle,
+      temporaryArchive,
+      "portable temporary archive",
+    );
+    await assertArchiveCandidate(
+      canonicalBundle,
+      verificationDirectory,
+      "portable verification directory",
+    );
     if (await pathInfo(archivePath)) {
       throw new Error("portable final archive already exists; refusing to overwrite");
     }
     if (await pathInfo(temporaryArchive)) {
       throw new Error("portable temporary archive unexpectedly exists");
     }
-    const result = spawnSync(
+    if (await pathInfo(verificationDirectory)) {
+      throw new Error("portable verification directory unexpectedly exists");
+    }
+    await ensureDirectory(
+      verificationDirectory,
+      "portable verification directory",
+    );
+    verificationIdentity = await captureOwnedDirectory(
+      verificationDirectory,
+      canonicalBundle,
+      "portable verification directory",
+    );
+    await publicationHook?.({
+      phase: "beforeCompression",
+      archivePath,
+      stageParent,
+      stageRoot,
+      temporaryArchive,
+      verificationDirectory,
+    });
+    await requireOwnedDirectoryIdentity(
+      stageParent,
+      canonicalBundle,
+      "portable stage directory",
+      stageIdentity,
+    );
+    if (await pathInfo(temporaryArchive)) {
+      throw new Error("portable temporary archive unexpectedly exists");
+    }
+    const compressionResult = spawnSync(
       "powershell.exe",
       [
         "-NoLogo",
@@ -407,80 +634,141 @@ async function packagePortableFromBuild(repoRoot, publicationHook) {
       ],
       { cwd: repoRoot, stdio: "inherit" },
     );
-    if (result.error) throw result.error;
-    if (result.status !== 0) {
+    const temporaryInfo = await pathInfo(temporaryArchive);
+    if (temporaryInfo) {
+      if (
+        temporaryInfo.isSymbolicLink() ||
+        !temporaryInfo.isFile()
+      ) {
+        throw new Error("portable ZIP compressor did not produce a regular archive");
+      }
+      const canonicalTemporary = await canonicalExisting(
+        temporaryArchive,
+        "portable temporary archive",
+      );
+      assertInside(
+        canonicalBundle,
+        canonicalTemporary,
+        "portable temporary archive",
+      );
+      temporaryIdentity = fileIdentity(temporaryInfo);
+    }
+    if (compressionResult.error) throw compressionResult.error;
+    if (compressionResult.status !== 0) {
       throw new Error("portable ZIP compression failed");
     }
-    const temporaryInfo = await lstat(temporaryArchive);
     if (
-      temporaryInfo.isSymbolicLink() ||
-      !temporaryInfo.isFile() ||
+      !temporaryInfo ||
       temporaryInfo.size < 4
     ) {
       throw new Error("portable ZIP compressor did not produce a regular archive");
     }
-    const canonicalTemporary = await canonicalExisting(
-      temporaryArchive,
-      "portable temporary archive",
-    );
-    assertInside(canonicalBundle, canonicalTemporary, "portable temporary archive");
     const signature = (await readFile(temporaryArchive)).subarray(0, 2);
     if (signature[0] !== 0x50 || signature[1] !== 0x4b) {
       throw new Error("portable ZIP compressor produced an invalid ZIP signature");
     }
+    const extractionResult = spawnSync(
+      "powershell.exe",
+      [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        join(repoRoot, "scripts", "extract-portable.ps1"),
+        "-Source",
+        temporaryArchive,
+        "-Destination",
+        verificationDirectory,
+      ],
+      { cwd: repoRoot, stdio: "inherit" },
+    );
+    if (extractionResult.error) throw extractionResult.error;
+    if (extractionResult.status !== 0) {
+      throw new Error("portable ZIP extraction failed");
+    }
+    await requireOwnedDirectoryIdentity(
+      verificationDirectory,
+      canonicalBundle,
+      "portable verification directory",
+      verificationIdentity,
+    );
+    await validateExtractedArchive(verificationDirectory, expectedArchive);
+    await requireOwnedFileIdentity(
+      temporaryArchive,
+      canonicalBundle,
+      "portable temporary archive",
+      temporaryIdentity,
+    );
     await publicationHook?.({
       phase: "beforeLink",
       archivePath,
+      stageParent,
+      stageRoot,
       temporaryArchive,
+      verificationDirectory,
     });
+    await requireOwnedFileIdentity(
+      temporaryArchive,
+      canonicalBundle,
+      "portable temporary archive",
+      temporaryIdentity,
+    );
     await link(temporaryArchive, archivePath);
     published = true;
     await publicationHook?.({
       phase: "afterLink",
       archivePath,
+      stageParent,
+      stageRoot,
       temporaryArchive,
+      verificationDirectory,
     });
-    const canonicalFinal = await requireFile(
+    await requireOwnedFileIdentity(
       archivePath,
+      canonicalBundle,
       "portable final archive",
+      temporaryIdentity,
     );
-    assertInside(canonicalBundle, canonicalFinal, "portable final archive");
   } catch (error) {
     primaryError = error;
   }
 
   const cleanupFailureCount = await settlePortableCleanup({
     temporaryArchive,
+    temporaryIdentity,
+    verificationDirectory,
+    verificationIdentity,
     stageParent,
+    stageIdentity,
     canonicalBundle,
   });
   const cleanupSummary = `cleanup incomplete (${cleanupFailureCount} operation${
     cleanupFailureCount === 1 ? "" : "s"
   })`;
 
+  if (published && primaryError) {
+    throw new Error(
+      `portable archive was published; processing failed; ${
+        cleanupFailureCount > 0 ? cleanupSummary : "cleanup completed"
+      }`,
+      { cause: primaryError },
+    );
+  }
   if (published && cleanupFailureCount > 0) {
     throw new Error(
       `portable archive was published; ${cleanupSummary}`,
-      { cause: primaryError },
     );
   }
-  if (published && primaryError) {
+  if (primaryError) {
     throw new Error(
-      "portable archive was published; post-publication processing failed, cleanup completed",
+      `portable packaging processing failed${
+        cleanupFailureCount > 0 ? `; ${cleanupSummary}` : ""
+      }`,
       { cause: primaryError },
     );
   }
-  if (primaryError && cleanupFailureCount > 0) {
-    throw new Error(
-      `${
-        primaryError instanceof Error
-          ? primaryError.message
-          : "portable packaging failed"
-      }; ${cleanupSummary}`,
-      { cause: primaryError },
-    );
-  }
-  if (primaryError) throw primaryError;
   return archivePath;
 }
 
