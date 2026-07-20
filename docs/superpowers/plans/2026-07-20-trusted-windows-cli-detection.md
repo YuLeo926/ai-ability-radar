@@ -229,6 +229,7 @@ git commit -m "feat: add stable CLI availability states"
 - Modify: `crates/ability-adapters/src/command_locator.rs`
 - Modify: `crates/ability-adapters/src/codex.rs`
 - Modify: `crates/ability-adapters/src/claude.rs`
+- Modify: `crates/ability-adapters/src/process.rs`
 - Test: `crates/ability-adapters/src/command_locator.rs`
 
 **Interfaces:**
@@ -397,6 +398,11 @@ In the existing `with_resolved_command` constructors in `codex.rs` and
 edit required for the crate to compile after adding the field; Task 3 will
 replace the adapters' one-shot discovery behavior.
 
+Also set `source: LaunchSource::NativeExe` on the direct
+`ProcessEnvironment::Clear` launch constructed in `process.rs`. That generic
+branch resolves an executable path directly and therefore cannot be a reviewed
+npm entry; this is the fourth required compatibility initializer.
+
 - [ ] **Step 4: Run the full locator suite**
 
 Run:
@@ -411,7 +417,7 @@ relative PATH, containment, ordering, and missing Node cases.
 - [ ] **Step 5: Commit ordered discovery**
 
 ```powershell
-git add crates/ability-adapters/src/command_locator.rs crates/ability-adapters/src/codex.rs crates/ability-adapters/src/claude.rs
+git add crates/ability-adapters/src/command_locator.rs crates/ability-adapters/src/codex.rs crates/ability-adapters/src/claude.rs crates/ability-adapters/src/process.rs
 git commit -m "fix: preserve PATH order for provider discovery"
 ```
 
