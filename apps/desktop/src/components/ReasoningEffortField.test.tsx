@@ -51,3 +51,32 @@ test("custom mode preserves manual labels and reports validation", async () => {
   await user.type(screen.getByLabelText("按界面原样填写"), "想".repeat(41));
   expect(screen.getByRole("alert")).toHaveTextContent("40");
 });
+
+test("associates a custom validation error only with its text input", async () => {
+  const user = userEvent.setup();
+  function Harness() {
+    const [value, setValue] = useState("");
+    return (
+      <ReasoningEffortField
+        emptyLabel="未显示 / 不适用"
+        id="effort"
+        kind="chat_gpt_client"
+        label="推理档位"
+        onChange={setValue}
+        onValidationChange={() => undefined}
+        value={value}
+      />
+    );
+  }
+  render(<Harness />);
+
+  const select = screen.getByLabelText("推理档位");
+  await user.selectOptions(select, "__custom__");
+  const input = screen.getByLabelText("按界面原样填写");
+  const error = screen.getByRole("alert");
+
+  expect(input).toHaveAttribute("aria-invalid", "true");
+  expect(input).toHaveAttribute("aria-describedby", error.id);
+  expect(select).not.toHaveAttribute("aria-invalid");
+  expect(select).not.toHaveAttribute("aria-describedby");
+});

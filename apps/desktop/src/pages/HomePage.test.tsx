@@ -194,7 +194,7 @@ test("an unavailable CLI disables only that target", async () => {
   ).toBeInTheDocument();
 });
 
-test("re-detects CLI availability without restarting the app", async () => {
+test("re-detects CLI availability and explains inherited PATH limits", async () => {
   const first = readyBootstrap();
   first.targets = first.targets.map((target) =>
     target.kind === "codex_cli"
@@ -215,6 +215,11 @@ test("re-detects CLI availability without restarting the app", async () => {
   renderHome(backendFor(load));
 
   expect(await screen.findByText("未检测到可执行入口")).toBeInTheDocument();
+  expect(
+    screen.getByText(
+      /已继承 PATH 目录内的变化可立即重新检测.*新增 PATH 目录.*重启应用.*重新检测/,
+    ),
+  ).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "重新检测 CLI" }));
 
   expect(await screen.findByText("版本：codex-cli 0.142.5")).toBeInTheDocument();

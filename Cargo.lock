@@ -57,6 +57,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
+ "unicode-general-category",
  "uuid",
  "windows-sys 0.61.2",
 ]

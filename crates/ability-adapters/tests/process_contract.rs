@@ -103,7 +103,7 @@ async fn provider_path_child_case() {
         },
     );
     let process = ProcessSpec {
-        program: "codex".to_owned(),
+        program: "codex".into(),
         args: hostile_args.clone(),
         current_dir: fixture_root.clone(),
         env,
@@ -296,7 +296,7 @@ async fn preserves_argument_boundaries_and_overlays_environment() {
 async fn environment_policy_distinguishes_inherit_from_clear() {
     let environment_probe = || {
         let mut command = spec("exit 0");
-        command.program = std::env::var("ComSpec").unwrap();
+        command.program = std::env::var("ComSpec").unwrap().into();
         command.args = vec![
             "/d".into(),
             "/c".into(),

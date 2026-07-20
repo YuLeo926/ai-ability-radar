@@ -215,7 +215,6 @@ pub struct AppState {
     pub(crate) cli_runs: Arc<CliRunService>,
     pub(crate) client_pack: Arc<LoadedPack>,
     pub(crate) cli_pack: Arc<LoadedPack>,
-    pub(crate) adapters: BTreeMap<TargetKind, Arc<dyn AgentAdapter>>,
     pub(crate) verifier: Arc<dyn WorkspaceVerifier>,
     pub(crate) runner: Arc<dyn ProcessRunner>,
     pub(crate) cancellations: CancellationRegistry,
@@ -269,15 +268,6 @@ impl AppState {
             )
             .is_err(),
         ));
-        let mut adapters: BTreeMap<TargetKind, Arc<dyn AgentAdapter>> = BTreeMap::new();
-        adapters.insert(
-            TargetKind::CodexCli,
-            Arc::new(CodexAdapter::new(runner.clone())),
-        );
-        adapters.insert(
-            TargetKind::ClaudeCode,
-            Arc::new(ClaudeCodeAdapter::new(runner.clone())),
-        );
         let verifier: Arc<dyn WorkspaceVerifier> =
             Arc::new(NodeVerifier::new(runner.clone(), layout.cli_pack));
 
@@ -293,7 +283,6 @@ impl AppState {
             repository,
             client_pack,
             cli_pack,
-            adapters,
             verifier,
             runner,
             cancellations: CancellationRegistry::default(),
@@ -323,7 +312,7 @@ impl AppState {
                 prerequisites: Vec::new(),
             },
         ];
-        for adapter in self.adapters.values() {
+        for adapter in fresh_provider_adapters(self.runner.clone()).values() {
             let mut availability = adapter.detect().await;
             availability.version = public_cli_version(availability.version);
             availability.prerequisites.push(node.clone());
@@ -331,6 +320,21 @@ impl AppState {
         }
         targets
     }
+}
+
+pub(crate) fn fresh_provider_adapters(
+    runner: Arc<dyn ProcessRunner>,
+) -> BTreeMap<TargetKind, Arc<dyn AgentAdapter>> {
+    let mut adapters: BTreeMap<TargetKind, Arc<dyn AgentAdapter>> = BTreeMap::new();
+    adapters.insert(
+        TargetKind::CodexCli,
+        Arc::new(CodexAdapter::new(runner.clone())),
+    );
+    adapters.insert(
+        TargetKind::ClaudeCode,
+        Arc::new(ClaudeCodeAdapter::new(runner)),
+    );
+    adapters
 }
 
 fn load_verified_packs(

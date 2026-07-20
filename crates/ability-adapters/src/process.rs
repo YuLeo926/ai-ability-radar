@@ -32,7 +32,7 @@ const JOB_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct ProcessSpec {
-    pub program: String,
+    pub program: PathBuf,
     pub args: Vec<String>,
     pub current_dir: PathBuf,
     pub env: BTreeMap<String, String>,
@@ -271,13 +271,12 @@ fn effective_inherited_path(environment_overlay: &BTreeMap<String, String>) -> O
     effective
 }
 
-fn resolve_from_parent_path(program: &str) -> PathBuf {
-    let program_path = Path::new(program);
-    if program_path.is_absolute() || program_path.components().count() > 1 {
-        return program_path.to_path_buf();
+fn resolve_from_parent_path(program: &Path) -> PathBuf {
+    if program.is_absolute() || program.components().count() > 1 {
+        return program.to_path_buf();
     }
     let Some(path) = std::env::var_os("PATH") else {
-        return program_path.to_path_buf();
+        return program.to_path_buf();
     };
     for directory in std::env::split_paths(&path) {
         let candidate = directory.join(program);
@@ -292,7 +291,7 @@ fn resolve_from_parent_path(program: &str) -> PathBuf {
             }
         }
     }
-    program_path.to_path_buf()
+    program.to_path_buf()
 }
 
 enum CaptureEvent {

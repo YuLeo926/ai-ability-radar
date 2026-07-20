@@ -46,10 +46,14 @@ fn request() -> ExecutionRequest {
     }
 }
 
+fn test_adapter(runner: Arc<dyn ProcessRunner>) -> CodexAdapter {
+    CodexAdapter::with_resolved_command(runner, "codex", Vec::new())
+}
+
 #[tokio::test]
 async fn codex_uses_ephemeral_json_workspace_write() {
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let adapter = CodexAdapter::new(Arc::new(FakeRunner { seen: seen.clone() }));
+    let adapter = test_adapter(Arc::new(FakeRunner { seen: seen.clone() }));
     let result = adapter
         .execute(request(), CancellationToken::new())
         .await
@@ -57,7 +61,7 @@ async fn codex_uses_ephemeral_json_workspace_write() {
 
     assert!(matches!(result, AdapterCompletion::Completed { .. }));
     let specs = seen.lock().unwrap();
-    assert_eq!(specs[0].program, "codex");
+    assert_eq!(specs[0].program, PathBuf::from("codex"));
     assert_eq!(specs[0].environment, ProcessEnvironment::Inherit);
     assert_eq!(
         specs[0].args,
@@ -81,7 +85,7 @@ async fn codex_uses_ephemeral_json_workspace_write() {
 #[tokio::test]
 async fn codex_preserves_shell_metacharacters_in_separate_arguments() {
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let adapter = CodexAdapter::new(Arc::new(FakeRunner { seen: seen.clone() }));
+    let adapter = test_adapter(Arc::new(FakeRunner { seen: seen.clone() }));
     let mut request = request();
     request.model = Some("model & name".into());
     request.reasoning_effort = Some("high; $(unsafe)".into());
@@ -103,7 +107,7 @@ async fn codex_preserves_shell_metacharacters_in_separate_arguments() {
 #[tokio::test]
 async fn codex_toml_encodes_reasoning_effort_as_one_config_argument() {
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let adapter = CodexAdapter::new(Arc::new(FakeRunner { seen: seen.clone() }));
+    let adapter = test_adapter(Arc::new(FakeRunner { seen: seen.clone() }));
     let mut request = request();
     request.reasoning_effort = Some("high\"\\\n--config injected".into());
     adapter
@@ -171,9 +175,7 @@ impl ProcessRunner for ReadyDetectionRunner {
 
 #[tokio::test]
 async fn codex_detection_uses_the_cli_status_without_reading_auth_files() {
-    let availability = CodexAdapter::new(Arc::new(ReadyDetectionRunner))
-        .detect()
-        .await;
+    let availability = test_adapter(Arc::new(ReadyDetectionRunner)).detect().await;
     assert!(availability.installed);
     assert_eq!(availability.version.as_deref(), Some("codex-cli 0.134.0"));
     assert_eq!(availability.auth_state, AuthState::Ready);
@@ -214,7 +216,7 @@ impl ProcessRunner for StaticRunner {
 }
 
 async fn execute_output(exit_code: Option<i32>, stdout: &str, stderr: &str) -> AdapterError {
-    CodexAdapter::new(StaticRunner::output(exit_code, stdout, stderr))
+    test_adapter(StaticRunner::output(exit_code, stdout, stderr))
         .execute(request(), CancellationToken::new())
         .await
         .unwrap_err()
@@ -250,7 +252,7 @@ async fn codex_rejects_any_event_after_a_terminal_event() {
 
 #[tokio::test]
 async fn codex_allows_trailing_blank_lines_after_completion() {
-    let result = CodexAdapter::new(StaticRunner::output(
+    let result = test_adapter(StaticRunner::output(
         Some(0),
         "{\"type\":\"thread.started\"}\n{\"type\":\"turn.completed\"}\n\n  \n\t\n",
         "",
@@ -313,7 +315,7 @@ async fn codex_maps_runner_errors_truthfully() {
     ];
 
     for (runner_error, expected) in cases {
-        let error = CodexAdapter::new(StaticRunner::error(runner_error))
+        let error = test_adapter(StaticRunner::error(runner_error))
             .execute(request(), CancellationToken::new())
             .await
             .unwrap_err();
@@ -334,7 +336,7 @@ async fn codex_maps_runner_errors_truthfully() {
 
 #[tokio::test]
 async fn codex_maps_missing_executable_to_unavailable() {
-    let error = CodexAdapter::new(StaticRunner::error(ProcessError::Spawn(io::Error::from(
+    let error = test_adapter(StaticRunner::error(ProcessError::Spawn(io::Error::from(
         io::ErrorKind::NotFound,
     ))))
     .execute(request(), CancellationToken::new())

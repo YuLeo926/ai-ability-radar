@@ -40,8 +40,6 @@ export function ReasoningEffortField({
     <div className="field reasoning-effort-field">
       <label htmlFor={id}>{label}</label>
       <select
-        aria-describedby={error ? errorId : undefined}
-        aria-invalid={error ? "true" : undefined}
         id={id}
         onChange={(event) => {
           const next = event.target.value;
@@ -69,6 +67,8 @@ export function ReasoningEffortField({
         <label className="reasoning-custom">
           <span>按界面原样填写</span>
           <input
+            aria-describedby={error ? errorId : undefined}
+            aria-invalid={error ? "true" : undefined}
             autoComplete="off"
             onChange={(event) => {
               const next = event.target.value;

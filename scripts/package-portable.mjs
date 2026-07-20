@@ -13,6 +13,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual, TextDecoder } from "node:util";
 import {
   basename,
   dirname,
@@ -25,6 +26,30 @@ import {
 } from "node:path";
 
 const strictSemver = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+const packId = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const verifierId = /^[a-z0-9-]+$/;
+const contentSeal = /^[a-f0-9]{64}$/;
+const MAX_MANIFEST_BYTES = 256 * 1024;
+const MAX_PROMPT_BYTES = 256 * 1024;
+const MAX_PACK_FILE_BYTES = 2 * 1024 * 1024;
+const MAX_PACK_BYTES = 32 * 1024 * 1024;
+const MAX_PACK_ENTRIES = 4_096;
+const expectedPackIdentities = [
+  { id: "client-quick", path: "client-quick-v1" },
+  { id: "cli-quick", path: "cli-quick-v1" },
+];
+const targetKinds = new Set([
+  "chat_gpt_client",
+  "claude_client",
+  "codex_cli",
+  "claude_code",
+]);
+const taskCategories = new Set([
+  "instruction_following",
+  "logic",
+  "code_review",
+  "cli_coding",
+]);
 
 function comparable(path) {
   const absolute = resolve(path);
@@ -107,7 +132,11 @@ async function ensureDirectory(path, label) {
   await requireDirectory(current, label);
   for (const part of missing.reverse()) {
     current = join(current, part);
-    await mkdir(current);
+    try {
+      await mkdir(current);
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+    }
     await requireDirectory(current, label);
   }
   return requireDirectory(absolute, label);
@@ -147,6 +176,325 @@ async function entriesUnder(root, current = root) {
     }
   }
   return result;
+}
+
+function plainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function requireExactKeys(value, expected, label) {
+  if (!plainObject(value)) {
+    throw new Error(`${label} must be a JSON object`);
+  }
+  const actual = Object.keys(value).sort();
+  const required = [...expected].sort();
+  if (!isDeepStrictEqual(actual, required)) {
+    throw new Error(`${label} has an invalid schema`);
+  }
+}
+
+async function readBoundedJson(path, maximumBytes, label) {
+  const canonical = await requireFile(path, label);
+  const info = await lstat(canonical);
+  if (info.size > maximumBytes) {
+    throw new Error(`${label} exceeds its size limit`);
+  }
+  const bytes = await readFile(canonical);
+  let text;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error(`${label} is not UTF-8`);
+  }
+  try {
+    return { value: JSON.parse(text), bytes };
+  } catch {
+    throw new Error(`${label} is not valid JSON`);
+  }
+}
+
+function safePackRelativePath(value) {
+  return typeof value === "string" &&
+    value.length > 0 &&
+    !value.startsWith("/") &&
+    !value.startsWith("\\") &&
+    !value.includes(":") &&
+    !value.split(/[\\/]/).includes("..");
+}
+
+function validateRegistry(registry, label) {
+  requireExactKeys(registry, ["schema_version", "packs"], label);
+  if (registry.schema_version !== 1 || !Array.isArray(registry.packs)) {
+    throw new Error(`${label} has an unsupported registry schema`);
+  }
+  if (registry.packs.length !== expectedPackIdentities.length) {
+    throw new Error(`${label} must contain exactly two portable packs`);
+  }
+  for (const [index, entry] of registry.packs.entries()) {
+    requireExactKeys(
+      entry,
+      [
+        "bundled",
+        "content_sha256",
+        "id",
+        "license",
+        "path",
+        "version",
+      ],
+      `${label} entry`,
+    );
+    const expected = expectedPackIdentities[index];
+    if (
+      entry.bundled !== true ||
+      entry.id !== expected.id ||
+      entry.path !== expected.path ||
+      !safePackRelativePath(entry.path) ||
+      entry.license !== "Apache-2.0" ||
+      !strictSemver.test(entry.version) ||
+      !contentSeal.test(entry.content_sha256)
+    ) {
+      throw new Error(`${label} entry has an invalid identity, path, or seal`);
+    }
+  }
+  return registry;
+}
+
+function validateGrader(grader, label) {
+  if (!plainObject(grader) || typeof grader.type !== "string") {
+    throw new Error(`${label} has an invalid grader`);
+  }
+  switch (grader.type) {
+    case "exact_text":
+      requireExactKeys(grader, ["type", "expected"], label);
+      if (typeof grader.expected !== "string") {
+        throw new Error(`${label} exact text grader is invalid`);
+      }
+      break;
+    case "exact_json":
+      requireExactKeys(grader, ["type", "expected"], label);
+      break;
+    case "json_string_set":
+      requireExactKeys(grader, ["type", "expected"], label);
+      if (
+        !Array.isArray(grader.expected) ||
+        grader.expected.some((value) => typeof value !== "string") ||
+        new Set(grader.expected).size !== grader.expected.length
+      ) {
+        throw new Error(`${label} JSON string set grader is invalid`);
+      }
+      break;
+    case "external_verifier":
+      requireExactKeys(grader, ["type", "verifier_id"], label);
+      if (
+        typeof grader.verifier_id !== "string" ||
+        !verifierId.test(grader.verifier_id)
+      ) {
+        throw new Error(`${label} external verifier is invalid`);
+      }
+      break;
+    default:
+      throw new Error(`${label} has an unsupported grader`);
+  }
+}
+
+async function requirePackChild(packRoot, relativePath, kind, label) {
+  if (!safePackRelativePath(relativePath)) {
+    throw new Error(`${label} contains an unsafe pack path`);
+  }
+  const child = join(packRoot, ...relativePath.split(/[\\/]/));
+  assertInside(packRoot, child, label);
+  let canonical;
+  try {
+    canonical = kind === "file"
+      ? await requireFile(child, label)
+      : await requireDirectory(child, label);
+  } catch (error) {
+    throw new Error(`${label} is missing or invalid`, { cause: error });
+  }
+  assertInside(packRoot, canonical, label);
+  return canonical;
+}
+
+async function validateManifest(packRoot, expectedEntry, label) {
+  const manifestPath = join(packRoot, "manifest.json");
+  const { value: manifest } = await readBoundedJson(
+    manifestPath,
+    MAX_MANIFEST_BYTES,
+    `${label} manifest`,
+  );
+  requireExactKeys(
+    manifest,
+    ["schema_version", "id", "version", "title", "target_kinds", "tasks"],
+    `${label} manifest`,
+  );
+  if (
+    manifest.schema_version !== 1 ||
+    manifest.id !== expectedEntry.id ||
+    manifest.version !== expectedEntry.version ||
+    typeof manifest.title !== "string" ||
+    manifest.title.trim().length === 0 ||
+    !Array.isArray(manifest.target_kinds) ||
+    manifest.target_kinds.length === 0 ||
+    manifest.target_kinds.some((kind) => !targetKinds.has(kind)) ||
+    !Array.isArray(manifest.tasks) ||
+    manifest.tasks.length === 0
+  ) {
+    throw new Error(`${label} manifest identity or required fields mismatch`);
+  }
+
+  const taskIds = new Set();
+  for (const task of manifest.tasks) {
+    requireExactKeys(
+      task,
+      [
+        "id",
+        "category",
+        "prompt_file",
+        "starter_dir",
+        "time_budget_secs",
+        "max_turns",
+        "grader",
+      ],
+      `${label} task`,
+    );
+    if (
+      typeof task.id !== "string" ||
+      !packId.test(task.id) ||
+      taskIds.has(task.id) ||
+      !taskCategories.has(task.category) ||
+      !Number.isSafeInteger(task.time_budget_secs) ||
+      task.time_budget_secs < 1 ||
+      task.time_budget_secs > 7_200 ||
+      !Number.isSafeInteger(task.max_turns) ||
+      task.max_turns < 1 ||
+      task.max_turns > 100
+    ) {
+      throw new Error(`${label} task manifest fields are invalid`);
+    }
+    taskIds.add(task.id);
+    const prompt = await requirePackChild(
+      packRoot,
+      task.prompt_file,
+      "file",
+      `${label} prompt`,
+    );
+    const promptInfo = await lstat(prompt);
+    if (promptInfo.size > MAX_PROMPT_BYTES) {
+      throw new Error(`${label} prompt exceeds its size limit`);
+    }
+    try {
+      new TextDecoder("utf-8", { fatal: true }).decode(await readFile(prompt));
+    } catch {
+      throw new Error(`${label} prompt is not UTF-8`);
+    }
+    if (task.starter_dir !== null) {
+      if (typeof task.starter_dir !== "string") {
+        throw new Error(`${label} starter directory is invalid`);
+      }
+      await requirePackChild(
+        packRoot,
+        task.starter_dir,
+        "directory",
+        `${label} starter directory`,
+      );
+    }
+    validateGrader(task.grader, `${label} task grader`);
+  }
+}
+
+async function packDirectoryHash(packRoot, label) {
+  const entries = await entriesUnder(packRoot);
+  if (entries.length > MAX_PACK_ENTRIES) {
+    throw new Error(`${label} exceeds the pack entry limit`);
+  }
+  const files = [];
+  let totalBytes = 0;
+  for (const entry of entries.filter(({ directory }) => !directory)) {
+    const info = await lstat(entry.path);
+    if (info.size > MAX_PACK_FILE_BYTES) {
+      throw new Error(`${label} contains an oversized file`);
+    }
+    totalBytes += info.size;
+    if (!Number.isSafeInteger(totalBytes) || totalBytes > MAX_PACK_BYTES) {
+      throw new Error(`${label} exceeds the total pack size limit`);
+    }
+    const name = relative(packRoot, entry.path).split(sep).join("/");
+    if (!safePackRelativePath(name)) {
+      throw new Error(`${label} contains an unsafe pack path`);
+    }
+    files.push({ name, path: entry.path, size: info.size });
+  }
+  files.sort((left, right) =>
+    left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
+  );
+  const digest = createHash("sha256");
+  for (const file of files) {
+    const name = Buffer.from(file.name, "utf8");
+    const nameLength = Buffer.alloc(8);
+    const fileLength = Buffer.alloc(8);
+    nameLength.writeBigUInt64LE(BigInt(name.length));
+    fileLength.writeBigUInt64LE(BigInt(file.size));
+    digest.update(nameLength);
+    digest.update(name);
+    digest.update(fileLength);
+    digest.update(await readFile(file.path));
+  }
+  return digest.digest("hex");
+}
+
+async function loadTrustedRegistry(repoRoot) {
+  const trustedRoot = join(repoRoot, "benchmark-packs");
+  const canonicalRepo = await requireDirectory(repoRoot, "repository root");
+  const canonicalTrusted = await requireDirectory(
+    trustedRoot,
+    "committed benchmark packs",
+  );
+  assertInside(canonicalRepo, canonicalTrusted, "committed benchmark packs");
+  const { value } = await readBoundedJson(
+    join(trustedRoot, "registry.json"),
+    MAX_MANIFEST_BYTES,
+    "committed portable pack registry",
+  );
+  return validateRegistry(value, "committed portable pack registry");
+}
+
+async function validatePortablePacks(packsRoot, trustedRegistry, label) {
+  const canonicalPacks = await requireDirectory(packsRoot, label);
+  const topLevel = await readdir(canonicalPacks, { withFileTypes: true });
+  topLevel.sort((left, right) =>
+    left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
+  );
+  const actualTopLevel = topLevel.map((entry) => ({
+    name: entry.name,
+    directory: entry.isDirectory(),
+    file: entry.isFile(),
+  }));
+  const expectedTopLevel = [
+    { name: "cli-quick-v1", directory: true, file: false },
+    { name: "client-quick-v1", directory: true, file: false },
+    { name: "registry.json", directory: false, file: true },
+  ];
+  if (!isDeepStrictEqual(actualTopLevel, expectedTopLevel)) {
+    throw new Error(`${label} must contain the exact two portable pack directories`);
+  }
+
+  const { value: registry } = await readBoundedJson(
+    join(canonicalPacks, "registry.json"),
+    MAX_MANIFEST_BYTES,
+    `${label} registry`,
+  );
+  validateRegistry(registry, `${label} registry`);
+  if (!isDeepStrictEqual(registry, trustedRegistry)) {
+    throw new Error(`${label} registry does not match the committed registry`);
+  }
+  for (const entry of trustedRegistry.packs) {
+    const packRoot = join(canonicalPacks, entry.path);
+    await validateManifest(packRoot, entry, `${label} ${entry.id}`);
+    const actualHash = await packDirectoryHash(packRoot, `${label} ${entry.id}`);
+    if (actualHash !== entry.content_sha256) {
+      throw new Error(`${label} content hash does not match the registry seal`);
+    }
+  }
 }
 
 function fileIdentity(info) {
@@ -365,6 +713,11 @@ async function validateExtractedArchive(
   if (Buffer.compare(extractedChecksums, expectedArchive.checksumManifest) !== 0) {
     throw new Error("portable archive verification found a checksum mismatch");
   }
+  await validatePortablePacks(
+    join(extractedRoot, "benchmark-packs"),
+    expectedArchive.trustedRegistry,
+    "extracted portable benchmark packs",
+  );
 }
 
 export async function stagePortable({
@@ -400,14 +753,12 @@ export async function stagePortable({
   assertInside(canonicalTarget, canonicalPacks, "portable benchmark packs");
   const canonicalReadme = await requireFile(readme, "portable README");
   assertInside(canonicalRepo, canonicalReadme, "portable README");
-  for (const required of [
-    join(packs, "registry.json"),
-    join(packs, "client-quick-v1", "manifest.json"),
-    join(packs, "cli-quick-v1", "manifest.json"),
-  ]) {
-    const canonical = await requireFile(required, "required portable input");
-    assertInside(canonicalPacks, canonical, "required portable input");
-  }
+  const trustedRegistry = await loadTrustedRegistry(repoRoot);
+  await validatePortablePacks(
+    canonicalPacks,
+    trustedRegistry,
+    "source portable benchmark packs",
+  );
   const packEntries = await entriesUnder(packs);
 
   const archivePath = join(bundleDir, archiveName);
@@ -416,33 +767,21 @@ export async function stagePortable({
     archivePath,
     "portable final archive",
   );
-  const stageParent = join(bundleDir, ".stage");
+  const stageParent = join(bundleDir, `.stage.${randomUUID()}`);
   const stageRoot = join(stageParent, "ability-radar-portable");
   assertInside(canonicalBundle, stageParent, "portable stage directory");
 
   let ownsStage = false;
   let stageIdentity;
   try {
-    if (await pathInfo(stageParent)) {
-      const previousIdentity = await captureOwnedDirectory(
-        stageParent,
-        canonicalBundle,
-        "portable preexisting stage directory",
-      );
-      await safeRemoveOwnedTree(
-        stageParent,
-        canonicalBundle,
-        "portable preexisting stage directory",
-        previousIdentity,
-      );
-    }
-    await ensureDirectory(stageRoot, "portable stage root");
+    await mkdir(stageParent);
     ownsStage = true;
     stageIdentity = await captureOwnedDirectory(
       stageParent,
       canonicalBundle,
       "portable stage directory",
     );
+    await mkdir(stageRoot);
     const canonicalStageRoot = await requireDirectory(
       stageRoot,
       "portable stage root",
@@ -457,6 +796,11 @@ export async function stagePortable({
       packs,
       join(stageRoot, "benchmark-packs"),
       packEntries,
+    );
+    await validatePortablePacks(
+      join(stageRoot, "benchmark-packs"),
+      trustedRegistry,
+      "staged portable benchmark packs",
     );
     await copyFile(readme, join(stageRoot, "README.txt"));
     await requireFile(join(stageRoot, "README.txt"), "staged portable README");
@@ -494,6 +838,7 @@ export async function stagePortable({
       checksumManifest,
       entries,
       payloads,
+      trustedRegistry,
       stageIdentity,
       stageParent,
       stageRoot,
@@ -608,6 +953,11 @@ async function packagePortableFromBuild(repoRoot, publicationHook) {
       temporaryArchive,
       verificationDirectory,
     });
+    await validatePortablePacks(
+      join(stageRoot, "benchmark-packs"),
+      expectedArchive.trustedRegistry,
+      "staged portable benchmark packs",
+    );
     await requireOwnedDirectoryIdentity(
       stageParent,
       canonicalBundle,

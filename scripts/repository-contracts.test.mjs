@@ -556,6 +556,17 @@ test("Pages build permissions require contents read and pages read", () => {
   assertRejected(result, /pages.*read/i);
 });
 
+test("Pages validation requires deterministic dependency installation first", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, ".github", "workflows", "pages.yml"), (source) =>
+      source.replace(
+        "      - name: Install repository dependencies\n        run: npm ci\n",
+        "",
+      ));
+  });
+  assertRejected(result, /Pages.*npm ci|dependency installation/i);
+});
+
 test("comment-only permission cannot satisfy a Pages job permission", () => {
   const result = runNegativeFixture((fixture) => {
     replace(join(fixture, ".github", "workflows", "pages.yml"), (source) =>
@@ -585,15 +596,17 @@ for (const indicator of ["|-", "|+", ">", ">-", ">+", "|2-", ">+2"]) {
   });
 }
 
-test("preview CTA must target the exact v0.2.1 release tag", () => {
-  const result = runNegativeFixture((fixture) => {
-    replace(join(fixture, "site", "index.html"), (source) =>
-      source.replace(
-        /\/releases\/tag\/v0\.2\.1|\/releases\/latest/g,
-        "/releases/latest",
-      ));
-  });
-  assertRejected(result, /releases\/tag\/v0\.2\.1|releases\/latest/);
+test("pending v0.2.1 copy keeps every public download CTA inactive", () => {
+  const site = readFileSync(join(root, "site", "index.html"), "utf8");
+  const readme = readFileSync(join(root, "README.md"), "utf8");
+
+  assert.match(site, /v0\.2\.1.*(?:候选|待发布)/s);
+  assert.match(site, /clean Windows 10\/11.*公开发布.*开放下载/s);
+  assert.doesNotMatch(site, /\/releases\/(?:tag\/v0\.2\.1|latest)/);
+  assert.doesNotMatch(site, /id="release-link"[^>]*href=/);
+  assert.match(readme, /v0\.2\.1.*(?:候选|待发布)/s);
+  assert.match(readme, /clean Windows 10\/11.*公开发布.*开放下载/s);
+  assert.doesNotMatch(readme, /从.*Releases.*下载 v0\.2\.1/s);
 });
 
 test("README requires the exact Tauri source start commands", () => {
@@ -618,7 +631,7 @@ test("README current-status banner rejects v0.2", () => {
       return changed;
     });
   });
-  assertRejected(result, /README\.md.*v0\.2\.1.*current-status|当前状态/i);
+  assertRejected(result, /README\.md.*v0\.2\.1.*pending-status|当前状态/i);
 });
 
 test("README rejects treating the Vite URL as the complete product", () => {
@@ -662,9 +675,23 @@ test("troubleshooting must say the version check sends no model request", () => 
 test("troubleshooting requires the in-app CLI recheck path", () => {
   const result = runNegativeFixture((fixture) => {
     replace(join(fixture, "docs", "troubleshooting.md"), (source) =>
-      source.replace("重新检测 CLI", "重新启动应用"));
+      source.replaceAll("重新检测 CLI", "重新启动应用"));
   });
   assertRejected(result, /troubleshooting\.md.*重新检测 CLI/);
+});
+
+test("troubleshooting rejects an unconditional no-restart claim", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, "docs", "troubleshooting.md"), (source) => {
+      const changed = source.replace(
+        "“重新检测 CLI”。如果变化发生在应用启动时已经继承的 PATH 目录内，可以立即重新检测；如果安装程序\n新增了 User 或 Machine PATH 目录，请先重启应用，再点击“重新检测 CLI”。",
+        "“重新检测 CLI”，无需重启应用。",
+      );
+      assert.notEqual(changed, source, "no-restart mutation must change the fixture");
+      return changed;
+    });
+  });
+  assertRejected(result, /troubleshooting\.md.*(?:no-restart|无需重启)/i);
 });
 
 test("methodology requires all four provider effort matrices", () => {
@@ -742,12 +769,34 @@ test("Windows acceptance matrix requires portable launch rows", () => {
   assertRejected(result, /test-matrix\.md.*Portable ZIP launch/i);
 });
 
-test("site download copy includes the v0.2.1 portable ZIP", () => {
+test("site rejects an active exact-tag v0.2.1 download link while pending", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, "site", "index.html"), (source) => {
+      const changed = source.replace(
+        '<span class="button disabled" id="release-link" aria-disabled="true">v0.2.1 下载待开放</span>',
+        '<a class="button" id="release-link" href="https://github.invalid/example/releases/tag/v0.2.1">下载 v0.2.1 安装程序或免安装 ZIP</a>',
+      );
+      assert.notEqual(changed, source, "active release-link mutation must change the fixture");
+      return changed;
+    });
+  });
+  assertRejected(result, /site\/index\.html.*(?:release URL|download CTA|下载)/si);
+});
+
+test("site rejects a dead latest-release CTA while pending", () => {
   const result = runNegativeFixture((fixture) => {
     replace(join(fixture, "site", "index.html"), (source) =>
-      source.replace("v0.2.1 安装程序和免安装 ZIP", "v0.2.1 安装程序"));
+      `${source}\n<a id="release-link-copy" href="/releases/latest">当前发布</a>\n`);
   });
-  assertRejected(result, /site\/index\.html.*v0\.2\.1.*免安装 ZIP/si);
+  assertRejected(result, /site\/index\.html.*release URL/i);
+});
+
+test("README rejects a current-release claim while v0.2.1 is pending", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, "README.md"), (source) =>
+      `${source}\n\nv0.2.1 公开预览当前提供安装程序和免安装 ZIP 下载。\n`);
+  });
+  assertRejected(result, /README\.md.*currently downloadable|公开.*下载/i);
 });
 
 test("bug report example requires version 0.2.1", () => {
@@ -1556,16 +1605,109 @@ test("Tauri release bundle targets are exactly NSIS and MSI", () => {
   assertRejected(result, /Tauri bundle targets.*NSIS.*MSI/i);
 });
 
-test("release checksum set must include the portable ZIP", () => {
+test("release checksum set rejects a missing expected portable ZIP", () => {
   const result = runNegativeFixture((fixture) => {
-    replace(join(fixture, ".github", "workflows", "release.yml"), (source) =>
-      source.replace(
-        'Where-Object { $_.Extension -in ".exe", ".msi", ".zip" }',
-        'Where-Object { $_.Extension -in ".exe", ".msi" }',
-      ));
+    replace(join(fixture, ".github", "workflows", "release.yml"), (source) => {
+      const changed = source.replace(
+        '            "target/release/bundle/portable/ability-radar_${version}_windows-x64-portable.zip"\n',
+        "",
+      );
+      assert.notEqual(changed, source, "missing portable mutation must change the fixture");
+      return changed;
+    });
   });
-  assertRejected(result, /checksum.*zip|Generate SHA-256 checksums.*exact/i);
+  assertRejected(result, /Generate SHA-256 checksums.*exact|normalized source seal/i);
 });
+
+test("release checksums own exactly three ordered versioned assets", () => {
+  const source = readFileSync(
+    join(root, ".github", "workflows", "release.yml"),
+    "utf8",
+  );
+  const checksumStep = source.slice(
+    source.indexOf("      - name: Generate SHA-256 checksums"),
+    source.indexOf(
+      "      - name: Upload portable archive and checksums to the draft prerelease",
+    ),
+  );
+
+  assert.match(checksumStep, /\$version = \$env:RELEASE_TAG\.Substring\(1\)/);
+  const expectedPaths = [
+    "target/release/bundle/nsis/ability-radar_${version}_x64-setup.exe",
+    "target/release/bundle/msi/ability-radar_${version}_x64_en-US.msi",
+    "target/release/bundle/portable/ability-radar_${version}_windows-x64-portable.zip",
+  ];
+  let cursor = -1;
+  for (const path of expectedPaths) {
+    const next = checksumStep.indexOf(`"${path}"`);
+    assert.ok(next > cursor, `${path} must appear once and in release order`);
+    assert.equal(checksumStep.indexOf(`"${path}"`, next + 1), -1);
+    cursor = next;
+  }
+  assert.match(checksumStep, /Select-Object -Unique/);
+  assert.match(checksumStep, /-ne 3/);
+  assert.match(checksumStep, /unexpected/i);
+  assert.match(checksumStep, /Test-Path -LiteralPath \$path -PathType Leaf/);
+  assert.match(checksumStep, /Get-FileHash -Algorithm SHA256 -LiteralPath \$path/);
+});
+
+for (const [label, mutate] of [
+  [
+    "unexpected extra asset",
+    (source) => source.replace(
+      "          $leafNames = @($expected | ForEach-Object { Split-Path -Leaf $_ })",
+      '          $expected += "target/release/bundle/stale/ability-radar_${version}_old.zip"\n          $leafNames = @($expected | ForEach-Object { Split-Path -Leaf $_ })',
+    ),
+  ],
+  [
+    "broad recursive checksum input",
+    (source) => source.replace(
+      "          $lines = foreach ($path in $expected) {",
+      "          $lines = foreach ($path in (Get-ChildItem -LiteralPath $bundleRoot -Recurse -File)) {",
+    ),
+  ],
+  [
+    "wrong fixed version",
+    (source) => source.replace(
+      "ability-radar_${version}_x64_en-US.msi",
+      "ability-radar_0.2.0_x64_en-US.msi",
+    ),
+  ],
+  [
+    "wrong checksum order",
+    (source) => source
+      .replace(
+        '            "target/release/bundle/nsis/ability-radar_${version}_x64-setup.exe"',
+        '            "__NSIS__"',
+      )
+      .replace(
+        '            "target/release/bundle/msi/ability-radar_${version}_x64_en-US.msi"',
+        '            "target/release/bundle/nsis/ability-radar_${version}_x64-setup.exe"',
+      )
+      .replace(
+        '            "__NSIS__"',
+        '            "target/release/bundle/msi/ability-radar_${version}_x64_en-US.msi"',
+      ),
+  ],
+  [
+    "duplicate leaf name guard removal",
+    (source) => source.replace(
+      "($leafNames | Select-Object -Unique).Count -ne 3",
+      "$leafNames.Count -ne 3",
+    ),
+  ],
+]) {
+  test(`release checksum contract rejects ${label}`, () => {
+    const result = runNegativeFixture((fixture) => {
+      replace(join(fixture, ".github", "workflows", "release.yml"), (source) => {
+        const changed = mutate(source);
+        assert.notEqual(changed, source, `${label} mutation must change the fixture`);
+        return changed;
+      });
+    });
+    assertRejected(result, /Generate SHA-256 checksums.*exact|normalized source seal/i);
+  });
+}
 
 for (const [label, uploadSource] of [
   ["wildcard", '"target/release/bundle/*"'],
@@ -1605,8 +1747,8 @@ test("uploaded portable ZIP filename must derive from the manifest version", () 
   const result = runNegativeFixture((fixture) => {
     replace(join(fixture, ".github", "workflows", "release.yml"), (source) =>
       source.replace(
-        "ability-radar_${version}_windows-x64-portable.zip",
-        "ability-radar_0.2.0_windows-x64-portable.zip",
+        '$portable = "target/release/bundle/portable/ability-radar_${version}_windows-x64-portable.zip"',
+        '$portable = "target/release/bundle/portable/ability-radar_0.2.0_windows-x64-portable.zip"',
       ));
   });
   assertRejected(

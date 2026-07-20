@@ -214,7 +214,7 @@ async fn node_process_spec_is_direct_allowlisted_and_clears_the_environment() {
     let script = PathBuf::from(script.to_string_lossy().trim_start_matches(r"\\?\"));
     #[cfg(windows)]
     let workspace = PathBuf::from(workspace.to_string_lossy().trim_start_matches(r"\\?\"));
-    assert_eq!(spec.program, "node");
+    assert_eq!(spec.program, PathBuf::from("node"));
     assert_eq!(
         spec.args,
         vec![

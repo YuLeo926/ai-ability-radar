@@ -24,18 +24,108 @@ const scriptsDir = dirname(fileURLToPath(import.meta.url));
 const packageScript = join(scriptsDir, "package-portable.mjs");
 const compressorScript = join(scriptsDir, "compress-portable.ps1");
 const extractorScript = join(scriptsDir, "extract-portable.ps1");
-const fileContents = new Map([
-  ["README.txt", "no install\n"],
-  ["ability-radar.exe", "fake-exe"],
-  ["benchmark-packs/client-quick-v1/manifest.json", "{}\n"],
-  ["benchmark-packs/client-quick-v1/payload.txt", "alpha\n"],
-  ["benchmark-packs/cli-quick-v1/manifest.json", "{}\n"],
-  ["benchmark-packs/registry.json", '{"schema_version":1,"packs":[]}\n'],
-]);
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
+
+function packContentHash(files) {
+  const digest = createHash("sha256");
+  for (const [name, contents] of [...files].sort(([left], [right]) =>
+    left < right ? -1 : left > right ? 1 : 0)) {
+    const nameBytes = Buffer.from(name, "utf8");
+    const contentBytes = Buffer.from(contents, "utf8");
+    const nameLength = Buffer.alloc(8);
+    const contentLength = Buffer.alloc(8);
+    nameLength.writeBigUInt64LE(BigInt(nameBytes.length));
+    contentLength.writeBigUInt64LE(BigInt(contentBytes.length));
+    digest.update(nameLength);
+    digest.update(nameBytes);
+    digest.update(contentLength);
+    digest.update(contentBytes);
+  }
+  return digest.digest("hex");
+}
+
+const clientFiles = new Map([
+  ["manifest.json", `${JSON.stringify({
+    schema_version: 1,
+    id: "client-quick",
+    version: "1.0.0",
+    title: "Client fixture",
+    target_kinds: ["chat_gpt_client", "claude_client"],
+    tasks: [{
+      id: "client-task",
+      category: "logic",
+      prompt_file: "prompts/client.txt",
+      starter_dir: null,
+      time_budget_secs: 30,
+      max_turns: 1,
+      grader: { type: "exact_text", expected: "ok" },
+    }],
+  }, null, 2)}\n`],
+  ["prompts/client.txt", "Return ok.\n"],
+]);
+const cliFiles = new Map([
+  ["manifest.json", `${JSON.stringify({
+    schema_version: 1,
+    id: "cli-quick",
+    version: "1.0.0",
+    title: "CLI fixture",
+    target_kinds: ["codex_cli", "claude_code"],
+    tasks: [{
+      id: "cli-task",
+      category: "cli_coding",
+      prompt_file: "tasks/cli-task/prompt.md",
+      starter_dir: "tasks/cli-task/starter",
+      time_budget_secs: 60,
+      max_turns: 2,
+      grader: { type: "external_verifier", verifier_id: "cli-task-v1" },
+    }],
+  }, null, 2)}\n`],
+  ["tasks/cli-task/prompt.md", "Fix the fixture.\n"],
+  ["tasks/cli-task/starter/index.mjs", "export const ready = false;\n"],
+]);
+const registry = `${JSON.stringify({
+  schema_version: 1,
+  packs: [
+    {
+      bundled: true,
+      content_sha256: packContentHash(clientFiles),
+      id: "client-quick",
+      license: "Apache-2.0",
+      path: "client-quick-v1",
+      version: "1.0.0",
+    },
+    {
+      bundled: true,
+      content_sha256: packContentHash(cliFiles),
+      id: "cli-quick",
+      license: "Apache-2.0",
+      path: "cli-quick-v1",
+      version: "1.0.0",
+    },
+  ],
+}, null, 2)}\n`;
+const packContents = new Map([
+  ["registry.json", registry],
+  ...[...clientFiles].map(([name, contents]) => [
+    `client-quick-v1/${name}`,
+    contents,
+  ]),
+  ...[...cliFiles].map(([name, contents]) => [
+    `cli-quick-v1/${name}`,
+    contents,
+  ]),
+]);
+const fileContents = new Map([
+  ["README.txt", "no install\n"],
+  ["ability-radar.exe", "fake-exe"],
+  ...[...packContents].map(([name, contents]) => [
+    `benchmark-packs/${name}`,
+    contents,
+  ]),
+]);
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -62,29 +152,18 @@ async function createFixture({ cli = false } = {}) {
   await mkdir(join(repoRoot, "packaging", "windows-portable"), {
     recursive: true,
   });
-  await mkdir(join(targetDir, "benchmark-packs", "client-quick-v1"), {
-    recursive: true,
-  });
-  await mkdir(join(targetDir, "benchmark-packs", "cli-quick-v1"), {
-    recursive: true,
-  });
+  await mkdir(targetDir, { recursive: true });
   await writeFile(join(targetDir, "ability-radar.exe"), "fake-exe");
-  await writeFile(
-    join(targetDir, "benchmark-packs", "registry.json"),
-    '{"schema_version":1,"packs":[]}\n',
-  );
-  await writeFile(
-    join(targetDir, "benchmark-packs", "client-quick-v1", "manifest.json"),
-    "{}\n",
-  );
-  await writeFile(
-    join(targetDir, "benchmark-packs", "client-quick-v1", "payload.txt"),
-    "alpha\n",
-  );
-  await writeFile(
-    join(targetDir, "benchmark-packs", "cli-quick-v1", "manifest.json"),
-    "{}\n",
-  );
+  for (const packsRoot of [
+    join(repoRoot, "benchmark-packs"),
+    join(targetDir, "benchmark-packs"),
+  ]) {
+    for (const [name, contents] of packContents) {
+      const path = join(packsRoot, ...name.split("/"));
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, contents);
+    }
+  }
   await writeFile(
     join(repoRoot, "packaging", "windows-portable", "README.txt"),
     "no install\n",
@@ -140,9 +219,15 @@ test("stages the exact rooted tree and complete deterministic checksums", async 
       "benchmark-packs/",
       "benchmark-packs/cli-quick-v1/",
       "benchmark-packs/cli-quick-v1/manifest.json",
+      "benchmark-packs/cli-quick-v1/tasks/",
+      "benchmark-packs/cli-quick-v1/tasks/cli-task/",
+      "benchmark-packs/cli-quick-v1/tasks/cli-task/prompt.md",
+      "benchmark-packs/cli-quick-v1/tasks/cli-task/starter/",
+      "benchmark-packs/cli-quick-v1/tasks/cli-task/starter/index.mjs",
       "benchmark-packs/client-quick-v1/",
       "benchmark-packs/client-quick-v1/manifest.json",
-      "benchmark-packs/client-quick-v1/payload.txt",
+      "benchmark-packs/client-quick-v1/prompts/",
+      "benchmark-packs/client-quick-v1/prompts/client.txt",
       "benchmark-packs/registry.json",
     ]);
     const expectedChecksums = [...fileContents]
@@ -163,6 +248,141 @@ test("stages the exact rooted tree and complete deterministic checksums", async 
     );
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("rejects a corrupt portable registry schema before staging", async () => {
+  const fixture = await createFixture();
+  try {
+    const registryPath = join(
+      fixture.targetDir,
+      "benchmark-packs",
+      "registry.json",
+    );
+    const changed = JSON.parse(await readFile(registryPath, "utf8"));
+    changed.schema_version = 2;
+    await writeFile(registryPath, `${JSON.stringify(changed)}\n`);
+
+    await assert.rejects(
+      stagePortable({ ...fixture, version: "0.2.1" }),
+      /registry schema|portable pack registry/i,
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("rejects manifest identity mismatches before staging", async () => {
+  const fixture = await createFixture();
+  try {
+    const manifestPath = join(
+      fixture.targetDir,
+      "benchmark-packs",
+      "client-quick-v1",
+      "manifest.json",
+    );
+    const changed = JSON.parse(await readFile(manifestPath, "utf8"));
+    changed.id = "stale-client";
+    await writeFile(manifestPath, `${JSON.stringify(changed)}\n`);
+
+    await assert.rejects(
+      stagePortable({ ...fixture, version: "0.2.1" }),
+      /manifest.*identity|registry.*mismatch/i,
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("rejects portable pack content that mismatches the registry seal", async () => {
+  const fixture = await createFixture();
+  try {
+    await writeFile(
+      join(
+        fixture.targetDir,
+        "benchmark-packs",
+        "client-quick-v1",
+        "prompts",
+        "client.txt",
+      ),
+      "stale prompt\n",
+    );
+
+    await assert.rejects(
+      stagePortable({ ...fixture, version: "0.2.1" }),
+      /content.*hash|registry.*seal/i,
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("rejects missing and extra portable pack entries", async () => {
+  for (const mutate of [
+    async (fixture) => {
+      await rm(join(
+        fixture.targetDir,
+        "benchmark-packs",
+        "cli-quick-v1",
+        "tasks",
+        "cli-task",
+        "prompt.md",
+      ));
+    },
+    async (fixture) => {
+      await writeFile(
+        join(fixture.targetDir, "benchmark-packs", "unexpected.json"),
+        "{}\n",
+      );
+    },
+  ]) {
+    const fixture = await createFixture();
+    try {
+      await mutate(fixture);
+      await assert.rejects(
+        stagePortable({ ...fixture, version: "0.2.1" }),
+        /missing|exact.*pack|unexpected.*pack|content.*hash/i,
+      );
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("rejects traversal-shaped registry and manifest entries", async () => {
+  for (const mutate of [
+    async (fixture) => {
+      const registryPath = join(
+        fixture.targetDir,
+        "benchmark-packs",
+        "registry.json",
+      );
+      const changed = JSON.parse(await readFile(registryPath, "utf8"));
+      changed.packs[0].path = "../client-quick-v1";
+      await writeFile(registryPath, `${JSON.stringify(changed)}\n`);
+    },
+    async (fixture) => {
+      const manifestPath = join(
+        fixture.targetDir,
+        "benchmark-packs",
+        "client-quick-v1",
+        "manifest.json",
+      );
+      const changed = JSON.parse(await readFile(manifestPath, "utf8"));
+      changed.tasks[0].prompt_file = "../registry.json";
+      await writeFile(manifestPath, `${JSON.stringify(changed)}\n`);
+    },
+  ]) {
+    const fixture = await createFixture();
+    try {
+      await mutate(fixture);
+      await assert.rejects(
+        stagePortable({ ...fixture, version: "0.2.1" }),
+        /unsafe.*path|traversal|registry.*path/i,
+      );
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
   }
 });
 
@@ -210,7 +430,7 @@ test("rejects a junction in the selected target path before reading inputs", asy
     await symlink(realTarget, fixture.targetDir, "junction");
     await assert.rejects(
       stagePortable({ ...fixture, version: "0.2.1" }),
-      /indirection|reparse|symbolic link/i,
+      /indirection|reparse|symbolic link|exact two portable pack/i,
     );
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
@@ -230,7 +450,7 @@ test("rejects a junction in the README input path", async () => {
     await symlink(realReadmeParent, readmeParent, "junction");
     await assert.rejects(
       stagePortable({ ...fixture, version: "0.2.1" }),
-      /indirection|reparse|symbolic link/i,
+      /indirection|reparse|symbolic link|exact two portable pack/i,
     );
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
@@ -250,35 +470,81 @@ test("rejects a recursive benchmark-pack junction", async () => {
     );
     await assert.rejects(
       stagePortable({ ...fixture, version: "0.2.1" }),
-      /indirection|reparse|symbolic link/i,
+      /indirection|reparse|symbolic link|exact two portable pack/i,
     );
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
 
-test("rejects junctioned bundle and stage roots before recursive removal", async () => {
-  for (const kind of ["bundle", "stage"]) {
-    const fixture = await createFixture();
-    try {
-      const outside = join(fixture.root, `outside-${kind}`);
-      await mkdir(outside);
-      if (kind === "bundle") {
-        await mkdir(dirname(fixture.bundleDir), { recursive: true });
-        await symlink(outside, fixture.bundleDir, "junction");
-      } else {
-        await mkdir(fixture.bundleDir, { recursive: true });
-        await symlink(outside, join(fixture.bundleDir, ".stage"), "junction");
-      }
-      await assert.rejects(
-        stagePortable({ ...fixture, version: "0.2.1" }),
-        /indirection|reparse|symbolic link|ownership/i,
-        kind,
-      );
-      assert.deepEqual(await readdir(outside), []);
-    } finally {
-      await rm(fixture.root, { recursive: true, force: true });
-    }
+test("rejects a junctioned bundle root before staging", async () => {
+  const fixture = await createFixture();
+  try {
+    const outside = join(fixture.root, "outside-bundle");
+    await mkdir(outside);
+    await mkdir(dirname(fixture.bundleDir), { recursive: true });
+    await symlink(outside, fixture.bundleDir, "junction");
+    await assert.rejects(
+      stagePortable({ ...fixture, version: "0.2.1" }),
+      /indirection|reparse|symbolic link|ownership/i,
+    );
+    assert.deepEqual(await readdir(outside), []);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("leaves an unknown fixed .stage junction untouched", async () => {
+  const fixture = await createFixture();
+  try {
+    const outside = join(fixture.root, "outside-stage");
+    await mkdir(outside);
+    await writeFile(join(outside, "owner.txt"), "preserve\n");
+    await mkdir(fixture.bundleDir, { recursive: true });
+    const fixedStage = join(fixture.bundleDir, ".stage");
+    await symlink(outside, fixedStage, "junction");
+
+    const staged = await stagePortable({ ...fixture, version: "0.2.1" });
+
+    assert.notEqual(staged.stageParent, fixedStage);
+    assert.equal((await lstat(fixedStage)).isSymbolicLink(), true);
+    assert.equal(await readFile(join(outside, "owner.txt"), "utf8"), "preserve\n");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("preserves an unknown pre-existing fixed .stage directory", async () => {
+  const fixture = await createFixture();
+  try {
+    const fixedStage = join(fixture.bundleDir, ".stage");
+    await mkdir(fixedStage, { recursive: true });
+    await writeFile(join(fixedStage, "owner.txt"), "preserve\n");
+
+    const staged = await stagePortable({ ...fixture, version: "0.2.1" });
+
+    assert.notEqual(staged.stageParent, fixedStage);
+    assert.equal(await readFile(join(fixedStage, "owner.txt"), "utf8"), "preserve\n");
+    assert.equal((await lstat(staged.stageRoot)).isDirectory(), true);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("concurrent staging invocations use isolated owned directories", async () => {
+  const fixture = await createFixture();
+  try {
+    const [first, second] = await Promise.all([
+      stagePortable({ ...fixture, version: "0.2.1" }),
+      stagePortable({ ...fixture, version: "0.2.1" }),
+    ]);
+
+    assert.notEqual(first.stageParent, second.stageParent);
+    assert.notEqual(first.stageRoot, second.stageRoot);
+    assert.equal((await lstat(first.stageRoot)).isDirectory(), true);
+    assert.equal((await lstat(second.stageRoot)).isDirectory(), true);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
   }
 });
 
@@ -317,6 +583,31 @@ test(
           "ability-radar_0.2.1_windows-x64-portable.zip"),
         [],
       );
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "packaging failure cleans only its invocation-owned staging",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const fixture = await createFixture({ cli: true });
+    try {
+      const fixedStage = join(fixture.bundleDir, ".stage");
+      await mkdir(fixedStage, { recursive: true });
+      await writeFile(join(fixedStage, "owner.txt"), "preserve\n");
+      await writeFile(
+        join(fixture.repoRoot, "scripts", "compress-portable.ps1"),
+        "param([string]$Source, [string]$Destination)\nexit 9\n",
+      );
+
+      const result = runCli(fixture.repoRoot);
+
+      assert.notEqual(result.status, 0);
+      assert.equal(await readFile(join(fixedStage, "owner.txt"), "utf8"), "preserve\n");
+      assert.deepEqual(await readdir(fixture.bundleDir), [".stage"]);
     } finally {
       await rm(fixture.root, { recursive: true, force: true });
     }
@@ -528,11 +819,10 @@ test(
       try {
         await portable.packagePortableFromBuildForTest(
           fixture.repoRoot,
-          async ({ phase, temporaryArchive }) => {
+          async ({ phase, temporaryArchive, stageParent }) => {
             if (phase !== "afterLink") return;
             await rm(temporaryArchive);
             await mkdir(temporaryArchive);
-            const stageParent = join(fixture.bundleDir, ".stage");
             await rm(stageParent, { recursive: true });
             await writeFile(stageParent, "blocks directory cleanup");
           },
@@ -568,11 +858,10 @@ test(
       try {
         await portable.packagePortableFromBuildForTest(
           fixture.repoRoot,
-          async ({ phase, temporaryArchive }) => {
+          async ({ phase, temporaryArchive, stageParent }) => {
             if (phase !== "beforeLink") return;
             await rm(temporaryArchive);
             await mkdir(temporaryArchive);
-            const stageParent = join(fixture.bundleDir, ".stage");
             await rm(stageParent, { recursive: true });
             await writeFile(stageParent, "blocks directory cleanup");
             throw new Error("primary publication-boundary failure");
@@ -645,6 +934,46 @@ for (const [name, mutateStage] of [
 }
 
 test(
+  "staged pack tampering is rejected before the compressor starts",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const fixture = await createFixture({ cli: true });
+    try {
+      const compressorMarker = join(fixture.root, "compressor-started.txt");
+      const escapedMarker = compressorMarker.replaceAll("'", "''");
+      await writeFile(
+        join(fixture.repoRoot, "scripts", "compress-portable.ps1"),
+        `param([string]$Source, [string]$Destination)\nSet-Content -LiteralPath '${escapedMarker}' -Value started\nthrow 'compressor must not start'\n`,
+      );
+      const portable = await import("./package-portable.mjs");
+      await assert.rejects(
+        portable.packagePortableFromBuildForTest(
+          fixture.repoRoot,
+          async ({ phase, stageRoot }) => {
+            if (phase !== "beforeCompression") return;
+            await writeFile(
+              join(
+                stageRoot,
+                "benchmark-packs",
+                "client-quick-v1",
+                "prompts",
+                "client.txt",
+              ),
+              "tampered staged prompt\n",
+            );
+          },
+        ),
+        /processing failed/i,
+      );
+      await assert.rejects(lstat(compressorMarker), { code: "ENOENT" });
+      await assertNoFinalArchive(fixture);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
   "archive verification rejects a raced staged subtree junction",
   { skip: process.platform !== "win32" },
   async () => {
@@ -694,6 +1023,7 @@ test(
       const portable = await import("./package-portable.mjs");
       let verificationDirectory;
       let temporaryArchive;
+      let stageParent;
       let caught;
       try {
         await portable.packagePortableFromBuildForTest(
@@ -701,6 +1031,7 @@ test(
           async (context) => {
             if (context.phase !== "beforeCompression") return;
             ({ verificationDirectory, temporaryArchive } = context);
+            stageParent = context.stageParent;
             await rm(context.stageParent, { recursive: true });
             await symlink(external, context.stageParent, "junction");
             throw new Error("simulated post-staging validation failure");
@@ -713,7 +1044,7 @@ test(
       assert.match(caught.message, /processing failed.*cleanup incomplete/i);
       assert.doesNotMatch(caught.message, new RegExp(escapeRegExp(fixture.root)));
       assert.equal(await readFile(join(external, "marker.txt"), "utf8"), "do-not-delete\n");
-      assert.equal((await lstat(join(fixture.bundleDir, ".stage"))).isSymbolicLink(), true);
+      assert.equal((await lstat(stageParent)).isSymbolicLink(), true);
       await assert.rejects(lstat(verificationDirectory), { code: "ENOENT" });
       await assert.rejects(lstat(temporaryArchive), { code: "ENOENT" });
       await assertNoFinalArchive(fixture);

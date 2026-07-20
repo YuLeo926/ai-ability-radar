@@ -16,7 +16,8 @@ codex.cmd --version
 
 这些命令只检查命令解析和本地版本；`--version` 不会发送模型请求，也不会消耗模型订阅用量。
 不要为排错运行真实提示词。确认 CLI 路径和版本正常后，在应用的编程 CLI 区域点击
-“重新检测 CLI”，无需重启应用。应用不会替你安装真实 CLI。
+“重新检测 CLI”。如果变化发生在应用启动时已经继承的 PATH 目录内，可以立即重新检测；如果安装程序
+新增了 User 或 Machine PATH 目录，请先重启应用，再点击“重新检测 CLI”。应用不会替你安装真实 CLI。
 
 ## 未登录或登录失效
 
@@ -41,9 +42,10 @@ turn 上限或输出预算耗尽属于 agent-budget failure，会按既定预算
 
 ## SmartScreen 提示
 
-v0.2.1 预览安装程序和免安装 ZIP 均未签名，SmartScreen 可能显示“未知发布者”。只从仓库 Releases
-下载，并在继续前用 `Get-FileHash -Algorithm SHA256` 对照 `SHA256SUMS.txt`。如果校验值不同，
-不要运行该文件。
+v0.2.1 目前是候选/待发布构建，公开下载尚未开放。只有 clean Windows 10/11 x64 验收通过并创建
+公开发布后，才从仓库 Releases 下载；届时应在继续前用 `Get-FileHash -Algorithm SHA256` 对照
+`SHA256SUMS.txt`。安装程序和免安装 ZIP 均未签名，SmartScreen 可能显示“未知发布者”；如果校验值
+不同，不要运行该文件。
 
 ## 中断与恢复
 

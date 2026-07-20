@@ -8,6 +8,33 @@
 
 **Tech Stack:** React 19, TypeScript 5.8, Vitest/Testing Library, Rust 2024, Tokio, Tauri 2, Node.js 22/24, PowerShell `Compress-Archive`, GitHub Actions.
 
+## 2026-07-20 Decision A Amendment (Controlling)
+
+The user selected Decision A on 2026-07-20. This section supersedes every
+conflicting earlier step, example, test name, and code snippet below:
+
+- Portable packaging semantically validates the source, staged, pre-compression,
+  and extracted benchmark trees against the committed registry, complete
+  manifests, referenced files, and content hashes.
+- Manual custom effort text rejects Unicode `Cc`, `Cf`,
+  `Default_Ignorable_Code_Point`, and bidi format controls; trimmed input must
+  contain 1–40 visible characters. CLI safe-token normalization is unchanged.
+- Each packaging invocation exclusively creates a UUID staging directory,
+  records its identity, and cleans only that identity. A fixed or pre-existing
+  `.stage` is never reused or deleted.
+- The outer checksum set is exactly, and in order, the versioned NSIS, MSI, and
+  portable ZIP derived from `RELEASE_TAG`; missing, extra, duplicate-leaf,
+  wrong-version, and wrong-order variants fail closed.
+- README and the static site describe v0.2.1 as candidate/pending, with
+  non-navigable download CTAs until clean Windows 10/11 x64 acceptance and an
+  actual public release both exist. The release workflow may prepare a draft.
+- CLI re-detection immediately sees changes inside already inherited PATH
+  directories. If installation adds a PATH directory, the user must restart
+  the app and then re-detect.
+- One retained backend-private provider command is reused from readiness
+  through every automatic task. Known canonical effort labels use one global
+  display map, and custom-field errors are associated with the custom input.
+
 ## Global Constraints
 
 - Work only in `C:\Users\zhouy\Desktop\降智检测\.worktrees\ai-ability-radar-v02` on branch `codex/ai-ability-radar-v02`.
@@ -216,12 +243,12 @@ fn normalize_reasoning_effort(
     let Some(value) = value else {
         return Ok(None);
     };
-    if value.chars().any(char::is_control) {
-        return Err("推理档位不能包含控制字符".into());
+    if value.chars().any(is_forbidden_reasoning_effort_character) {
+        return Err("推理档位不能包含控制字符、格式字符或不可见字符".into());
     }
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        return Ok(None);
+        return Err("请填写自定义推理档位".into());
     }
     let canonical = trimmed.to_ascii_lowercase();
     if KNOWN_REASONING_EFFORTS.contains(&canonical.as_str()) {
@@ -520,7 +547,8 @@ const matrices: Record<TargetKind, readonly EffortOption[]> = {
   claude_code: common,
 };
 
-const CONTROL_CHARACTER = /\p{Cc}/u;
+const FORBIDDEN_CUSTOM_CHARACTER =
+  /[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}]/u;
 const SAFE_CLI_EFFORT = /^[A-Za-z0-9_-]{1,32}$/;
 const KNOWN_EFFORTS = new Set([
   "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
@@ -543,9 +571,11 @@ export function reasoningEffortError(
   kind: TargetKind,
   value: string,
 ): string | null {
-  if (!value) return null;
-  if (CONTROL_CHARACTER.test(value)) return "推理档位不能包含控制字符";
+  if (FORBIDDEN_CUSTOM_CHARACTER.test(value)) {
+    return "推理档位不能包含控制字符、格式字符或不可见字符";
+  }
   const trimmed = value.trim();
+  if (!trimmed) return "请填写自定义推理档位";
   const cli = kind === "codex_cli" || kind === "claude_code";
   if (cli) {
     return SAFE_CLI_EFFORT.test(trimmed)
@@ -1159,7 +1189,7 @@ git commit -m "fix: resolve Windows npm provider CLIs safely"
 Add:
 
 ```tsx
-test("re-detects CLI availability without restarting the app", async () => {
+test("re-detects inherited-PATH changes and explains when restart is required", async () => {
   const first = readyBootstrap();
   first.targets = first.targets.map((target) =>
     target.kind === "codex_cli"
@@ -1289,7 +1319,16 @@ git commit -m "feat: recheck local CLI availability"
 
 - [ ] **Step 1: Write failing package contract tests**
 
-Create `scripts/package-portable.test.mjs` using only Node core modules:
+Create `scripts/package-portable.test.mjs` using only Node core modules. The
+fixtures must contain real valid minimal registries/manifests and content
+seals; dummy `{}` manifests or an empty registry are not valid positive
+fixtures. Add negative cases for corrupt schema, identity mismatch,
+content/hash mismatch, missing/extra/traversal entries, staged tampering,
+pre-existing fixed `.stage`, concurrent invocation isolation, invocation-local
+cleanup, and final no-clobber publication.
+
+The following excerpt is illustrative only; Decision A above controls wherever
+it conflicts:
 
 ```js
 import assert from "node:assert/strict";
@@ -1386,7 +1425,7 @@ Expected: the portable test fails because the module does not exist; the reposit
 Implement `scripts/package-portable.mjs` with these exported boundaries:
 
 ```js
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
   copyFile,
@@ -1449,13 +1488,21 @@ export async function stagePortable({
     }
   }
 
-  const stageParent = join(bundleDir, ".stage");
+  await validatePortablePacks(packs, committedRegistry, "source portable packs");
+
+  const stageParent = join(bundleDir, `.stage.${randomUUID()}`);
   const stageRoot = join(stageParent, "ability-radar-portable");
   assertInside(bundleDir, stageParent, "portable stage directory");
-  await rm(stageParent, { recursive: true, force: true });
-  await mkdir(stageRoot, { recursive: true });
+  await mkdir(stageParent);
+  const stageIdentity = await captureOwnedDirectory(stageParent);
+  await mkdir(stageRoot);
   await copyFile(executable, join(stageRoot, "ability-radar.exe"));
   await cp(packs, join(stageRoot, "benchmark-packs"), { recursive: true });
+  await validatePortablePacks(
+    join(stageRoot, "benchmark-packs"),
+    committedRegistry,
+    "staged portable packs",
+  );
   await copyFile(readme, join(stageRoot, "README.txt"));
 
   const files = await filesUnder(stageRoot);
@@ -1471,6 +1518,8 @@ export async function stagePortable({
       bundleDir,
       `ability-radar_${version}_windows-x64-portable.zip`,
     ),
+    stageIdentity,
+    stageParent,
     stageRoot,
   };
 }
@@ -1494,13 +1543,12 @@ async function main() {
   }
   const targetDir = join(repoRoot, "target", "release");
   const bundleDir = join(targetDir, "bundle", "portable");
-  const { archivePath, stageRoot } = await stagePortable({
+  const { archivePath, stageIdentity, stageParent, stageRoot } = await stagePortable({
     repoRoot,
     targetDir,
     bundleDir,
     version,
   });
-  const stageParent = dirname(stageRoot);
   assertInside(bundleDir, stageParent, "portable stage directory");
   await rm(archivePath, { force: true });
   try {
@@ -1526,7 +1574,12 @@ async function main() {
       throw new Error("portable ZIP compression failed");
     }
   } finally {
-    await rm(stageParent, { recursive: true, force: true });
+    await safeRemoveOwnedTree(
+      stageParent,
+      bundleDir,
+      "portable stage directory",
+      stageIdentity,
+    );
   }
   process.stdout.write(`${archivePath}\n`);
 }
@@ -1665,9 +1718,14 @@ git commit -m "feat: add source and portable run paths"
 
 - [ ] **Step 1: Update negative contracts for v0.2.1 and portable ownership**
 
-Change the CTA negative test to require `/releases/tag/v0.2.1`. Add mutations proving rejection when:
+Change the CTA negative tests to require candidate/pending copy and a
+non-navigable control with no `/releases/tag/v0.2.1` or `/releases/latest`
+target. Add mutations proving rejection when:
 
-- the release checksum set omits `.zip`;
+- any active/dead v0.2.1 download link or current-release claim appears;
+- the exact release checksum set is missing an expected file, contains an
+  extra `.exe`/`.msi`/`.zip`, duplicates a leaf name, uses the wrong version,
+  or changes the reviewed order;
 - the portable archive upload uses a wildcard or uploads raw `target/release`;
 - the portable step appears before the Tauri draft release exists;
 - the uploaded ZIP filename differs from the manifest version;
@@ -1714,12 +1772,26 @@ After `Build unsigned draft prerelease`, add:
         run: npm run package:portable:from-build
 ```
 
-Change checksum selection to:
+Generate checksums from the exact reviewed set derived from the verified tag:
 
 ```powershell
-$files = Get-ChildItem target/release/bundle -Recurse -File |
-  Where-Object { $_.Extension -in ".exe", ".msi", ".zip" } |
-  Sort-Object FullName
+$version = $env:RELEASE_TAG.Substring(1)
+$expected = @(
+  "target/release/bundle/nsis/ability-radar_${version}_x64-setup.exe"
+  "target/release/bundle/msi/ability-radar_${version}_x64_en-US.msi"
+  "target/release/bundle/portable/ability-radar_${version}_windows-x64-portable.zip"
+)
+if ($expected.Count -ne 3 -or
+    ($expected | Split-Path -Leaf | Select-Object -Unique).Count -ne 3) {
+  throw "The reviewed release checksum set must contain three distinct leaf names."
+}
+foreach ($path in $expected) {
+  if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+    throw "Missing expected release asset: $path"
+  }
+}
+# Recursively enumerate only to reject unexpected .exe/.msi/.zip files; hash
+# exactly $expected in the array order.
 ```
 
 Replace the final upload step with an exact path derived from the verified tag:
@@ -1738,7 +1810,9 @@ Replace the final upload step with an exact path derived from the verified tag:
           gh release upload $env:RELEASE_TAG $portable SHA256SUMS.txt --clobber
 ```
 
-Update release notes to say “安装程序和免安装 ZIP 均未签名” and “校验所有下载文件”.
+Keep the release as a draft. Update README/site to candidate/pending copy,
+disable the public download CTA, and say downloads open only after clean
+Windows 10/11 x64 acceptance and an actual public release.
 
 - [ ] **Step 5: Update the workflow and repository source seals**
 

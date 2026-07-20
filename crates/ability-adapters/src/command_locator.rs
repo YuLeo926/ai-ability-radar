@@ -20,19 +20,18 @@ impl LaunchCommand {
 }
 
 pub(crate) fn resolve_launch_command(
-    program: &str,
+    program: &Path,
     effective_inherited_path: Option<&std::ffi::OsStr>,
 ) -> io::Result<LaunchCommand> {
-    let path = Path::new(program);
-    if path.is_absolute() || path.components().count() > 1 {
-        return Ok(LaunchCommand::direct(path));
+    if program.is_absolute() || program.components().count() > 1 {
+        return Ok(LaunchCommand::direct(program));
     }
 
     #[cfg(windows)]
-    if matches!(program, "codex" | "claude") {
+    if matches!(program.to_str(), Some("codex" | "claude")) {
         let inherited = effective_inherited_path
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "PATH is unavailable"))?;
-        return resolve_windows_provider_command(program, inherited);
+        return resolve_windows_provider_command(program.to_str().unwrap(), inherited);
     }
 
     #[cfg(not(windows))]

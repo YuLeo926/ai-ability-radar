@@ -1,3 +1,4 @@
+use crate::command_locator::{LaunchCommand, resolve_launch_command};
 use crate::{
     AdapterCompletion, AdapterError, AgentAdapter, AuthState, ExecutionRequest, ProcessEnvironment,
     ProcessError, ProcessOutput, ProcessRunner, ProcessSpec, TargetAvailability,
@@ -7,17 +8,51 @@ use ability_core::{FailureKind, TargetKind};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 pub struct ClaudeCodeAdapter {
     runner: Arc<dyn ProcessRunner>,
+    launch: Mutex<Option<LaunchCommand>>,
 }
 
 impl ClaudeCodeAdapter {
     pub fn new(runner: Arc<dyn ProcessRunner>) -> Self {
-        Self { runner }
+        Self {
+            runner,
+            launch: Mutex::new(None),
+        }
+    }
+
+    pub fn with_resolved_command(
+        runner: Arc<dyn ProcessRunner>,
+        program: impl Into<std::path::PathBuf>,
+        prefix_args: Vec<String>,
+    ) -> Self {
+        Self {
+            runner,
+            launch: Mutex::new(Some(LaunchCommand {
+                program: program.into(),
+                prefix_args,
+            })),
+        }
+    }
+
+    fn retained_launch(&self) -> std::io::Result<LaunchCommand> {
+        let mut retained = self
+            .launch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(launch) = retained.as_ref() {
+            return Ok(launch.clone());
+        }
+        let path = std::env::var_os("PATH");
+        let launch = resolve_launch_command(Path::new("claude"), path.as_deref())?;
+        *retained = Some(launch.clone());
+        Ok(launch)
     }
 }
 
@@ -28,10 +63,14 @@ impl AgentAdapter for ClaudeCodeAdapter {
     }
 
     async fn detect(&self) -> TargetAvailability {
+        let launch = match self.retained_launch() {
+            Ok(launch) => launch,
+            Err(_) => return unavailable(self.kind()),
+        };
         let version = match self
             .runner
             .run(
-                detection_spec(vec!["--version".into()]),
+                detection_spec(&launch, vec!["--version".into()]),
                 CancellationToken::new(),
             )
             .await
@@ -43,7 +82,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
         let auth_state = match self
             .runner
             .run(
-                detection_spec(vec!["auth".into(), "status".into()]),
+                detection_spec(&launch, vec!["auth".into(), "status".into()]),
                 CancellationToken::new(),
             )
             .await
@@ -66,7 +105,14 @@ impl AgentAdapter for ClaudeCodeAdapter {
         request: ExecutionRequest,
         cancellation: CancellationToken,
     ) -> Result<AdapterCompletion, AdapterError> {
-        match self.runner.run(execution_spec(request), cancellation).await {
+        let launch = self
+            .retained_launch()
+            .map_err(|_| AdapterError::Unavailable)?;
+        match self
+            .runner
+            .run(execution_spec(&launch, request), cancellation)
+            .await
+        {
             Ok(output) => complete_or_classify(output),
             Err(ProcessError::TimedOut) => Err(AdapterError::AgentBudgetExceeded),
             Err(ProcessError::Cancelled) => Err(AdapterError::Cancelled),
@@ -92,10 +138,12 @@ impl AgentAdapter for ClaudeCodeAdapter {
     }
 }
 
-fn detection_spec(args: Vec<String>) -> ProcessSpec {
+fn detection_spec(launch: &LaunchCommand, args: Vec<String>) -> ProcessSpec {
+    let mut resolved_args = launch.prefix_args.clone();
+    resolved_args.extend(args);
     ProcessSpec {
-        program: "claude".into(),
-        args,
+        program: launch.program.clone(),
+        args: resolved_args,
         current_dir: std::env::temp_dir(),
         env: BTreeMap::new(),
         environment: ProcessEnvironment::Inherit,
@@ -124,7 +172,7 @@ fn auth_state(exit_code: Option<i32>, stdout: &str) -> AuthState {
     }
 }
 
-fn execution_spec(request: ExecutionRequest) -> ProcessSpec {
+fn execution_spec(launch: &LaunchCommand, request: ExecutionRequest) -> ProcessSpec {
     let mut args = vec![
         "-p".into(),
         request.prompt,
@@ -149,9 +197,11 @@ fn execution_spec(request: ExecutionRequest) -> ProcessSpec {
     if let Some(effort) = request.reasoning_effort {
         args.extend(["--effort".into(), effort]);
     }
+    let mut resolved_args = launch.prefix_args.clone();
+    resolved_args.extend(args);
     ProcessSpec {
-        program: "claude".into(),
-        args,
+        program: launch.program.clone(),
+        args: resolved_args,
         current_dir: request.workspace,
         env: BTreeMap::new(),
         environment: ProcessEnvironment::Inherit,

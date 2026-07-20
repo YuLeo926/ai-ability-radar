@@ -43,10 +43,14 @@ fn request() -> ExecutionRequest {
     }
 }
 
+fn test_adapter(runner: Arc<dyn ProcessRunner>) -> ClaudeCodeAdapter {
+    ClaudeCodeAdapter::with_resolved_command(runner, "claude", Vec::new())
+}
+
 #[tokio::test]
 async fn claude_uses_only_constrained_noninteractive_arguments() {
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let adapter = ClaudeCodeAdapter::new(Arc::new(FakeRunner { seen: seen.clone() }));
+    let adapter = test_adapter(Arc::new(FakeRunner { seen: seen.clone() }));
     let result = adapter
         .execute(request(), CancellationToken::new())
         .await
@@ -55,7 +59,7 @@ async fn claude_uses_only_constrained_noninteractive_arguments() {
     assert!(matches!(result, AdapterCompletion::Completed { .. }));
     let specs = seen.lock().unwrap();
     assert_eq!(specs.len(), 1);
-    assert_eq!(specs[0].program, "claude");
+    assert_eq!(specs[0].program, PathBuf::from("claude"));
     assert_eq!(specs[0].current_dir, PathBuf::from("C:/temp/task"));
     assert_eq!(specs[0].timeout, Duration::from_secs(600));
     assert!(specs[0].env.is_empty());
@@ -123,7 +127,7 @@ impl ProcessRunner for ReadyClaudeDetectionRunner {
 
 #[tokio::test]
 async fn claude_detection_parses_auth_status_to_a_public_readiness_decision() {
-    let availability = ClaudeCodeAdapter::new(Arc::new(ReadyClaudeDetectionRunner))
+    let availability = test_adapter(Arc::new(ReadyClaudeDetectionRunner))
         .detect()
         .await;
     assert!(availability.installed);
@@ -166,7 +170,7 @@ impl ProcessRunner for StaticRunner {
 }
 
 async fn execute_output(exit_code: Option<i32>, stdout: &str, stderr: &str) -> AdapterError {
-    ClaudeCodeAdapter::new(StaticRunner::output(exit_code, stdout, stderr))
+    test_adapter(StaticRunner::output(exit_code, stdout, stderr))
         .execute(request(), CancellationToken::new())
         .await
         .unwrap_err()
@@ -174,7 +178,7 @@ async fn execute_output(exit_code: Option<i32>, stdout: &str, stderr: &str) -> A
 
 #[tokio::test]
 async fn claude_accepts_only_one_final_success_result_event() {
-    let result = ClaudeCodeAdapter::new(StaticRunner::output(
+    let result = test_adapter(StaticRunner::output(
         Some(0),
         "{\"type\":\"assistant\"}\n{\"type\":\"result\",\"subtype\":\"success\"}\n\n \t",
         "",
@@ -269,7 +273,7 @@ async fn claude_maps_every_process_error_truthfully() {
     ];
 
     for (runner_error, expected) in cases {
-        let error = ClaudeCodeAdapter::new(StaticRunner::error(runner_error))
+        let error = test_adapter(StaticRunner::error(runner_error))
             .execute(request(), CancellationToken::new())
             .await
             .unwrap_err();
@@ -287,9 +291,9 @@ async fn claude_maps_every_process_error_truthfully() {
         }
     }
 
-    let missing = ClaudeCodeAdapter::new(StaticRunner::error(ProcessError::Spawn(
-        io::Error::from(io::ErrorKind::NotFound),
-    )))
+    let missing = test_adapter(StaticRunner::error(ProcessError::Spawn(io::Error::from(
+        io::ErrorKind::NotFound,
+    ))))
     .execute(request(), CancellationToken::new())
     .await
     .unwrap_err();

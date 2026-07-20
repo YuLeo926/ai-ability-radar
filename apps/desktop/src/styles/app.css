@@ -399,6 +399,15 @@ button:disabled,
   gap: 0.75rem;
 }
 
+.cli-redetect {
+  display: grid;
+  max-width: 28rem;
+  justify-items: end;
+  gap: var(--space-2);
+  color: var(--text-muted);
+  text-align: right;
+}
+
 .secondary-action {
   border-color: var(--border-strong);
   background: var(--panel);
@@ -900,6 +909,11 @@ button:disabled,
     align-items: start;
     justify-content: start;
     flex-wrap: wrap;
+  }
+
+  .cli-redetect {
+    justify-items: start;
+    text-align: left;
   }
 
   .report-review-backdrop {

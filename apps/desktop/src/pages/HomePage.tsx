@@ -241,13 +241,19 @@ export function HomePage() {
           targets={clis}
           title="编程 CLI"
           action={
-            <button
-              className="secondary-action"
-              onClick={() => setAttempt((value) => value + 1)}
-              type="button"
-            >
-              重新检测 CLI
-            </button>
+            <div className="cli-redetect">
+              <button
+                className="secondary-action"
+                onClick={() => setAttempt((value) => value + 1)}
+                type="button"
+              >
+                重新检测 CLI
+              </button>
+              <small>
+                已继承 PATH 目录内的变化可立即重新检测；如果安装程序新增 PATH
+                目录，请重启应用后再重新检测。
+              </small>
+            </div>
           }
         />
       </div>

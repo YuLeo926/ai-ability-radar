@@ -83,15 +83,33 @@ jobs:
       - name: Generate SHA-256 checksums
         shell: pwsh
         run: |
-          $files = Get-ChildItem target/release/bundle -Recurse -File |
-            Where-Object { $_.Extension -in ".exe", ".msi", ".zip" } |
-            Sort-Object FullName
-          if (-not $files) {
-            throw "No Windows release asset was produced; refusing to publish an empty checksum file."
+          $version = $env:RELEASE_TAG.Substring(1)
+          $bundleRoot = "target/release/bundle"
+          $expected = @(
+            "target/release/bundle/nsis/ability-radar_${version}_x64-setup.exe"
+            "target/release/bundle/msi/ability-radar_${version}_x64_en-US.msi"
+            "target/release/bundle/portable/ability-radar_${version}_windows-x64-portable.zip"
+          )
+          $leafNames = @($expected | ForEach-Object { Split-Path -Leaf $_ })
+          if ($expected.Count -ne 3 -or ($leafNames | Select-Object -Unique).Count -ne 3) {
+            throw "The reviewed release checksum set must contain three distinct leaf names."
           }
-          $lines = foreach ($file in $files) {
-            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
-            "$hash  $($file.Name)"
+          foreach ($path in $expected) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Missing expected release asset: $path"
+            }
+          }
+          $expectedFullNames = @($expected | ForEach-Object { [IO.Path]::GetFullPath($_) })
+          $observed = @(Get-ChildItem -LiteralPath $bundleRoot -Recurse -File |
+            Where-Object { $_.Extension -in ".exe", ".msi", ".zip" } |
+            ForEach-Object { $_.FullName })
+          $unexpected = @($observed | Where-Object { $_ -notin $expectedFullNames })
+          if ($observed.Count -ne 3 -or $unexpected.Count -ne 0) {
+            throw "Unexpected release asset set: $($unexpected -join ', ')"
+          }
+          $lines = foreach ($path in $expected) {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
+            "$hash  $(Split-Path -Leaf $path)"
           }
           Set-Content -LiteralPath SHA256SUMS.txt -Value $lines -Encoding utf8NoBOM
       - name: Upload portable archive and checksums to the draft prerelease

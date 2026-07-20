@@ -1,6 +1,7 @@
 use crate::app_state::{
-    probe_node, public_cli_version, supported_node_lts, AppState, CancellationRegistration,
-    CancellationRegistry, LocalDataGate, LocalDataMutationClaim, RunOperationRegistry,
+    fresh_provider_adapters, probe_node, public_cli_version, supported_node_lts, AppState,
+    CancellationRegistration, CancellationRegistry, LocalDataGate, LocalDataMutationClaim,
+    RunOperationRegistry,
 };
 use crate::dto::{
     BootstrapDto, CliRunEventDto, DataSettingsDto, DeleteTargetHistoryInput, ExportReportInput,
@@ -25,6 +26,7 @@ use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use unicode_general_category::{get_general_category, GeneralCategory};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +58,26 @@ const KNOWN_REASONING_EFFORTS: &[&str] = &[
     "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
 ];
 
+fn is_forbidden_reasoning_effort_character(character: char) -> bool {
+    if character.is_control() || get_general_category(character) == GeneralCategory::Format {
+        return true;
+    }
+
+    matches!(
+        u32::from(character),
+        0x034f
+            | 0x115f..=0x1160
+            | 0x17b4..=0x17b5
+            | 0x180b..=0x180f
+            | 0x2065
+            | 0x3164
+            | 0xfe00..=0xfe0f
+            | 0xffa0
+            | 0xfff0..=0xfff8
+            | 0xe0000..=0xe0fff
+    )
+}
+
 fn normalize_reasoning_effort(
     value: Option<String>,
     family: StartFamily,
@@ -63,12 +85,15 @@ fn normalize_reasoning_effort(
     let Some(value) = value else {
         return Ok(None);
     };
-    if value.chars().any(char::is_control) {
-        return Err("\u{63a8}\u{7406}\u{6863}\u{4f4d}\u{4e0d}\u{80fd}\u{5305}\u{542b}\u{63a7}\u{5236}\u{5b57}\u{7b26}".into());
+    if value.chars().any(is_forbidden_reasoning_effort_character) {
+        return Err("\u{63a8}\u{7406}\u{6863}\u{4f4d}\u{4e0d}\u{80fd}\u{5305}\u{542b}\u{63a7}\u{5236}\u{5b57}\u{7b26}\u{3001}\u{683c}\u{5f0f}\u{5b57}\u{7b26}\u{6216}\u{4e0d}\u{53ef}\u{89c1}\u{5b57}\u{7b26}".into());
     }
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        return Ok(None);
+        return Err(
+            "\u{8bf7}\u{586b}\u{5199}\u{81ea}\u{5b9a}\u{4e49}\u{63a8}\u{7406}\u{6863}\u{4f4d}"
+                .into(),
+        );
     }
     let canonical = trimmed.to_ascii_lowercase();
     if KNOWN_REASONING_EFFORTS.contains(&canonical.as_str()) {
@@ -452,8 +477,8 @@ pub async fn start_cli_run(
     input: StartRunInput,
 ) -> Result<RunRecord, String> {
     let start = validate_start(input, StartFamily::Cli)?;
-    let adapter = state
-        .adapters
+    let adapters = fresh_provider_adapters(state.runner.clone());
+    let adapter = adapters
         .get(&start.target.kind)
         .cloned()
         .ok_or_else(|| "该 CLI 暂不支持".to_string())?;
@@ -492,12 +517,13 @@ pub async fn resume_cli_run(
         .claim([run_id])
         .map_err(|_| "这次体检正在恢复、运行或清理数据，请勿重复操作。".to_string())?;
     let expected_target = validate_resume_target(input.expected_target, StartFamily::Cli)?;
+    let adapters = fresh_provider_adapters(state.runner.clone());
     resume_cli_run_with(
         CliResumeContext {
             repository: &state.repository,
             service: &state.cli_runs,
             pack: state.cli_pack.clone(),
-            adapters: &state.adapters,
+            adapters: &adapters,
             runner: state.runner.clone(),
             cancellations: &state.cancellations,
         },
@@ -2395,6 +2421,38 @@ mod tests {
             )
             .is_err());
         }
+    }
+
+    #[test]
+    fn manual_reasoning_requires_visible_text_and_rejects_unicode_invisibles() {
+        for value in [
+            "\u{0}",
+            "\u{200b}",
+            "\u{202e}",
+            "\u{2060}",
+            " \u{200b} ",
+            "\u{53ef}\u{200b}\u{89c1}",
+        ] {
+            assert!(
+                normalize_reasoning_effort(Some(value.into()), StartFamily::Manual).is_err(),
+                "{value:?}"
+            );
+        }
+
+        for value in [
+            "\u{6269}\u{5c55}\u{601d}\u{8003}\u{ff08}\u{5b9e}\u{9a8c}\u{ff09}",
+            "é",
+        ] {
+            assert_eq!(
+                normalize_reasoning_effort(Some(value.into()), StartFamily::Manual)
+                    .unwrap()
+                    .as_deref(),
+                Some(value)
+            );
+        }
+        assert!(normalize_reasoning_effort(Some(" ".into()), StartFamily::Manual).is_err());
+        assert!(normalize_reasoning_effort(Some("想".repeat(40)), StartFamily::Manual).is_ok());
+        assert!(normalize_reasoning_effort(Some("想".repeat(41)), StartFamily::Manual).is_err());
     }
 
     #[test]

@@ -28,11 +28,31 @@ describe("provider effort matrices", () => {
   });
 });
 
-test("known labels are localized and custom labels are preserved", () => {
-  expect(formatReasoningEffort("chat_gpt_client", "low")).toBe("轻度");
-  expect(formatReasoningEffort("codex_cli", "xhigh")).toBe("极高");
-  expect(formatReasoningEffort("claude_code", "max")).toBe("最高");
-  expect(formatReasoningEffort("claude_client", "扩展思考")).toBe("扩展思考");
+test("every canonical label is localized under every provider family", () => {
+  const expectedLabels = {
+    none: "无",
+    minimal: "最小",
+    low: "低",
+    medium: "中",
+    high: "高",
+    xhigh: "极高",
+    max: "最高",
+    ultra: "Ultra",
+  } as const;
+  const kinds = [
+    "chat_gpt_client",
+    "claude_client",
+    "codex_cli",
+    "claude_code",
+  ] as const;
+
+  for (const kind of kinds) {
+    for (const [value, label] of Object.entries(expectedLabels)) {
+      expect(formatReasoningEffort(kind, value), `${kind}/${value}`).toBe(label);
+    }
+    expect(formatReasoningEffort(kind, "扩展思考")).toBe("扩展思考");
+  }
+
   expect(formatReasoningEffort("codex_cli", null, "CLI 默认")).toBe("CLI 默认");
 });
 
@@ -42,6 +62,23 @@ test("custom validation mirrors the Rust family rules", () => {
   expect(reasoningEffortError("codex_cli", "frontier_2")).toBeNull();
   expect(reasoningEffortError("codex_cli", "high value")).toMatch(/ASCII/);
   expect(reasoningEffortError("claude_code", "极高")).toMatch(/ASCII/);
+});
+
+test("manual custom validation requires visible Unicode text", () => {
+  for (const value of [
+    "\u0000",
+    "\u200b",
+    "\u202e",
+    "\u2060",
+    " \u200b ",
+    "可\u200b见",
+  ]) {
+    expect(reasoningEffortError("chat_gpt_client", value), JSON.stringify(value)).not.toBeNull();
+  }
+
+  expect(reasoningEffortError("chat_gpt_client", "扩展思考（实验）")).toBeNull();
+  expect(reasoningEffortError("chat_gpt_client", "想".repeat(40))).toBeNull();
+  expect(reasoningEffortError("chat_gpt_client", "想".repeat(41))).toMatch(/40/);
 });
 
 test("known values normalize for every target and custom CLI values lowercase", () => {

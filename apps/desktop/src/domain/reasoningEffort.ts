@@ -28,32 +28,44 @@ const matrices: Record<TargetKind, readonly EffortOption[]> = {
   claude_code: common,
 };
 
-const CONTROL_CHARACTER = /\p{Cc}/u;
+const CANONICAL_LABELS = {
+  none: "无",
+  minimal: "最小",
+  low: "低",
+  medium: "中",
+  high: "高",
+  xhigh: "极高",
+  max: "最高",
+  ultra: "Ultra",
+} as const;
+
+const FORBIDDEN_CUSTOM_CHARACTER =
+  /[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}]/u;
 const SAFE_CLI_EFFORT = /^[A-Za-z0-9_-]{1,32}$/;
-const KNOWN_EFFORTS = new Set([
-  "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
-]);
+const KNOWN_EFFORTS = new Set(Object.keys(CANONICAL_LABELS));
 
 export function effortOptionsFor(kind: TargetKind): readonly EffortOption[] {
   return matrices[kind];
 }
 
 export function formatReasoningEffort(
-  kind: TargetKind,
+  _kind: TargetKind,
   value?: string | null,
   emptyLabel = "未记录",
 ): string {
   if (!value) return emptyLabel;
-  return matrices[kind].find((option) => option.value === value)?.label ?? value;
+  return CANONICAL_LABELS[value as keyof typeof CANONICAL_LABELS] ?? value;
 }
 
 export function reasoningEffortError(
   kind: TargetKind,
   value: string,
 ): string | null {
-  if (!value) return null;
-  if (CONTROL_CHARACTER.test(value)) return "推理档位不能包含控制字符";
+  if (FORBIDDEN_CUSTOM_CHARACTER.test(value)) {
+    return "推理档位不能包含控制字符、格式字符或不可见字符";
+  }
   const trimmed = value.trim();
+  if (!trimmed) return "请填写自定义推理档位";
   const cli = kind === "codex_cli" || kind === "claude_code";
   if (cli) {
     return SAFE_CLI_EFFORT.test(trimmed)

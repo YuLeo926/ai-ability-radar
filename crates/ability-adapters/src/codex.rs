@@ -1,3 +1,4 @@
+use crate::command_locator::{LaunchCommand, resolve_launch_command};
 use crate::{
     AdapterCompletion, AdapterError, AgentAdapter, AuthState, ExecutionRequest, ProcessEnvironment,
     ProcessError, ProcessRunner, ProcessSpec, TargetAvailability, classify_cli_failure,
@@ -7,17 +8,51 @@ use ability_core::{FailureKind, TargetKind};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 pub struct CodexAdapter {
     runner: Arc<dyn ProcessRunner>,
+    launch: Mutex<Option<LaunchCommand>>,
 }
 
 impl CodexAdapter {
     pub fn new(runner: Arc<dyn ProcessRunner>) -> Self {
-        Self { runner }
+        Self {
+            runner,
+            launch: Mutex::new(None),
+        }
+    }
+
+    pub fn with_resolved_command(
+        runner: Arc<dyn ProcessRunner>,
+        program: impl Into<std::path::PathBuf>,
+        prefix_args: Vec<String>,
+    ) -> Self {
+        Self {
+            runner,
+            launch: Mutex::new(Some(LaunchCommand {
+                program: program.into(),
+                prefix_args,
+            })),
+        }
+    }
+
+    fn retained_launch(&self) -> std::io::Result<LaunchCommand> {
+        let mut retained = self
+            .launch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(launch) = retained.as_ref() {
+            return Ok(launch.clone());
+        }
+        let path = std::env::var_os("PATH");
+        let launch = resolve_launch_command(Path::new("codex"), path.as_deref())?;
+        *retained = Some(launch.clone());
+        Ok(launch)
     }
 }
 
@@ -28,10 +63,14 @@ impl AgentAdapter for CodexAdapter {
     }
 
     async fn detect(&self) -> TargetAvailability {
+        let launch = match self.retained_launch() {
+            Ok(launch) => launch,
+            Err(_) => return unavailable(self.kind()),
+        };
         let version = match self
             .runner
             .run(
-                detection_spec(vec!["--version".into()]),
+                detection_spec(&launch, vec!["--version".into()]),
                 CancellationToken::new(),
             )
             .await
@@ -42,7 +81,7 @@ impl AgentAdapter for CodexAdapter {
         let auth_state = match self
             .runner
             .run(
-                detection_spec(vec!["login".into(), "status".into()]),
+                detection_spec(&launch, vec!["login".into(), "status".into()]),
                 CancellationToken::new(),
             )
             .await
@@ -73,7 +112,10 @@ impl AgentAdapter for CodexAdapter {
         request: ExecutionRequest,
         cancellation: CancellationToken,
     ) -> Result<AdapterCompletion, AdapterError> {
-        let spec = execution_spec(request);
+        let launch = self
+            .retained_launch()
+            .map_err(|_| AdapterError::Unavailable)?;
+        let spec = execution_spec(&launch, request);
         match self.runner.run(spec, cancellation).await {
             Ok(output) if output.exit_code == Some(0) && has_completed_turn(&output.stdout) => {
                 Ok(AdapterCompletion::Completed {
@@ -107,10 +149,12 @@ impl AgentAdapter for CodexAdapter {
     }
 }
 
-fn detection_spec(args: Vec<String>) -> ProcessSpec {
+fn detection_spec(launch: &LaunchCommand, args: Vec<String>) -> ProcessSpec {
+    let mut resolved_args = launch.prefix_args.clone();
+    resolved_args.extend(args);
     ProcessSpec {
-        program: "codex".into(),
-        args,
+        program: launch.program.clone(),
+        args: resolved_args,
         current_dir: std::env::temp_dir(),
         env: BTreeMap::new(),
         environment: ProcessEnvironment::Inherit,
@@ -128,7 +172,7 @@ fn unavailable(kind: TargetKind) -> TargetAvailability {
     }
 }
 
-fn execution_spec(request: ExecutionRequest) -> ProcessSpec {
+fn execution_spec(launch: &LaunchCommand, request: ExecutionRequest) -> ProcessSpec {
     let mut args = vec![
         "exec".into(),
         "--ephemeral".into(),
@@ -151,9 +195,11 @@ fn execution_spec(request: ExecutionRequest) -> ProcessSpec {
         ]);
     }
     args.push(request.prompt);
+    let mut resolved_args = launch.prefix_args.clone();
+    resolved_args.extend(args);
     ProcessSpec {
-        program: "codex".into(),
-        args,
+        program: launch.program.clone(),
+        args: resolved_args,
         current_dir: request.workspace,
         env: BTreeMap::new(),
         environment: ProcessEnvironment::Inherit,

@@ -537,6 +537,7 @@ function reviewPortableNodeAst(source) {
       ],
     ],
     ["node:url", ["fileURLToPath"]],
+    ["node:util", ["TextDecoder", "isDeepStrictEqual"]],
     [
       "node:path",
       [
@@ -597,14 +598,21 @@ function reviewPortableNodeAst(source) {
     "ensureDirectory",
     "entriesUnder",
     "fileIdentity",
+    "loadTrustedRegistry",
     "main",
+    "packDirectoryHash",
     "packagePortableFromBuild",
     "packagePortableFromBuildForTest",
     "pathInfo",
+    "plainObject",
+    "readBoundedJson",
     "requireDirectory",
+    "requireExactKeys",
     "requireFile",
     "requireOwnedDirectoryIdentity",
     "requireOwnedFileIdentity",
+    "requirePackChild",
+    "safePackRelativePath",
     "safeRemoveOwnedFile",
     "safeRemoveOwnedTree",
     "sameIdentity",
@@ -613,6 +621,10 @@ function reviewPortableNodeAst(source) {
     "sha256",
     "stagePortable",
     "validateExtractedArchive",
+    "validateGrader",
+    "validateManifest",
+    "validatePortablePacks",
+    "validateRegistry",
   ]);
   const reviewedBindingNames = new Set([
     ...reviewedImportNames,
@@ -620,7 +632,9 @@ function reviewPortableNodeAst(source) {
     "publicationHook",
   ]);
   const callableImportNames = new Set(
-    [...reviewedImportNames].filter((name) => name !== "sep"),
+    [...reviewedImportNames].filter(
+      (name) => name !== "sep" && name !== "TextDecoder",
+    ),
   );
   const callableBindingNames = new Set([
     ...callableImportNames,
@@ -682,43 +696,52 @@ function reviewPortableNodeAst(source) {
   const expectedDirectCalls = new Map([
     ["archiveLeaf", 1],
     ["assertArchiveCandidate", 4],
-    ["assertInside", 20],
+    ["assertInside", 22],
     ["basename", 6],
+    ["BigInt", 2],
     ["canonicalExisting", 9],
-    ["captureOwnedDirectory", 3],
+    ["captureOwnedDirectory", 2],
     ["comparable", 2],
     ["copyFile", 3],
     ["copyValidatedTree", 1],
-    ["createHash", 1],
+    ["createHash", 2],
     ["dirname", 6],
-    ["ensureDirectory", 6],
-    ["entriesUnder", 5],
+    ["ensureDirectory", 5],
+    ["entriesUnder", 6],
     ["fileIdentity", 2],
     ["fileURLToPath", 2],
     ["isAbsolute", 1],
-    ["join", 31],
+    ["isDeepStrictEqual", 3],
+    ["join", 37],
     ["link", 1],
-    ["lstat", 9],
+    ["loadTrustedRegistry", 1],
+    ["lstat", 12],
     ["main", 1],
-    ["mkdir", 1],
+    ["mkdir", 3],
     ["packagePortableFromBuild", 2],
+    ["packDirectoryHash", 1],
     ["parse", 1],
-    ["pathInfo", 10],
+    ["pathInfo", 9],
+    ["plainObject", 2],
     ["publicationHook", 4],
-    ["randomUUID", 3],
-    ["readFile", 4],
-    ["readdir", 1],
+    ["randomUUID", 4],
+    ["readBoundedJson", 3],
+    ["readFile", 7],
+    ["readdir", 2],
     ["realpath", 2],
-    ["relative", 6],
+    ["relative", 7],
     ["rename", 1],
-    ["requireDirectory", 11],
-    ["requireFile", 8],
+    ["requireDirectory", 15],
+    ["requireExactKeys", 8],
+    ["requireFile", 9],
     ["requireOwnedDirectoryIdentity", 3],
     ["requireOwnedFileIdentity", 3],
+    ["requirePackChild", 2],
     ["resolve", 10],
     ["rm", 2],
+    ["safePackRelativePath", 3],
     ["safeRemoveOwnedFile", 1],
-    ["safeRemoveOwnedTree", 4],
+    ["safeRemoveOwnedTree", 3],
     ["sameIdentity", 5],
     ["samePath", 3],
     ["settlePortableCleanup", 1],
@@ -726,84 +749,128 @@ function reviewPortableNodeAst(source) {
     ["spawnSync", 2],
     ["stagePortable", 1],
     ["validateExtractedArchive", 1],
+    ["validateGrader", 1],
+    ["validateManifest", 1],
+    ["validatePortablePacks", 4],
+    ["validateRegistry", 2],
     ["writeFile", 1],
   ]);
   const expectedMemberCalls = new Map([
+    ["add", 1],
+    ["alloc", 2],
     ["allSettled", 2],
     ["catch", 1],
     ["compare", 1],
-    ["digest", 1],
-    ["filter", 4],
-    ["from", 1],
-    ["includes", 2],
-    ["isDirectory", 6],
-    ["isFile", 5],
+    ["decode", 2],
+    ["digest", 2],
+    ["entries", 1],
+    ["filter", 5],
+    ["from", 2],
+    ["has", 3],
+    ["includes", 4],
+    ["isArray", 5],
+    ["isDirectory", 7],
+    ["isFile", 6],
+    ["isSafeInteger", 3],
     ["isSymbolicLink", 9],
-    ["join", 4],
-    ["map", 4],
-    ["parse", 1],
-    ["push", 7],
+    ["join", 5],
+    ["keys", 1],
+    ["map", 5],
+    ["parse", 2],
+    ["push", 8],
     ["reverse", 1],
-    ["sort", 3],
-    ["split", 5],
-    ["startsWith", 1],
+    ["some", 2],
+    ["sort", 7],
+    ["split", 8],
+    ["startsWith", 3],
     ["stringify", 2],
     ["subarray", 1],
-    ["test", 1],
+    ["test", 5],
     ["toLowerCase", 1],
-    ["update", 1],
+    ["trim", 1],
+    ["update", 5],
     ["write", 2],
+    ["writeBigUInt64LE", 2],
   ]);
   const expectedProperties = new Map([
+    ["add", 1],
+    ["alloc", 2],
     ["NODE_TEST_CONTEXT", 1],
     ["allSettled", 2],
     ["argv", 2],
+    ["bundled", 1],
     ["catch", 1],
+    ["category", 1],
     ["checksumManifest", 1],
-    ["code", 1],
+    ["code", 2],
     ["compare", 1],
+    ["content_sha256", 2],
+    ["decode", 2],
     ["dev", 3],
-    ["digest", 1],
+    ["digest", 2],
     ["directory", 1],
-    ["entries", 1],
+    ["entries", 2],
     ["env", 1],
     ["error", 4],
     ["exitCode", 1],
-    ["filter", 4],
-    ["from", 1],
-    ["includes", 2],
+    ["expected", 5],
+    ["filter", 5],
+    ["from", 2],
+    ["grader", 1],
+    ["has", 3],
+    ["id", 10],
+    ["includes", 4],
     ["ino", 3],
-    ["isDirectory", 6],
-    ["isFile", 5],
+    ["isArray", 5],
+    ["isDirectory", 7],
+    ["isFile", 6],
+    ["isSafeInteger", 3],
     ["isSymbolicLink", 9],
-    ["join", 4],
-    ["length", 2],
-    ["map", 4],
+    ["join", 5],
+    ["keys", 1],
+    ["length", 11],
+    ["license", 1],
+    ["map", 5],
+    ["max_turns", 3],
     ["message", 1],
-    ["name", 10],
-    ["parse", 1],
-    ["path", 2],
+    ["name", 20],
+    ["packs", 4],
+    ["parse", 2],
+    ["path", 10],
     ["payloads", 1],
     ["platform", 2],
-    ["push", 7],
+    ["prompt_file", 1],
+    ["push", 8],
     ["reverse", 1],
     ["root", 1],
+    ["schema_version", 2],
     ["sha256", 1],
-    ["size", 1],
-    ["sort", 3],
-    ["split", 5],
-    ["startsWith", 1],
+    ["size", 8],
+    ["some", 2],
+    ["sort", 7],
+    ["split", 8],
+    ["starter_dir", 3],
+    ["startsWith", 3],
     ["status", 2],
     ["stderr", 1],
     ["stdout", 1],
     ["stringify", 2],
     ["subarray", 1],
-    ["test", 1],
+    ["target_kinds", 3],
+    ["tasks", 3],
+    ["test", 5],
+    ["time_budget_secs", 3],
+    ["title", 2],
     ["toLowerCase", 1],
-    ["update", 1],
+    ["trim", 1],
+    ["trustedRegistry", 2],
+    ["type", 2],
+    ["update", 5],
     ["url", 2],
-    ["version", 1],
+    ["verifier_id", 2],
+    ["version", 4],
     ["write", 2],
+    ["writeBigUInt64LE", 2],
   ]);
   const sensitiveCapabilities = new Set([
     "copyFile",
@@ -1037,6 +1104,11 @@ function reviewPortableNodeAst(source) {
   const reviewedElementShapes = [
     [
       "element",
+      ["identifier", "expectedPackIdentities"],
+      ["identifier", "index"],
+    ],
+    [
+      "element",
       ["property", ["identifier", "process"], "argv"],
       ["number", "1"],
     ],
@@ -1099,7 +1171,14 @@ function reviewPortableNodeAst(source) {
       "link",
       [[["identifier", "temporaryArchive"], ["identifier", "archivePath"]]],
     ],
-    ["mkdir", [[["identifier", "current"]]]],
+    [
+      "mkdir",
+      [
+        [["identifier", "current"]],
+        [["identifier", "stageParent"]],
+        [["identifier", "stageRoot"]],
+      ],
+    ],
     [
       "rename",
       [[["identifier", "path"], ["identifier", "quarantine"]]],
@@ -1413,7 +1492,7 @@ if (
 const portableSourceSeals = new Map([
   [
     "scripts/package-portable.mjs",
-    "8470ec7c9651153a9900168749bb5aeeca2c8454631c89d67ddbfaed4544761a",
+    "949dd69f2ef8c298148de27744f61c492a8eacdf536c2968778781b396a0b67e",
   ],
   [
     "scripts/compress-portable.ps1",
@@ -1591,11 +1670,11 @@ const workflowPaths = [
 const publicationWorkflowSeals = new Map([
   [
     ".github/workflows/release.yml",
-    "ca7ec5eaccef18e5becda1dbd5f943cd8538429fd2c26c93029f6383d3b317e3",
+    "a22609db904a231afb1522369d3141b1551c9595189d0a93e277062f4b3d89fb",
   ],
   [
     ".github/workflows/pages.yml",
-    "64d04a6b6c57188551b246392c29b286b9c9e2deaea7000d5f0a6963265a0f29",
+    "d53beed428390726a50565b7b603526e2ab01a6d9a2a26e4b89c9f5d6d464f75",
   ],
 ]);
 const workflows = new Map();
@@ -1664,6 +1743,7 @@ const requiredActions = new Map([
   ]],
   [".github/workflows/pages.yml", [
     "actions/checkout",
+    "actions/setup-node",
     "actions/configure-pages",
     "actions/upload-pages-artifact",
     "actions/deploy-pages",
@@ -2008,15 +2088,33 @@ const exactReleaseBody = `Windows 10/11 x64 v0.2.1 预览版。
 **警告：安装程序和免安装 ZIP 均未签名。** Windows SmartScreen 可能显示风险提示。
 核心数据默认只保存在本机；真实 CLI 测试消耗运行者自己的订阅用量。
 下载后请使用随发布提供的 SHA256SUMS.txt 校验所有下载文件。`;
-const exactChecksumRun = `$files = Get-ChildItem target/release/bundle -Recurse -File |
-  Where-Object { $_.Extension -in ".exe", ".msi", ".zip" } |
-  Sort-Object FullName
-if (-not $files) {
-  throw "No Windows release asset was produced; refusing to publish an empty checksum file."
+const exactChecksumRun = `$version = $env:RELEASE_TAG.Substring(1)
+$bundleRoot = "target/release/bundle"
+$expected = @(
+  "target/release/bundle/nsis/ability-radar_\${version}_x64-setup.exe"
+  "target/release/bundle/msi/ability-radar_\${version}_x64_en-US.msi"
+  "target/release/bundle/portable/ability-radar_\${version}_windows-x64-portable.zip"
+)
+$leafNames = @($expected | ForEach-Object { Split-Path -Leaf $_ })
+if ($expected.Count -ne 3 -or ($leafNames | Select-Object -Unique).Count -ne 3) {
+  throw "The reviewed release checksum set must contain three distinct leaf names."
 }
-$lines = foreach ($file in $files) {
-  $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
-  "$hash  $($file.Name)"
+foreach ($path in $expected) {
+  if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+    throw "Missing expected release asset: $path"
+  }
+}
+$expectedFullNames = @($expected | ForEach-Object { [IO.Path]::GetFullPath($_) })
+$observed = @(Get-ChildItem -LiteralPath $bundleRoot -Recurse -File |
+  Where-Object { $_.Extension -in ".exe", ".msi", ".zip" } |
+  ForEach-Object { $_.FullName })
+$unexpected = @($observed | Where-Object { $_ -notin $expectedFullNames })
+if ($observed.Count -ne 3 -or $unexpected.Count -ne 0) {
+  throw "Unexpected release asset set: $($unexpected -join ', ')"
+}
+$lines = foreach ($path in $expected) {
+  $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
+  "$hash  $(Split-Path -Leaf $path)"
 }
 Set-Content -LiteralPath SHA256SUMS.txt -Value $lines -Encoding utf8NoBOM`;
 const exactPortableUploadRun = `$version = $env:RELEASE_TAG.Substring(1)
@@ -2146,6 +2244,8 @@ requireExactJobContract(
 );
 const expectedPagesBuildSteps = [
   "Check out repository",
+  "Set up Node.js",
+  "Install repository dependencies",
   "Configure Pages",
   "Validate repository contracts",
   "Assemble static site",
@@ -2174,6 +2274,12 @@ requireCommand(
 );
 const assembleSite = namedStep(pagesPath, pagesBuild, "Assemble static site");
 const pagesCheckout = namedStep(pagesPath, pagesBuild, "Check out repository");
+const pagesNodeSetup = namedStep(pagesPath, pagesBuild, "Set up Node.js");
+const pagesInstall = namedStep(
+  pagesPath,
+  pagesBuild,
+  "Install repository dependencies",
+);
 const configurePages = namedStep(pagesPath, pagesBuild, "Configure Pages");
 const validatePages = namedStep(
   pagesPath,
@@ -2182,6 +2288,8 @@ const validatePages = namedStep(
 );
 const deployPages = namedStep(pagesPath, pagesDeploy, "Deploy");
 requireExactStepFields(pagesPath, pagesCheckout, [], "Pages checkout");
+requireExactStepFields(pagesPath, pagesNodeSetup, [], "Pages Node setup");
+requireExactStepFields(pagesPath, pagesInstall, [], "Pages dependency installation");
 requireExactStepFields(pagesPath, configurePages, [], "Configure Pages");
 requireExactStepFields(
   pagesPath,
@@ -2207,6 +2315,18 @@ const exactPagesBuildContracts = [
     uses: "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10",
     usesComment: "v6",
     with: { "persist-credentials": "false" },
+  },
+  {
+    name: "Set up Node.js",
+    label: "Pages Node setup",
+    uses: "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+    usesComment: "v6",
+    with: { "node-version": "22", cache: "npm" },
+  },
+  {
+    name: "Install repository dependencies",
+    label: "Pages dependency installation",
+    run: "npm ci",
   },
   {
     name: "Configure Pages",
@@ -2315,11 +2435,18 @@ const site = requireText("site/index.html", [
   ["methodology link", /href="docs\/methodology\.md"/],
   ["privacy link", /href="docs\/privacy\.md"/],
   ["security link", /href="docs\/security\.md"/],
-  ["v0.2.1 prerelease link", /\/releases\/tag\/v0\.2\.1/],
-  ["v0.2.1 免安装 ZIP download copy", /v0\.2\.1 安装程序和免安装 ZIP/],
+  ["v0.2.1 candidate/pending status", /v0\.2\.1.*候选\/待发布/si],
+  ["inactive v0.2.1 CTA", /<span[^>]*id="release-link"[^>]*aria-disabled="true"[^>]*>v0\.2\.1 下载待开放<\/span>/],
+  ["clean Windows public-release download gate", /clean Windows 10\/11 x64.*公开发布.*开放下载/si],
 ]);
-if (/\/releases\/latest/.test(site)) {
-  fail("site/index.html must not link a prerelease download through /releases/latest");
+if (/\/releases\/(?:latest|tag\/v0\.2\.1)/.test(site)) {
+  fail("site/index.html must not expose a release URL while v0.2.1 is pending");
+}
+if (/<a\b[^>]*id="(?:release-link|footer-release)"|releaseUrl\s*=|下载 v0\.2\.1 安装程序/si.test(site)) {
+  fail("site/index.html must keep every v0.2.1 public download CTA inactive while pending");
+}
+if (/v0\.2\.1\s*(?:公开预览|当前发布|正式发布).*?(?:提供|开放).*?下载/si.test(site)) {
+  fail("site/index.html must not claim that pending v0.2.1 is a current public release");
 }
 const forbiddenSitePatterns = [
   ["external resource URL", /(?:src|action)=["']https?:/i],
@@ -2335,13 +2462,14 @@ for (const [label, pattern] of forbiddenSitePatterns) {
 }
 
 const readme = requireText("README.md", [
-  ["exact v0.2.1 current-status banner", /^> 当前状态：v0\.2\.1 Windows 预览版。支持 Windows 10\/11 x64；安装程序尚未签名，也没有自动更新。$/m],
+  ["exact v0.2.1 pending-status banner", /^> 当前状态：v0\.2\.1 Windows 候选\/待发布构建。支持 Windows 10\/11 x64；公开下载尚未开放，安装程序尚未签名，也没有自动更新。$/m],
   ["exact client task count", /8\s*道/],
   ["exact CLI task count", /2\s*(?:个|项)/],
   ["fake CI cost boundary", /GitHub CI.*(?:假|fake).*CLI/si],
   ["runner billing boundary", /GitHub.*runner.*仓库所有者.*GitHub.*计划/si],
   ["volunteer real-CLI cost boundary", /自愿.*测试.*自己的订阅/si],
   ["checksum verification", /SHA-?256/],
+  ["clean Windows public-release download gate", /clean Windows 10\/11 x64.*公开发布.*开放下载/si],
   ["npm ci and npm start commands", /```powershell\r?\nnpm ci\r?\nnpm start\r?\n```/],
   ["package:portable command", /```powershell\r?\nnpm run package:portable\r?\n```/],
   ["Tauri desktop development window", /npm start.*Tauri 桌面开发窗口/si],
@@ -2352,6 +2480,9 @@ const readme = requireText("README.md", [
 ]);
 if (/normal browser is the complete product/i.test(readme)) {
   fail("README.md must not describe localhost:1420 in a normal browser as the complete product");
+}
+if (/从仓库的\s*\*\*Releases\*\*\s*页面下载 v0\.2\.1|v0\.2\.1\s*(?:公开预览|当前发布|正式发布).*?(?:提供|开放).*?下载/si.test(readme)) {
+  fail("README.md must not claim that pending v0.2.1 is currently downloadable");
 }
 requireText("docs/methodology.md", [
   ["category-equal weighting", /类别等权/],
@@ -2404,6 +2535,10 @@ for (const path of ["docs/privacy.md", "docs/security.md"]) {
     ["not a strong sandbox", /不是.*(?:容器|VM|虚拟机).*(?:sandbox|沙箱)/si],
   ]);
 }
+requireText("apps/desktop/src/pages/HomePage.tsx", [
+  ["inherited PATH immediate recheck", /已继承 PATH 目录内的变化可立即重新检测/],
+  ["new PATH directory restart boundary", /新增 PATH\s*目录，请重启应用后再重新检测/],
+]);
 requireText("docs/troubleshooting.md", [
   ["missing CLI", /CLI.*未找到/],
   ["login", /登录/],
@@ -2416,7 +2551,13 @@ requireText("docs/troubleshooting.md", [
   ["npm shim checks with codex.cmd --version", /```powershell\r?\nGet-Command codex -All\r?\nwhere\.exe codex\r?\ncodex\.cmd --version\r?\n```/],
   ["--version sends no model request", /`--version`.*不会发送模型请求/si],
   ["in-app 重新检测 CLI path", /重新检测 CLI/],
+  ["inherited PATH immediate recheck", /已经继承的 PATH 目录内，可以立即重新检测/],
+  ["new User or Machine PATH restart boundary", /新增了 User 或 Machine PATH 目录，请先重启应用/],
 ]);
+const troubleshooting = read("docs/troubleshooting.md");
+if (/重新检测 CLI[”"`'，,\s]*无需重启应用/.test(troubleshooting)) {
+  fail("docs/troubleshooting.md must not make an unconditional no-restart CLI re-detection claim");
+}
 requireText("docs/release-checklist.md", [
   ["portable archive gates", /免安装 ZIP.*Windows 10.*Windows 11/si],
   ["portable APPDATA gate", /免安装 ZIP.*%APPDATA%\\com\.aiability\.radar/si],
