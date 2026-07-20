@@ -41,7 +41,11 @@ function readyBootstrap(): Bootstrap {
       authState: kind === "codex_cli" || kind === "claude_code" ? "ready" : "unknown",
       status: "ready",
       source:
-        kind === "codex_cli" || kind === "claude_code" ? "reviewed_npm" : null,
+        kind === "codex_cli"
+          ? "reviewed_npm"
+          : kind === "claude_code"
+            ? "native_exe"
+            : null,
       prerequisites:
         kind === "codex_cli" || kind === "claude_code"
           ? [{ name: "Node.js 22/24 LTS", available: true, version: "v22.22.0" }]
@@ -142,6 +146,37 @@ test("shows four stable targets in separate client and CLI groups", async () => 
       name: "Claude Code 状态：本机环境检查通过",
     }),
   ).toBeInTheDocument();
+  expect(screen.getByText("npm 安装")).toBeInTheDocument();
+});
+
+test.each([
+  ["not_found", "未检测到受支持入口"],
+  ["runtime_missing", "缺少 Node.js 运行时"],
+  ["entry_inaccessible", "入口不可访问"],
+  ["version_probe_failed", "版本检测失败"],
+  ["needs_login", "需要先在终端登录"],
+] as const)("renders %s as %s", async (status, copy) => {
+  const bootstrap = readyBootstrap();
+  bootstrap.targets = bootstrap.targets.map((target) =>
+    target.kind === "codex_cli"
+      ? {
+          ...target,
+          installed: status === "needs_login",
+          status,
+          authState: status === "needs_login" ? "needs_login" : "unknown",
+          version: status === "needs_login" ? "codex-cli 0.142.5" : null,
+          source: status === "needs_login" ? "reviewed_npm" : null,
+        }
+      : target,
+  );
+
+  renderHome(backendFor(async () => bootstrap));
+
+  expect(
+    await screen.findByRole("status", {
+      name: `Codex CLI 状态：${copy}`,
+    }),
+  ).toBeInTheDocument();
 });
 
 test("states estimates, subscription cost, privacy, and measurement limits precisely", async () => {
@@ -184,7 +219,7 @@ test("an unavailable CLI disables only that target", async () => {
   expect(disabled).toBeDisabled();
   expect(
     screen.getByRole("status", {
-      name: "Codex CLI 状态：未检测到可执行入口",
+      name: "Codex CLI 状态：未检测到受支持入口",
     }),
   ).toBeInTheDocument();
   expect(
@@ -217,7 +252,7 @@ test("re-detects CLI availability and explains inherited PATH limits", async () 
   const user = userEvent.setup();
   renderHome(backendFor(load));
 
-  expect(await screen.findByText("未检测到可执行入口")).toBeInTheDocument();
+  expect(await screen.findByText("未检测到受支持入口")).toBeInTheDocument();
   expect(
     screen.getByText(
       /已继承 PATH 目录内的变化可立即重新检测.*新增 PATH 目录.*重启应用.*重新检测/,
@@ -229,7 +264,7 @@ test("re-detects CLI availability and explains inherited PATH limits", async () 
   expect(load).toHaveBeenCalledTimes(2);
 });
 
-test("missing Node takes precedence over an npm CLI detection failure", async () => {
+test("a CLI detection failure takes precedence over a missing Node prerequisite", async () => {
   const bootstrap = readyBootstrap();
   bootstrap.targets = bootstrap.targets.map((target) =>
     target.kind === "codex_cli"
@@ -247,7 +282,7 @@ test("missing Node takes precedence over an npm CLI detection failure", async ()
 
   expect(
     await screen.findByRole("status", {
-      name: "Codex CLI 状态：缺少 Node.js 22/24 LTS",
+      name: "Codex CLI 状态：缺少 Node.js 运行时",
     }),
   ).toBeInTheDocument();
 });

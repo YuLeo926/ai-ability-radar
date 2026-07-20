@@ -290,6 +290,29 @@ describe("Task 21 accessibility baseline", () => {
     await expectNoSeriousAxeViolations(result.container);
   });
 
+  test("CLI detection failures keep their precise accessible status name", async () => {
+    const unavailable = bootstrap();
+    unavailable.targets = unavailable.targets.map((target) =>
+      target.kind === "codex_cli"
+        ? {
+            ...target,
+            installed: false,
+            version: null,
+            authState: "unknown",
+            status: "entry_inaccessible",
+            source: null,
+          }
+        : target,
+    );
+    renderRoute("/", fakeBackend({ getBootstrap: vi.fn(async () => unavailable) }));
+
+    expect(
+      await screen.findByRole("status", {
+        name: "Codex CLI 状态：入口不可访问",
+      }),
+    ).toBeInTheDocument();
+  });
+
   test("manual setup, CLI setup, and report dialog have no serious axe violations", async () => {
     const manual = renderRoute("/manual/chat_gpt_client");
     await screen.findByRole("heading", {

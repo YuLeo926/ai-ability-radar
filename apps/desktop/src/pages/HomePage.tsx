@@ -3,7 +3,9 @@ import { Link } from "react-router-dom";
 import { useBackend } from "../api/BackendContext";
 import { useT } from "../i18n/I18nContext";
 import type {
+  AvailabilityStatus,
   Bootstrap,
+  LaunchSource,
   PackSummary,
   TargetAvailability,
   TargetKind,
@@ -14,6 +16,20 @@ const targetLabels: Record<TargetKind, string> = {
   claude_client: "Claude 客户端",
   codex_cli: "Codex CLI",
   claude_code: "Claude Code",
+};
+
+const statusCopy: Record<AvailabilityStatus, string | null> = {
+  ready: null,
+  needs_login: "需要先在终端登录",
+  not_found: "未检测到受支持入口",
+  runtime_missing: "缺少 Node.js 运行时",
+  entry_inaccessible: "入口不可访问",
+  version_probe_failed: "版本检测失败",
+};
+
+const sourceCopy: Record<LaunchSource, string> = {
+  native_exe: "原生安装",
+  reviewed_npm: "npm 安装",
 };
 
 type BootstrapState =
@@ -35,6 +51,10 @@ function visibleVersion(value: string | null | undefined): string | null {
 }
 
 function blocker(target: TargetAvailability): string | null {
+  if (isCli(target.kind)) {
+    const status = statusCopy[target.status];
+    if (status) return status;
+  }
   const missing = target.prerequisites.find(
     (prerequisite) => !prerequisite.available,
   );
@@ -61,6 +81,12 @@ function TargetCard({
   const reason = blocker(target);
   const status = reason ?? availableStatus(target);
   const version = visibleVersion(target.version);
+  const source =
+    isCli(target.kind) &&
+    target.source &&
+    (target.status === "ready" || target.status === "needs_login")
+      ? sourceCopy[target.source]
+      : null;
   const destination = isCli(target.kind) ? "cli" : "manual";
   const actionLabel = isCli(target.kind)
     ? `开始 ${label} 自动体检`
@@ -79,6 +105,11 @@ function TargetCard({
         </span>
       </div>
       {version ? <p className="target-version">版本：{version}</p> : null}
+      {source ? (
+        <p className="target-source">
+          入口来源：<span>{source}</span>
+        </p>
+      ) : null}
       <p
         aria-label={statusLabel}
         className={reason ? "target-status status-warning" : "target-status status-ready"}

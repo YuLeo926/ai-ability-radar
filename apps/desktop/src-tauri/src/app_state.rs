@@ -296,26 +296,10 @@ impl AppState {
 
     pub async fn target_availability(&self) -> Vec<TargetAvailability> {
         let node = probe_node(self.runner.clone()).await;
-        let mut targets = vec![
-            TargetAvailability {
-                kind: TargetKind::ChatGptClient,
-                installed: true,
-                version: None,
-                auth_state: AuthState::Unknown,
-                status: AvailabilityStatus::Ready,
-                source: None,
-                prerequisites: Vec::new(),
-            },
-            TargetAvailability {
-                kind: TargetKind::ClaudeClient,
-                installed: true,
-                version: None,
-                auth_state: AuthState::Unknown,
-                status: AvailabilityStatus::Ready,
-                source: None,
-                prerequisites: Vec::new(),
-            },
-        ];
+        let mut targets = [TargetKind::ChatGptClient, TargetKind::ClaudeClient]
+            .into_iter()
+            .map(manual_target)
+            .collect::<Vec<_>>();
         for adapter in fresh_provider_adapters(self.runner.clone()).values() {
             let mut availability = adapter.detect().await;
             availability.version = public_cli_version(availability.version);
@@ -323,6 +307,18 @@ impl AppState {
             targets.push(availability);
         }
         targets
+    }
+}
+
+fn manual_target(kind: TargetKind) -> TargetAvailability {
+    TargetAvailability {
+        kind,
+        installed: true,
+        version: None,
+        auth_state: AuthState::Unknown,
+        status: AvailabilityStatus::Ready,
+        source: None,
+        prerequisites: Vec::new(),
     }
 }
 
@@ -525,6 +521,19 @@ mod tests {
             layout.cli_pack,
             PathBuf::from("D:/app/resources/benchmark-packs/cli-quick-v1")
         );
+    }
+
+    #[test]
+    fn manual_targets_are_ready_without_a_launch_source_or_prerequisites() {
+        for kind in [TargetKind::ChatGptClient, TargetKind::ClaudeClient] {
+            let target = manual_target(kind);
+
+            assert!(target.installed);
+            assert_eq!(target.auth_state, AuthState::Unknown);
+            assert_eq!(target.status, AvailabilityStatus::Ready);
+            assert_eq!(target.source, None);
+            assert!(target.prerequisites.is_empty());
+        }
     }
 
     #[test]

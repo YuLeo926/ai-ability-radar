@@ -9,7 +9,8 @@ use crate::dto::{
     RunErrorEvent, RunIdInput, SetRetentionInput, StartRunInput, SubmitAnswerInput, TaskResultDto,
 };
 use ability_adapters::{
-    AgentAdapter, AuthState, CliRunService, PrerequisiteStatus, ProcessRunner, TargetAvailability,
+    AgentAdapter, AvailabilityStatus, CliRunService, PrerequisiteStatus, ProcessRunner,
+    TargetAvailability,
 };
 use ability_core::{
     contains_forbidden_display_character, is_valid_reported_model, ArtifactStore,
@@ -229,11 +230,23 @@ fn validate_cli_readiness(
     if availability.kind != expected_kind {
         return Err("CLI 探测结果与所选测试对象不一致".into());
     }
-    if !availability.installed {
-        return Err("未找到所选 CLI，请先安装并完成登录".into());
-    }
-    if availability.auth_state == AuthState::NeedsLogin {
-        return Err("所选 CLI 尚未登录，请先在终端完成登录".into());
+    match availability.status {
+        AvailabilityStatus::Ready => {}
+        AvailabilityStatus::NeedsLogin => {
+            return Err("所选 CLI 尚未登录，请先在终端完成登录".into());
+        }
+        AvailabilityStatus::NotFound => {
+            return Err("未检测到受支持的 CLI 入口".into());
+        }
+        AvailabilityStatus::RuntimeMissing => {
+            return Err("CLI 的 Node.js 运行时不可用".into());
+        }
+        AvailabilityStatus::EntryInaccessible => {
+            return Err("检测到 CLI 入口，但当前应用无权启动".into());
+        }
+        AvailabilityStatus::VersionProbeFailed => {
+            return Err("CLI 版本检测失败".into());
+        }
     }
     let cli_version = public_cli_version(availability.version)
         .ok_or_else(|| "CLI 返回了无效的版本信息".to_string())?;
@@ -2734,77 +2747,83 @@ mod tests {
     }
 
     #[test]
-    fn readiness_rejects_wrong_target_login_and_untrusted_versions() {
+    fn readiness_maps_every_non_ready_status_before_version_and_node_checks() {
         let ready_node = || PrerequisiteStatus {
             name: "Node.js 22/24 LTS".into(),
             available: true,
             version: Some("v22.23.1".into()),
         };
-        let availability =
-            |kind, installed, version: Option<&str>, auth_state| TargetAvailability {
-                kind,
-                installed,
-                version: version.map(str::to_owned),
-                auth_state,
-                status: if installed {
-                    match auth_state {
-                        AuthState::NeedsLogin => AvailabilityStatus::NeedsLogin,
-                        AuthState::Unknown | AuthState::Ready => AvailabilityStatus::Ready,
-                    }
-                } else {
-                    AvailabilityStatus::NotFound
-                },
-                source: installed.then_some(LaunchSource::ReviewedNpm),
-                prerequisites: Vec::new(),
-            };
+        let availability = |kind, status| TargetAvailability {
+            kind,
+            installed: matches!(
+                status,
+                AvailabilityStatus::Ready | AvailabilityStatus::NeedsLogin
+            ),
+            version: Some("codex-cli 1.2.3".into()),
+            auth_state: if status == AvailabilityStatus::NeedsLogin {
+                AuthState::NeedsLogin
+            } else {
+                AuthState::Ready
+            },
+            status,
+            source: matches!(
+                status,
+                AvailabilityStatus::Ready | AvailabilityStatus::NeedsLogin
+            )
+            .then_some(LaunchSource::ReviewedNpm),
+            prerequisites: Vec::new(),
+        };
+
+        let wrong_target = validate_cli_readiness(
+            TargetKind::CodexCli,
+            availability(TargetKind::ClaudeCode, AvailabilityStatus::Ready),
+            ready_node(),
+        )
+        .err()
+        .expect("a wrong target must be rejected");
+        assert_eq!(wrong_target, "CLI 探测结果与所选测试对象不一致");
+
+        for (status, expected) in [
+            (
+                AvailabilityStatus::NeedsLogin,
+                "所选 CLI 尚未登录，请先在终端完成登录",
+            ),
+            (AvailabilityStatus::NotFound, "未检测到受支持的 CLI 入口"),
+            (
+                AvailabilityStatus::RuntimeMissing,
+                "CLI 的 Node.js 运行时不可用",
+            ),
+            (
+                AvailabilityStatus::EntryInaccessible,
+                "检测到 CLI 入口，但当前应用无权启动",
+            ),
+            (AvailabilityStatus::VersionProbeFailed, "CLI 版本检测失败"),
+        ] {
+            let error = validate_cli_readiness(
+                TargetKind::CodexCli,
+                availability(TargetKind::CodexCli, status),
+                ready_node(),
+            )
+            .err()
+            .expect("every non-ready status must block a CLI run");
+            assert_eq!(error, expected, "{status:?}");
+        }
 
         assert!(validate_cli_readiness(
             TargetKind::CodexCli,
-            availability(
-                TargetKind::ClaudeCode,
-                true,
-                Some("claude 1"),
-                AuthState::Ready,
-            ),
+            TargetAvailability {
+                version: Some("codex\nforged".into()),
+                ..availability(TargetKind::CodexCli, AvailabilityStatus::Ready)
+            },
             ready_node(),
         )
         .is_err());
         assert!(validate_cli_readiness(
             TargetKind::CodexCli,
-            availability(TargetKind::CodexCli, false, None, AuthState::Unknown,),
-            ready_node(),
-        )
-        .is_err());
-        assert!(validate_cli_readiness(
-            TargetKind::ClaudeCode,
-            availability(
-                TargetKind::ClaudeCode,
-                true,
-                Some("claude 1"),
-                AuthState::NeedsLogin,
-            ),
-            ready_node(),
-        )
-        .is_err());
-        assert!(validate_cli_readiness(
-            TargetKind::CodexCli,
-            availability(
-                TargetKind::CodexCli,
-                true,
-                Some("codex\nforged"),
-                AuthState::Ready,
-            ),
-            ready_node(),
-        )
-        .is_err());
-        assert!(validate_cli_readiness(
-            TargetKind::CodexCli,
-            availability(
-                TargetKind::CodexCli,
-                true,
-                Some("codex 1"),
-                AuthState::Ready,
-            ),
+            TargetAvailability {
+                version: Some("codex 1".into()),
+                ..availability(TargetKind::CodexCli, AvailabilityStatus::Ready)
+            },
             PrerequisiteStatus {
                 name: "Node.js 22/24 LTS".into(),
                 available: true,
