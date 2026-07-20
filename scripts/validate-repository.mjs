@@ -440,7 +440,7 @@ const portableNodeImports =
 const expectedPortableNodeImports = [
   'import { createHash, randomUUID } from "node:crypto";',
   'import { spawnSync } from "node:child_process";',
-  'import { copyFile, lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile, } from "node:fs/promises";',
+  'import { copyFile, link, lstat, mkdir, readFile, readdir, realpath, rm, writeFile, } from "node:fs/promises";',
   'import { fileURLToPath } from "node:url";',
   'import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep, } from "node:path";',
 ].map(canonicalStatement).sort();
@@ -460,21 +460,29 @@ if (
     "portable Node import allowlist permits only reviewed core filesystem, path, crypto, URL, and child-process imports; network and dynamic imports are forbidden",
   );
 }
-if (/\b(?:Reflect|globalThis|eval|Function)\b/.test(portableNodeSource)) {
+const forbiddenPortableNodeSyntax = [
+  /\bprocess\s*\.\s*getBuiltinModule\s*\(/,
+  /\b(?:global|globalThis)\s*\[/,
+  /\[\s*["'](?:spawnSync|fetch|copyFile|link|rm|writeFile|rename|createWriteStream|request|connect)["']\s*\]/,
+  /\b(?:import|require|eval|Function)\s*\(/,
+  /\bReflect(?:\s*\.|\s*\[)/,
+  /\b(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=\s*(?:spawnSync|copyFile|link|rm|writeFile|rename|fetch)\b(?!\s*\()/,
+];
+if (forbiddenPortableNodeSyntax.some((pattern) => pattern.test(portableNodeSource))) {
   fail(
-    "portable Node operation allowlist forbids indirect or computed execution, network, and write access",
+    "portable Node syntax allowlist forbids computed/global/builtin-module access, capability aliases, and indirect execution, network, or write access",
   );
 }
 
 const expectedPortableCallCounts = new Map([
   ["copyFile", 3],
+  ["link", 1],
   ["lstat", 6],
   ["mkdir", 1],
   ["randomUUID", 1],
   ["readFile", 3],
   ["readdir", 1],
   ["realpath", 2],
-  ["rename", 1],
   ["rm", 2],
   ["spawnSync", 1],
   ["writeFile", 1],
@@ -503,12 +511,12 @@ if (
     'await copyFile(readme, join(stageRoot, "README.txt"));',
   ) ||
   !portableNodeSource.includes("await copyFile(entry.path, destination);") ||
-  !portableNodeSource.includes("await rename(temporaryArchive, archivePath);") ||
+  !portableNodeSource.includes("await link(temporaryArchive, archivePath);") ||
   !portableNodeSource.includes("await rm(path, { recursive: true });") ||
   !portableNodeSource.includes("await rm(path);")
 ) {
   fail(
-    "portable Node operation allowlist rejects copyFile, rename, or removal destinations outside the reviewed target/release/bundle/portable flow",
+    "portable Node operation allowlist rejects copyFile, link, or removal destinations outside the reviewed target/release/bundle/portable flow",
   );
 }
 const exactPortableSpawn = `spawnSync(
@@ -624,7 +632,7 @@ if (
 const portableSourceSeals = new Map([
   [
     "scripts/package-portable.mjs",
-    "cd93b1290f7739ca721336b585885803f01606de9526be68016ae4a57858e505",
+    "dd75003e1739cd130430801e41f107461db73d10278991f8d95fa13a45ba2fd9",
   ],
   [
     "scripts/compress-portable.ps1",

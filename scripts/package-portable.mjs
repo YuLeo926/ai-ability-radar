@@ -2,12 +2,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
   copyFile,
+  link,
   lstat,
   mkdir,
   readFile,
   readdir,
   realpath,
-  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -323,7 +323,7 @@ export async function stagePortable({
   }
 }
 
-async function packagePortableFromBuild(repoRoot) {
+async function packagePortableFromBuild(repoRoot, publicationHook) {
   const packageManifest = JSON.parse(
     await readFile(join(repoRoot, "package.json"), "utf8"),
   );
@@ -361,6 +361,7 @@ async function packagePortableFromBuild(repoRoot) {
     "portable temporary archive",
   );
 
+  let published = false;
   try {
     if (await pathInfo(archivePath)) {
       throw new Error("portable final archive already exists; refusing to overwrite");
@@ -406,15 +407,39 @@ async function packagePortableFromBuild(repoRoot) {
     if (signature[0] !== 0x50 || signature[1] !== 0x4b) {
       throw new Error("portable ZIP compressor produced an invalid ZIP signature");
     }
-    if (await pathInfo(archivePath)) {
-      throw new Error("portable final archive appeared during compression");
-    }
-    await rename(temporaryArchive, archivePath);
+    await publicationHook?.({
+      phase: "beforeLink",
+      archivePath,
+      temporaryArchive,
+    });
+    await link(temporaryArchive, archivePath);
+    published = true;
+    await publicationHook?.({
+      phase: "afterLink",
+      archivePath,
+      temporaryArchive,
+    });
     const canonicalFinal = await requireFile(
       archivePath,
       "portable final archive",
     );
     assertInside(canonicalBundle, canonicalFinal, "portable final archive");
+    await safeRemoveFile(
+      temporaryArchive,
+      canonicalBundle,
+      "portable temporary archive",
+    );
+    return archivePath;
+  } catch (error) {
+    if (published) {
+      throw new Error(
+        `portable archive was published but post-publication cleanup failed: ${
+          error instanceof Error ? error.message : error
+        }`,
+        { cause: error },
+      );
+    }
+    throw error;
   } finally {
     await safeRemoveFile(
       temporaryArchive,
@@ -427,7 +452,13 @@ async function packagePortableFromBuild(repoRoot) {
       "portable stage directory",
     );
   }
-  process.stdout.write(`${archivePath}\n`);
+}
+
+export async function packagePortableFromBuildForTest(repoRoot, publicationHook) {
+  if (!process.env.NODE_TEST_CONTEXT) {
+    throw new Error("portable publication hook is available only under node:test");
+  }
+  return packagePortableFromBuild(repoRoot, publicationHook);
 }
 
 async function main() {
@@ -436,7 +467,8 @@ async function main() {
   }
   const scriptPath = fileURLToPath(import.meta.url);
   const repoRoot = resolve(dirname(scriptPath), "..");
-  await packagePortableFromBuild(repoRoot);
+  const archivePath = await packagePortableFromBuild(repoRoot);
+  process.stdout.write(`${archivePath}\n`);
 }
 
 const invokedPath = process.argv[1] ? resolve(process.argv[1]) : "";

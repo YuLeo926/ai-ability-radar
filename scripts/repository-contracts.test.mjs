@@ -115,7 +115,11 @@ function assertAccepted(result) {
 function runPortableMutation(path, transform) {
   return runNegativeFixture(
     (fixture) => {
-      replace(join(fixture, path), transform);
+      replace(join(fixture, path), (source) => {
+        const changed = transform(source);
+        assert.notEqual(changed, source, `${path} mutation did not change source`);
+        return changed;
+      });
       syncPortableSourceSeals(fixture);
     },
     { fixtureValidator: true },
@@ -290,6 +294,39 @@ test("portable Node import allowlist rejects computed network APIs", () => {
   assertRejected(result, /portable Node import allowlist|network|indirect/i);
 });
 
+test("portable Node syntax rejects process.getBuiltinModule child access", () => {
+  const result = runPortableMutation(
+    "scripts/package-portable.mjs",
+    (source) =>
+      `${source}\nprocess.getBuiltinModule("node:child_process")["spawnSync"]("cmd.exe");\n`,
+  );
+  assertRejected(result, /portable Node.*syntax|import allowlist|indirect/i);
+});
+
+test("portable Node syntax rejects global computed fetch", () => {
+  const result = runPortableMutation(
+    "scripts/package-portable.mjs",
+    (source) => `${source}\nglobal["fetch"]("https://example.invalid");\n`,
+  );
+  assertRejected(result, /portable Node.*syntax|network|indirect/i);
+});
+
+test("portable Node syntax rejects computed sensitive calls", () => {
+  const result = runPortableMutation(
+    "scripts/package-portable.mjs",
+    (source) => `${source}\n({})["spawnSync"]("cmd.exe");\n`,
+  );
+  assertRejected(result, /portable Node.*syntax|child process|indirect/i);
+});
+
+test("portable Node syntax rejects local capability aliases", () => {
+  const result = runPortableMutation(
+    "scripts/package-portable.mjs",
+    (source) => `${source}\nconst execute = spawnSync;\nexecute("cmd.exe");\n`,
+  );
+  assertRejected(result, /portable Node.*syntax|child process|alias/i);
+});
+
 test("portable PowerShell operation allowlist rejects ScriptBlock creation", () => {
   const result = runPortableMutation(
     "scripts/compress-portable.ps1",
@@ -315,14 +352,26 @@ test("portable semantic checks tolerate harmless comments with reviewed seals", 
     (fixture) => {
       replace(
         join(fixture, "scripts", "package-portable.mjs"),
-        (source) => source.replace(
-          'import { createHash } from "node:crypto";',
-          '// Reviewed portable packager.\nimport { createHash } from "node:crypto";',
-        ),
+        (source) => {
+          const changed = source.replace(
+            'import { createHash, randomUUID } from "node:crypto";',
+            '// Reviewed portable packager.\nimport { createHash, randomUUID } from "node:crypto";',
+          );
+          assert.notEqual(changed, source, "Node comment mutation did not apply");
+          return changed;
+        },
       );
       replace(
         join(fixture, "scripts", "compress-portable.ps1"),
-        (source) => `# Reviewed compressor.\n${source}`,
+        (source) => {
+          const changed = `# Reviewed compressor.\n${source}`;
+          assert.notEqual(
+            changed,
+            source,
+            "PowerShell comment mutation did not apply",
+          );
+          return changed;
+        },
       );
       syncPortableSourceSeals(fixture);
     },

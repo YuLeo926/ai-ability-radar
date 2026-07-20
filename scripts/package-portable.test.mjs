@@ -10,6 +10,7 @@ import {
   readdir,
   rename,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -345,6 +346,111 @@ test(
       assert.deepEqual(await readdir(fixture.bundleDir), [
         "ability-radar_0.2.1_windows-x64-portable.zip",
       ]);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "hard-link publication atomically preserves a racing final",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const fixture = await createFixture({ cli: true });
+    try {
+      const portable = await import("./package-portable.mjs");
+      assert.equal(
+        typeof portable.packagePortableFromBuildForTest,
+        "function",
+        "test-only publication seam must exist",
+      );
+      let temporaryArchive;
+      await assert.rejects(
+        portable.packagePortableFromBuildForTest(
+          fixture.repoRoot,
+          async ({ phase, archivePath, temporaryArchive: temporary }) => {
+            if (phase !== "beforeLink") return;
+            temporaryArchive = temporary;
+            await writeFile(archivePath, "racing-final");
+          },
+        ),
+        (error) => error?.code === "EEXIST" || error?.cause?.code === "EEXIST",
+      );
+      const archivePath = join(
+        fixture.bundleDir,
+        "ability-radar_0.2.1_windows-x64-portable.zip",
+      );
+      assert.equal(await readFile(archivePath, "utf8"), "racing-final");
+      await assert.rejects(lstat(temporaryArchive), { code: "ENOENT" });
+      await assert.rejects(lstat(join(fixture.bundleDir, ".stage")), {
+        code: "ENOENT",
+      });
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "successful hard-link publication preserves identity and removes temp",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const fixture = await createFixture({ cli: true });
+    try {
+      const portable = await import("./package-portable.mjs");
+      assert.equal(typeof portable.packagePortableFromBuildForTest, "function");
+      let temporaryArchive;
+      let temporaryIdentity;
+      const archivePath = await portable.packagePortableFromBuildForTest(
+        fixture.repoRoot,
+        async ({ phase, temporaryArchive: temporary }) => {
+          if (phase !== "beforeLink") return;
+          temporaryArchive = temporary;
+          temporaryIdentity = await stat(temporary);
+        },
+      );
+      const finalIdentity = await stat(archivePath);
+      assert.equal(finalIdentity.dev, temporaryIdentity.dev);
+      assert.equal(finalIdentity.ino, temporaryIdentity.ino);
+      await assert.rejects(lstat(temporaryArchive), { code: "ENOENT" });
+      await assert.rejects(lstat(join(fixture.bundleDir, ".stage")), {
+        code: "ENOENT",
+      });
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "post-link failure reports publication and never rolls back final",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const fixture = await createFixture({ cli: true });
+    try {
+      const portable = await import("./package-portable.mjs");
+      assert.equal(typeof portable.packagePortableFromBuildForTest, "function");
+      let temporaryArchive;
+      await assert.rejects(
+        portable.packagePortableFromBuildForTest(
+          fixture.repoRoot,
+          async ({ phase, temporaryArchive: temporary }) => {
+            temporaryArchive = temporary;
+            if (phase === "afterLink") throw new Error("simulated cleanup failure");
+          },
+        ),
+        /published.*cleanup/i,
+      );
+      const archivePath = join(
+        fixture.bundleDir,
+        "ability-radar_0.2.1_windows-x64-portable.zip",
+      );
+      const signature = (await readFile(archivePath)).subarray(0, 2);
+      assert.deepEqual([...signature], [0x50, 0x4b]);
+      await assert.rejects(lstat(temporaryArchive), { code: "ENOENT" });
+      await assert.rejects(lstat(join(fixture.bundleDir, ".stage")), {
+        code: "ENOENT",
+      });
     } finally {
       await rm(fixture.root, { recursive: true, force: true });
     }
