@@ -1,4 +1,5 @@
 mod app_state;
+mod client_selection;
 mod commands;
 mod data_management;
 mod dto;
