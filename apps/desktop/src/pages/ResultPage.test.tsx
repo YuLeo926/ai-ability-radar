@@ -1029,7 +1029,7 @@ describe("ResultPage objective semantics", () => {
     const dialog = screen.getByRole("dialog", { name: "导出前检查" });
     expect(dialog).toHaveAttribute("aria-modal", "true");
     expect(dialog).toContainElement(document.activeElement as HTMLElement);
-    expect(within(dialog).getByText("报告格式版本 1")).toBeInTheDocument();
+    expect(within(dialog).getByText("报告格式版本 2")).toBeInTheDocument();
     expect(
       within(dialog).getByText(/匿名报告编号和生成时间将在确认并选择位置后创建/),
     ).toBeInTheDocument();

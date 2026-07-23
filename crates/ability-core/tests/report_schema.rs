@@ -7,13 +7,20 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 fn fixture_report() -> Value {
+    fixture_report_with_provenance(ModelSource::LegacyUnknown, ModelVerification::LegacyUnknown)
+}
+
+fn fixture_report_with_provenance(
+    model_source: ModelSource,
+    model_verification: ModelVerification,
+) -> Value {
     let mut run = RunRecord::new(
         TargetSelection {
             kind: TargetKind::ChatGptClient,
             reported_model: "GPT-X".into(),
             reasoning_effort: None,
-            model_source: ModelSource::LegacyUnknown,
-            model_verification: ModelVerification::LegacyUnknown,
+            model_source,
+            model_verification,
         },
         RunMode::Quick,
         "client-quick".into(),
@@ -161,6 +168,69 @@ fn schema_accepts_only_the_provenance_matrix() {
 }
 
 #[test]
+fn every_rust_provenance_pair_uses_exact_wire_values_and_matches_the_schema() {
+    let schema = schema();
+    let validator = jsonschema::draft202012::options()
+        .should_validate_formats(true)
+        .build(&schema)
+        .unwrap();
+    let valid_pairs = [
+        (
+            ModelSource::Manual,
+            ModelVerification::UserConfirmed,
+            "manual",
+            "user_confirmed",
+        ),
+        (
+            ModelSource::WindowsAccessibility,
+            ModelVerification::UserConfirmed,
+            "windows_accessibility",
+            "user_confirmed",
+        ),
+        (
+            ModelSource::CliRequested,
+            ModelVerification::UserConfirmed,
+            "cli_requested",
+            "user_confirmed",
+        ),
+        (
+            ModelSource::CliReported,
+            ModelVerification::ProviderReported,
+            "cli_reported",
+            "provider_reported",
+        ),
+        (
+            ModelSource::DefaultRoute,
+            ModelVerification::Unverified,
+            "default_route",
+            "unverified",
+        ),
+        (
+            ModelSource::LegacyUnknown,
+            ModelVerification::LegacyUnknown,
+            "legacy_unknown",
+            "legacy_unknown",
+        ),
+    ];
+
+    for (source, verification, source_wire, verification_wire) in valid_pairs {
+        let report = fixture_report_with_provenance(source, verification);
+        assert_eq!(
+            report["target"]["modelSource"], source_wire,
+            "Rust source wire value mismatch for {source:?}/{verification:?}"
+        );
+        assert_eq!(
+            report["target"]["modelVerification"], verification_wire,
+            "Rust verification wire value mismatch for {source:?}/{verification:?}"
+        );
+        assert!(
+            validator.is_valid(&report),
+            "committed schema rejected {source_wire}/{verification_wire}"
+        );
+    }
+}
+
+#[test]
 fn schema_rejects_unknown_sensitive_fields_and_invalid_formats() {
     let schema = schema();
     let validator = jsonschema::draft202012::options()
@@ -175,6 +245,23 @@ fn schema_rejects_unknown_sensitive_fields_and_invalid_formats() {
     let mut with_local_identity = fixture_report();
     with_local_identity["environment"]["osVersion"] = json!("11 Pro 22631");
     assert!(!validator.is_valid(&with_local_identity));
+
+    let mut with_unknown_target_field = fixture_report();
+    with_unknown_target_field["target"]["providerModel"] = json!("private provider detail");
+    assert!(!validator.is_valid(&with_unknown_target_field));
+
+    let mut with_unknown_source = fixture_report();
+    with_unknown_source["target"]["modelSource"] = json!("future_source");
+    assert!(!validator.is_valid(&with_unknown_source));
+
+    let mut with_unknown_verification = fixture_report();
+    with_unknown_verification["target"]["modelVerification"] = json!("future_verification");
+    assert!(!validator.is_valid(&with_unknown_verification));
+
+    let mut with_illegal_pair = fixture_report();
+    with_illegal_pair["target"]["modelSource"] = json!("manual");
+    with_illegal_pair["target"]["modelVerification"] = json!("provider_reported");
+    assert!(!validator.is_valid(&with_illegal_pair));
 
     let mut invalid_identity = fixture_report();
     invalid_identity["reportId"] = json!("not-a-uuid");

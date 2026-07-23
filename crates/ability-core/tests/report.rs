@@ -109,7 +109,7 @@ fn public_report_v2_includes_persisted_model_provenance_and_html_labels() {
 }
 
 #[test]
-fn report_builder_and_validator_accept_only_the_provenance_matrix() {
+fn report_builder_and_validator_accept_only_the_exact_provenance_wire_matrix() {
     let sources = [
         ModelSource::Manual,
         ModelSource::WindowsAccessibility,
@@ -125,18 +125,42 @@ fn report_builder_and_validator_accept_only_the_provenance_matrix() {
         ModelVerification::LegacyUnknown,
     ];
     let valid_pairs = [
-        (ModelSource::Manual, ModelVerification::UserConfirmed),
+        (
+            ModelSource::Manual,
+            ModelVerification::UserConfirmed,
+            "manual",
+            "user_confirmed",
+        ),
         (
             ModelSource::WindowsAccessibility,
             ModelVerification::UserConfirmed,
+            "windows_accessibility",
+            "user_confirmed",
         ),
-        (ModelSource::CliRequested, ModelVerification::UserConfirmed),
+        (
+            ModelSource::CliRequested,
+            ModelVerification::UserConfirmed,
+            "cli_requested",
+            "user_confirmed",
+        ),
         (
             ModelSource::CliReported,
             ModelVerification::ProviderReported,
+            "cli_reported",
+            "provider_reported",
         ),
-        (ModelSource::DefaultRoute, ModelVerification::Unverified),
-        (ModelSource::LegacyUnknown, ModelVerification::LegacyUnknown),
+        (
+            ModelSource::DefaultRoute,
+            ModelVerification::Unverified,
+            "default_route",
+            "unverified",
+        ),
+        (
+            ModelSource::LegacyUnknown,
+            ModelVerification::LegacyUnknown,
+            "legacy_unknown",
+            "legacy_unknown",
+        ),
     ];
     let (mut run, tasks) = sample_evidence("GPT-5.6");
 
@@ -145,12 +169,27 @@ fn report_builder_and_validator_accept_only_the_provenance_matrix() {
             run.target.model_source = source;
             run.target.model_verification = verification;
             let built = build_public_report(&run, &tasks);
-            let valid = valid_pairs.contains(&(source, verification));
+            let expected = valid_pairs
+                .iter()
+                .find(|(valid_source, valid_verification, _, _)| {
+                    source == *valid_source && verification == *valid_verification
+                });
             assert_eq!(
                 built.is_ok(),
-                valid,
+                expected.is_some(),
                 "builder matrix mismatch for {source:?}/{verification:?}"
             );
+            if let Some((_, _, source_wire, verification_wire)) = expected {
+                let value = serde_json::to_value(built.as_ref().unwrap()).unwrap();
+                assert_eq!(
+                    value["target"]["modelSource"], *source_wire,
+                    "source wire value mismatch for {source:?}/{verification:?}"
+                );
+                assert_eq!(
+                    value["target"]["modelVerification"], *verification_wire,
+                    "verification wire value mismatch for {source:?}/{verification:?}"
+                );
+            }
 
             let mut value = serde_json::to_value(
                 build_public_report(
@@ -170,7 +209,7 @@ fn report_builder_and_validator_accept_only_the_provenance_matrix() {
             let report: PublicReport = serde_json::from_value(value).unwrap();
             assert_eq!(
                 validate_public_report(&report).is_ok(),
-                valid,
+                expected.is_some(),
                 "validator matrix mismatch for {source:?}/{verification:?}"
             );
         }

@@ -747,6 +747,57 @@ describe("HistoryPage local data controls", () => {
 });
 
 describe("HistoryPage comparable series", () => {
+  test("keeps otherwise identical records with different provenance in separate series", async () => {
+    const commonTarget = makeRun().target;
+    renderHistory(
+      makeBackend(async () => [
+        makeRun({
+          id: "manual-provenance",
+          target: {
+            ...commonTarget,
+            modelSource: "manual",
+            modelVerification: "user_confirmed",
+          },
+          startedAt: "2026-07-17T09:00:00Z",
+          finishedAt: "2026-07-17T09:10:00Z",
+        }),
+        makeRun({
+          id: "windows-provenance",
+          target: {
+            ...commonTarget,
+            modelSource: "windows_accessibility",
+            modelVerification: "user_confirmed",
+          },
+          startedAt: "2026-07-18T09:00:00Z",
+          finishedAt: "2026-07-18T09:10:00Z",
+        }),
+      ]),
+    );
+
+    const groups = await screen.findAllByRole("region", {
+      name: /历史系列/,
+    });
+    const manualGroup = groups.find((group) =>
+      within(group).queryByText("模型来源：用户填写 · 用户已确认"),
+    );
+    const windowsGroup = groups.find((group) =>
+      within(group).queryByText(
+        "模型来源：Windows 客户端界面 · 用户已确认",
+      ),
+    );
+
+    expect(groups).toHaveLength(2);
+    expect(manualGroup).toBeDefined();
+    expect(windowsGroup).toBeDefined();
+    expect(manualGroup).not.toBe(windowsGroup);
+    expect(
+      within(manualGroup as HTMLElement).getByText("1 次记录"),
+    ).toBeInTheDocument();
+    expect(
+      within(windowsGroup as HTMLElement).getByText("1 次记录"),
+    ).toBeInTheDocument();
+  });
+
   test("keeps incompatible client, CLI, default, and resumed records visibly separate", async () => {
     const records = [
       makeRun({

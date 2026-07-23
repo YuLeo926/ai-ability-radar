@@ -37,6 +37,8 @@ export function comparableSeriesKey(run: RunRecord): string {
     run.target.kind,
     run.target.reportedModel,
     run.target.reasoningEffort ?? null,
+    run.target.modelSource,
+    run.target.modelVerification,
     run.mode,
     run.suiteId,
     run.suiteVersion,

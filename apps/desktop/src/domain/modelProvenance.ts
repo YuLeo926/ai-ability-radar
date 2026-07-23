@@ -6,6 +6,10 @@ import type {
 
 export type { ModelSource, ModelVerification };
 
+// Frontend mirror of the committed public-report contract. Rust/schema remain
+// authoritative; ResultPage tests pin this reviewed user-facing version.
+export const PUBLIC_REPORT_SCHEMA_VERSION = 2;
+
 const sourceLabels: Record<ModelSource, string> = {
   manual: "用户填写",
   windows_accessibility: "Windows 客户端界面",

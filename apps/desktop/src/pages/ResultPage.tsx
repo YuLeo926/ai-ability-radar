@@ -16,7 +16,10 @@ import type {
   TaskResult,
 } from "../api/backend";
 import { CategoryBars } from "../components/CategoryBars";
-import { formatModelProvenance } from "../domain/modelProvenance";
+import {
+  formatModelProvenance,
+  PUBLIC_REPORT_SCHEMA_VERSION,
+} from "../domain/modelProvenance";
 import { formatReasoningEffort } from "../domain/reasoningEffort";
 import { formatReportedModel } from "../domain/reportedModel";
 import "./ResultsHistory.css";
@@ -362,7 +365,9 @@ function ReportExportControls({ detail }: { detail: RunDetail }) {
                   <dl>
                     <div>
                       <dt>格式</dt>
-                      <dd>报告格式版本 1</dd>
+                      <dd>
+                        报告格式版本 {PUBLIC_REPORT_SCHEMA_VERSION}
+                      </dd>
                     </div>
                     <div>
                       <dt>新身份</dt>
