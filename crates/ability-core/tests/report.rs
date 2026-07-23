@@ -1,7 +1,8 @@
 use ability_core::{
-    Category, EnvironmentFingerprint, FailureKind, ModelSource, ModelVerification, ReportError,
-    RunMode, RunRecord, RunStatus, ScoreSummary, TargetKind, TargetSelection, TaskOutcome,
-    TaskResult, build_public_report, render_public_report_html, validate_public_report,
+    Category, EnvironmentFingerprint, FailureKind, ModelSource, ModelVerification, PublicReport,
+    ReportError, RunMode, RunRecord, RunStatus, ScoreSummary, TargetKind, TargetSelection,
+    TaskOutcome, TaskResult, build_public_report, render_public_report_html,
+    validate_public_report,
 };
 use std::collections::BTreeMap;
 
@@ -88,6 +89,92 @@ fn public_report_is_a_structural_allowlist_not_a_redacted_domain_object() {
     assert!(!json.contains("\"detail\""));
     assert!(json.contains("\"osFamily\":\"Windows\""));
     assert!(json.contains("\"interpretationStatus\":\"not_evaluated\""));
+}
+
+#[test]
+fn public_report_v2_includes_persisted_model_provenance_and_html_labels() {
+    let (mut run, tasks) = sample_evidence("GPT-5.6");
+    run.target.kind = TargetKind::ChatGptClient;
+    run.target.model_source = ModelSource::WindowsAccessibility;
+    run.target.model_verification = ModelVerification::UserConfirmed;
+
+    let report = build_public_report(&run, &tasks).unwrap();
+    let json = serde_json::to_value(&report).unwrap();
+    let html = render_public_report_html(&report).unwrap();
+
+    assert_eq!(json["schemaVersion"], 2);
+    assert_eq!(json["target"]["modelSource"], "windows_accessibility");
+    assert_eq!(json["target"]["modelVerification"], "user_confirmed");
+    assert!(html.contains("模型来源：Windows 客户端界面 · 用户已确认"));
+}
+
+#[test]
+fn report_builder_and_validator_accept_only_the_provenance_matrix() {
+    let sources = [
+        ModelSource::Manual,
+        ModelSource::WindowsAccessibility,
+        ModelSource::CliRequested,
+        ModelSource::CliReported,
+        ModelSource::DefaultRoute,
+        ModelSource::LegacyUnknown,
+    ];
+    let verifications = [
+        ModelVerification::UserConfirmed,
+        ModelVerification::ProviderReported,
+        ModelVerification::Unverified,
+        ModelVerification::LegacyUnknown,
+    ];
+    let valid_pairs = [
+        (ModelSource::Manual, ModelVerification::UserConfirmed),
+        (
+            ModelSource::WindowsAccessibility,
+            ModelVerification::UserConfirmed,
+        ),
+        (ModelSource::CliRequested, ModelVerification::UserConfirmed),
+        (
+            ModelSource::CliReported,
+            ModelVerification::ProviderReported,
+        ),
+        (ModelSource::DefaultRoute, ModelVerification::Unverified),
+        (ModelSource::LegacyUnknown, ModelVerification::LegacyUnknown),
+    ];
+    let (mut run, tasks) = sample_evidence("GPT-5.6");
+
+    for source in sources {
+        for verification in verifications {
+            run.target.model_source = source;
+            run.target.model_verification = verification;
+            let built = build_public_report(&run, &tasks);
+            let valid = valid_pairs.contains(&(source, verification));
+            assert_eq!(
+                built.is_ok(),
+                valid,
+                "builder matrix mismatch for {source:?}/{verification:?}"
+            );
+
+            let mut value = serde_json::to_value(
+                build_public_report(
+                    &{
+                        let mut valid_run = run.clone();
+                        valid_run.target.model_source = ModelSource::LegacyUnknown;
+                        valid_run.target.model_verification = ModelVerification::LegacyUnknown;
+                        valid_run
+                    },
+                    &tasks,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            value["target"]["modelSource"] = serde_json::to_value(source).unwrap();
+            value["target"]["modelVerification"] = serde_json::to_value(verification).unwrap();
+            let report: PublicReport = serde_json::from_value(value).unwrap();
+            assert_eq!(
+                validate_public_report(&report).is_ok(),
+                valid,
+                "validator matrix mismatch for {source:?}/{verification:?}"
+            );
+        }
+    }
 }
 
 #[test]

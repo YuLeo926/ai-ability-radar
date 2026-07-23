@@ -18,6 +18,7 @@ import {
   formatReasoningEffort,
   normalizeReasoningEffortForTarget,
 } from "../domain/reasoningEffort";
+import { formatModelProvenance } from "../domain/modelProvenance";
 import { formatReportedModel } from "../domain/reportedModel";
 import type {
   Bootstrap,
@@ -493,6 +494,16 @@ function CliWizard({
     ? availabilityBlocker(label, availability)
     : null;
   const modelError = modelValidationError(model);
+  const reportedModel = model.trim() || "default";
+  const defaultRoute = reportedModel === "default";
+  const target = {
+    kind,
+    reportedModel,
+    reasoningEffort:
+      normalizeReasoningEffortForTarget(kind, reasoningEffort) || null,
+    modelSource: defaultRoute ? "default_route" : "cli_requested",
+    modelVerification: defaultRoute ? "unverified" : "user_confirmed",
+  } satisfies TargetSelection;
   const startAllowed = Boolean(
     bootstrap &&
       availability &&
@@ -535,19 +546,7 @@ function CliWizard({
               },
             })
           : backend.startCliRun({
-              target: {
-                kind,
-                reportedModel: model.trim() || "default",
-                reasoningEffort:
-                  normalizeReasoningEffortForTarget(kind, reasoningEffort) ||
-                  null,
-                modelSource: model.trim()
-                  ? "cli_requested"
-                  : "default_route",
-                modelVerification: model.trim()
-                  ? "user_confirmed"
-                  : "unverified",
-              },
+              target,
               mode: "quick",
             }),
       );
@@ -815,6 +814,12 @@ function CliWizard({
                     )}
                   </dd>
                 </div>
+                <div>
+                  <dt>原模型来源与核验</dt>
+                  <dd>
+                    {formatModelProvenance(resumePreview.run.target)}
+                  </dd>
+                </div>
               </dl>
             </section>
           ) : resumeRunId ? (
@@ -879,6 +884,7 @@ function CliWizard({
                   onValidationChange={setReasoningError}
                   value={reasoningEffort}
                 />
+                <p className="hint">{formatModelProvenance(target)}</p>
               </>
             )}
 

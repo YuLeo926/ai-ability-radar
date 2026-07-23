@@ -16,6 +16,7 @@ import type {
   TaskResult,
 } from "../api/backend";
 import { CategoryBars } from "../components/CategoryBars";
+import { formatModelProvenance } from "../domain/modelProvenance";
 import { formatReasoningEffort } from "../domain/reasoningEffort";
 import { formatReportedModel } from "../domain/reportedModel";
 import "./ResultsHistory.css";
@@ -62,6 +63,8 @@ const publicMethodology =
 const publicFieldLabels: Record<string, string> = {
   reportedModel: "用户填写模型",
   reasoningEffort: "推理档位",
+  modelSource: "模型来源",
+  modelVerification: "模型核验",
   osFamily: "操作系统系列",
   appVersion: "应用版本",
   cliVersion: "CLI 版本",
@@ -392,6 +395,10 @@ function ReportExportControls({ detail }: { detail: RunDetail }) {
                           run.target.reasoningEffort?.trim(),
                         )}
                       </dd>
+                    </div>
+                    <div>
+                      <dt>模型来源与核验</dt>
+                      <dd>{formatModelProvenance(run.target)}</dd>
                     </div>
                   </dl>
                 </section>
@@ -876,6 +883,10 @@ function ResultReady({
                 run.target.reasoningEffort,
               )}
             </dd>
+          </div>
+          <div>
+            <dt>模型来源与核验</dt>
+            <dd>{formatModelProvenance(run.target)}</dd>
           </div>
           <div>
             <dt>题包</dt>

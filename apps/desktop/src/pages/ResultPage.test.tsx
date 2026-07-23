@@ -367,6 +367,27 @@ describe("ResultPage objective semantics", () => {
     expect(document.body.textContent).not.toContain(unsafeModel);
   });
 
+  test("result displays the persisted model provenance", async () => {
+    renderResult(
+      makeBackend(async () =>
+        makeDetail({
+          target: {
+            ...makeRun().target,
+            kind: "codex_cli",
+            reportedModel: "default",
+            modelSource: "default_route",
+            modelVerification: "unverified",
+          },
+        }),
+      ),
+    );
+
+    await screen.findByRole("heading", { name: "本次客观结果" });
+    expect(
+      screen.getByText("模型来源：CLI 默认路由 · 未核验"),
+    ).toBeInTheDocument();
+  });
+
   test.each(DEFAULT_MODEL_DISPLAY_CASES)(
     "result displays default for %s as target-aware model text",
     async (kind, targetLabel, expectedLabel) => {

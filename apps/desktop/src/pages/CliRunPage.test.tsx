@@ -157,6 +157,7 @@ function fakeBackend(overrides: Partial<Backend> = {}): Backend {
 }
 
 test("CLI setup never renders or calls client model identification", async () => {
+  const user = userEvent.setup();
   const detectClientSelection = vi.fn<Backend["detectClientSelection"]>(
     async () => ({
       status: "detected",
@@ -176,6 +177,16 @@ test("CLI setup never renders or calls client model identification", async () =>
   renderWizard(backend, "/cli/codex_cli");
 
   await screen.findByRole("heading", { name: "Codex CLI 快速体检" });
+  expect(
+    screen.getByText("模型来源：CLI 默认路由 · 未核验"),
+  ).toBeInTheDocument();
+  await user.type(
+    screen.getByLabelText("固定模型（可选）"),
+    "gpt-5.6-codex",
+  );
+  expect(
+    screen.getByText("模型来源：CLI 本次明确指定 · 用户已确认"),
+  ).toBeInTheDocument();
   expect(detectClientSelection).not.toHaveBeenCalled();
   expect(
     screen.queryByRole("checkbox", {
@@ -190,6 +201,8 @@ test("resume route keeps preflight and cost acknowledgement before continuing th
   const preview = makeRun("codex_cli", { status: "interrupted" });
   preview.target.reportedModel = "gpt-5.1-codex";
   preview.target.reasoningEffort = "high";
+  preview.target.modelSource = "cli_requested";
+  preview.target.modelVerification = "user_confirmed";
   const resumed = makeRun("codex_cli", {
     completedTasks: 2,
     environment: { ...makeRun().environment, resumed: true },
@@ -217,6 +230,9 @@ test("resume route keeps preflight and cost acknowledgement before continuing th
   });
   expect(screen.getByText("gpt-5.1-codex")).toBeInTheDocument();
   expect(screen.getByText("高")).toBeInTheDocument();
+  expect(
+    screen.getByText("模型来源：CLI 本次明确指定 · 用户已确认"),
+  ).toBeInTheDocument();
   expect(continueButton).toBeDisabled();
   expect(resumeCliRun).not.toHaveBeenCalled();
 

@@ -260,6 +260,12 @@ fn full_backup_has_exact_unique_safe_entries_manifest_and_readable_snapshot() {
         .query_row("SELECT COUNT(*) FROM runs", [], |row| row.get(0))
         .unwrap();
     assert_eq!(count, 1);
+    let target_json: String = snapshot
+        .query_row("SELECT target_json FROM runs", [], |row| row.get(0))
+        .unwrap();
+    let target: Value = serde_json::from_str(&target_json).unwrap();
+    assert_eq!(target["modelSource"], "legacy_unknown");
+    assert_eq!(target["modelVerification"], "legacy_unknown");
 }
 
 #[test]

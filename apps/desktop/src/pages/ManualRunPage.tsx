@@ -13,6 +13,7 @@ import type {
   ModelSource,
   ModelVerification,
 } from "../domain/modelProvenance";
+import { formatModelProvenance } from "../domain/modelProvenance";
 import {
   formatReasoningEffort,
   normalizeReasoningEffortForTarget,
@@ -379,6 +380,10 @@ function ResumeReviewPage({
               "未显示 / 不适用",
             )}
           </dd>
+        </div>
+        <div>
+          <dt>原模型来源与核验</dt>
+          <dd>{formatModelProvenance(run.target)}</dd>
         </div>
       </dl>
       <button onClick={onResume} type="button">

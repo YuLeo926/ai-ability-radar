@@ -147,9 +147,10 @@ test("resume preview shows the persisted target snapshot before continuing it ex
   const preview = makeRun("chat_gpt_client");
   preview.status = "interrupted";
   preview.target.reasoningEffort = "high";
+  preview.target.modelSource = "windows_accessibility";
   const resumed = makeRun("chat_gpt_client");
   resumed.completedTasks = 1;
-  resumed.target.reasoningEffort = "high";
+  resumed.target = { ...preview.target };
   resumed.environment.resumed = true;
   const resumeManualRun = vi.fn(async () => resumed);
   const nextManualStep = vi.fn(async () => makeStep(2));
@@ -183,6 +184,9 @@ test("resume preview shows the persisted target snapshot before continuing it ex
   ).toBeInTheDocument();
   expect(screen.getByText("GPT-5")).toBeInTheDocument();
   expect(screen.getByText("高")).toBeInTheDocument();
+  expect(
+    screen.getByText("模型来源：Windows 客户端界面 · 用户已确认"),
+  ).toBeInTheDocument();
   expect(resumeManualRun).not.toHaveBeenCalled();
   await user.click(
     screen.getByRole("button", { name: "继续剩余题目" }),

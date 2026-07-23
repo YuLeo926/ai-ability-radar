@@ -86,6 +86,81 @@ fn public_report_matches_the_committed_schema() {
 }
 
 #[test]
+fn public_report_schema_is_v2_and_requires_provenance() {
+    let schema = schema();
+    let target_required = schema["properties"]["target"]["required"]
+        .as_array()
+        .unwrap();
+    let report = fixture_report();
+
+    assert_eq!(schema["title"], "AI Ability Radar public report v2");
+    assert_eq!(schema["properties"]["schemaVersion"]["const"], 2);
+    assert!(target_required.contains(&json!("modelSource")));
+    assert!(target_required.contains(&json!("modelVerification")));
+    assert_eq!(report["schemaVersion"], 2);
+    assert_eq!(report["target"]["modelSource"], "legacy_unknown");
+    assert_eq!(report["target"]["modelVerification"], "legacy_unknown");
+}
+
+#[test]
+fn schema_accepts_only_the_provenance_matrix() {
+    let schema = schema();
+    let validator = jsonschema::draft202012::options()
+        .should_validate_formats(true)
+        .build(&schema)
+        .unwrap();
+    let sources = [
+        "manual",
+        "windows_accessibility",
+        "cli_requested",
+        "cli_reported",
+        "default_route",
+        "legacy_unknown",
+    ];
+    let verifications = [
+        "user_confirmed",
+        "provider_reported",
+        "unverified",
+        "legacy_unknown",
+    ];
+    let valid_pairs = [
+        ("manual", "user_confirmed"),
+        ("windows_accessibility", "user_confirmed"),
+        ("cli_requested", "user_confirmed"),
+        ("cli_reported", "provider_reported"),
+        ("default_route", "unverified"),
+        ("legacy_unknown", "legacy_unknown"),
+    ];
+
+    for source in sources {
+        for verification in verifications {
+            let mut report = fixture_report();
+            report["target"]["modelSource"] = json!(source);
+            report["target"]["modelVerification"] = json!(verification);
+            assert_eq!(
+                validator.is_valid(&report),
+                valid_pairs.contains(&(source, verification)),
+                "schema matrix mismatch for {source}/{verification}"
+            );
+        }
+    }
+
+    let mut missing_source = fixture_report();
+    missing_source["target"]
+        .as_object_mut()
+        .unwrap()
+        .remove("modelSource");
+    assert!(!validator.is_valid(&missing_source));
+
+    let mut missing_verification = fixture_report();
+    missing_verification["target"]
+        .as_object_mut()
+        .unwrap()
+        .remove("modelVerification");
+    assert!(!validator.is_valid(&missing_verification));
+}
+
+#[test]
 fn schema_rejects_unknown_sensitive_fields_and_invalid_formats() {
     let schema = schema();
     let validator = jsonschema::draft202012::options()

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "AI Ability Radar public report v1",
+  "title": "AI Ability Radar public report v2",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -14,7 +14,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": 1
+      "const": 2
     },
     "reportId": {
       "type": "string",
@@ -27,7 +27,13 @@
     "target": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "reportedModel", "reasoningEffort"],
+      "required": [
+        "kind",
+        "reportedModel",
+        "reasoningEffort",
+        "modelSource",
+        "modelVerification"
+      ],
       "properties": {
         "kind": {
           "enum": [
@@ -46,8 +52,64 @@
           "type": ["string", "null"],
           "minLength": 1,
           "maxLength": 64
+        },
+        "modelSource": {
+          "enum": [
+            "manual",
+            "windows_accessibility",
+            "cli_requested",
+            "cli_reported",
+            "default_route",
+            "legacy_unknown"
+          ]
+        },
+        "modelVerification": {
+          "enum": [
+            "user_confirmed",
+            "provider_reported",
+            "unverified",
+            "legacy_unknown"
+          ]
         }
-      }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "modelSource": { "const": "manual" },
+            "modelVerification": { "const": "user_confirmed" }
+          }
+        },
+        {
+          "properties": {
+            "modelSource": { "const": "windows_accessibility" },
+            "modelVerification": { "const": "user_confirmed" }
+          }
+        },
+        {
+          "properties": {
+            "modelSource": { "const": "cli_requested" },
+            "modelVerification": { "const": "user_confirmed" }
+          }
+        },
+        {
+          "properties": {
+            "modelSource": { "const": "cli_reported" },
+            "modelVerification": { "const": "provider_reported" }
+          }
+        },
+        {
+          "properties": {
+            "modelSource": { "const": "default_route" },
+            "modelVerification": { "const": "unverified" }
+          }
+        },
+        {
+          "properties": {
+            "modelSource": { "const": "legacy_unknown" },
+            "modelVerification": { "const": "legacy_unknown" }
+          }
+        }
+      ]
     },
     "environment": {
       "type": "object",

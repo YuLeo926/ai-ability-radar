@@ -1,7 +1,7 @@
 use crate::{
-    Category, FailureKind, RunRecord, RunStatus, ScoreSummary, TargetKind, TaskOutcome, TaskResult,
-    contains_forbidden_display_character, grading::has_coherent_task_evidence,
-    is_valid_reported_model, summarize_scores,
+    Category, FailureKind, ModelSource, ModelVerification, RunRecord, RunStatus, ScoreSummary,
+    TargetKind, TaskOutcome, TaskResult, contains_forbidden_display_character,
+    grading::has_coherent_task_evidence, is_valid_reported_model, summarize_scores,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use regex::Regex;
@@ -12,7 +12,7 @@ use std::sync::OnceLock;
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const PUBLIC_REPORT_SCHEMA_VERSION: u32 = 1;
+pub const PUBLIC_REPORT_SCHEMA_VERSION: u32 = 2;
 pub const PUBLIC_INTERPRETATION_STATUS: &str = "not_evaluated";
 pub const PUBLIC_METHODOLOGY_STATEMENT: &str =
     "v0.2 不生成降智结论；仅展示本题包的客观结果，不是 IQ，也不代表模型退化。";
@@ -35,6 +35,8 @@ pub struct PublicTarget {
     pub kind: TargetKind,
     pub reported_model: String,
     pub reasoning_effort: Option<String>,
+    pub model_source: ModelSource,
+    pub model_verification: ModelVerification,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,6 +114,8 @@ pub fn build_public_report(
             kind: run.target.kind,
             reported_model: required_reported_model(&run.target.reported_model)?,
             reasoning_effort: optional_reasoning_effort(run.target.reasoning_effort.as_deref())?,
+            model_source: run.target.model_source,
+            model_verification: run.target.model_verification,
         },
         environment: PublicEnvironment {
             os_family: required_text(&run.environment.os_family, "osFamily", 120)?,
@@ -166,6 +170,7 @@ pub fn validate_public_report(report: &PublicReport) -> Result<(), ReportError> 
         return Err(ReportError::InvalidData("reportId"));
     }
 
+    validate_model_provenance(report.target.model_source, report.target.model_verification)?;
     validate_reported_model(&report.target.reported_model)?;
     validate_optional_reasoning_effort(report.target.reasoning_effort.as_deref())?;
     validate_text(&report.environment.os_family, "osFamily", 120, true)?;
@@ -325,6 +330,46 @@ fn reported_model_display(kind: TargetKind, value: &str) -> &str {
     }
 }
 
+fn model_source_name(source: ModelSource) -> &'static str {
+    match source {
+        ModelSource::Manual => "manual",
+        ModelSource::WindowsAccessibility => "windows_accessibility",
+        ModelSource::CliRequested => "cli_requested",
+        ModelSource::CliReported => "cli_reported",
+        ModelSource::DefaultRoute => "default_route",
+        ModelSource::LegacyUnknown => "legacy_unknown",
+    }
+}
+
+fn model_verification_name(verification: ModelVerification) -> &'static str {
+    match verification {
+        ModelVerification::UserConfirmed => "user_confirmed",
+        ModelVerification::ProviderReported => "provider_reported",
+        ModelVerification::Unverified => "unverified",
+        ModelVerification::LegacyUnknown => "legacy_unknown",
+    }
+}
+
+fn model_source_display(source: ModelSource) -> &'static str {
+    match source {
+        ModelSource::Manual => "用户填写",
+        ModelSource::WindowsAccessibility => "Windows 客户端界面",
+        ModelSource::CliRequested => "CLI 本次明确指定",
+        ModelSource::CliReported => "CLI 已报告",
+        ModelSource::DefaultRoute => "CLI 默认路由",
+        ModelSource::LegacyUnknown => "历史记录，来源未知",
+    }
+}
+
+fn model_verification_display(verification: ModelVerification) -> &'static str {
+    match verification {
+        ModelVerification::UserConfirmed => "用户已确认",
+        ModelVerification::ProviderReported => "提供方已报告",
+        ModelVerification::Unverified => "未核验",
+        ModelVerification::LegacyUnknown => "可信状态未知",
+    }
+}
+
 pub fn render_public_report_html(report: &PublicReport) -> Result<String, ReportError> {
     validate_public_report(report)?;
     let embedded_json = script_safe_json(&serde_json::to_string(report)?);
@@ -336,6 +381,11 @@ pub fn render_public_report_html(report: &PublicReport) -> Result<String, Report
     let effort = html_escape(reasoning_effort_display(
         report.target.kind,
         report.target.reasoning_effort.as_deref(),
+    ));
+    let provenance = html_escape(&format!(
+        "模型来源：{} · {}",
+        model_source_display(report.target.model_source),
+        model_verification_display(report.target.model_verification)
     ));
     let score = report
         .result
@@ -443,6 +493,7 @@ dl{{display:grid;gap:.45rem}}dl div,.fact-list li{{display:flex;justify-content:
 <p class="eyebrow">AI 能力雷达 · 匿名公开报告 · schema v{schema_version}</p>
 <h1>{target} · {model}</h1>
 <p>推理档位：{effort}</p>
+<p>{provenance}</p>
 <div class="score">{score}</div>
 <p>{passed}/{valid} 题通过 · {valid}/{total} 题有效 · 总耗时 {duration_seconds:.1} 秒</p>
 </header>
@@ -471,6 +522,7 @@ dl{{display:grid;gap:.45rem}}dl div,.fact-list li{{display:flex;justify-content:
         target = target,
         model = model,
         effort = effort,
+        provenance = provenance,
         score = score,
         passed = report.result.passed_tasks,
         valid = report.result.valid_tasks,
@@ -506,6 +558,11 @@ fn scan_source_strings(run: &RunRecord) -> Result<(), ReportError> {
         (
             "reasoningEffort",
             run.target.reasoning_effort.as_deref().unwrap_or(""),
+        ),
+        ("modelSource", model_source_name(run.target.model_source)),
+        (
+            "modelVerification",
+            model_verification_name(run.target.model_verification),
         ),
         ("osFamily", run.environment.os_family.as_str()),
         ("appVersion", run.environment.app_version.as_str()),
@@ -638,6 +695,31 @@ fn validate_optional_reasoning_effort(value: Option<&str>) -> Result<(), ReportE
         return Err(ReportError::InvalidData("reasoningEffort"));
     }
     validate_optional_text(value, "reasoningEffort", 64)
+}
+
+fn validate_model_provenance(
+    source: ModelSource,
+    verification: ModelVerification,
+) -> Result<(), ReportError> {
+    if matches!(
+        (source, verification),
+        (ModelSource::Manual, ModelVerification::UserConfirmed)
+            | (
+                ModelSource::WindowsAccessibility,
+                ModelVerification::UserConfirmed
+            )
+            | (ModelSource::CliRequested, ModelVerification::UserConfirmed)
+            | (
+                ModelSource::CliReported,
+                ModelVerification::ProviderReported
+            )
+            | (ModelSource::DefaultRoute, ModelVerification::Unverified)
+            | (ModelSource::LegacyUnknown, ModelVerification::LegacyUnknown)
+    ) {
+        Ok(())
+    } else {
+        Err(ReportError::InvalidData("modelProvenance"))
+    }
 }
 
 fn validate_reported_model(value: &str) -> Result<(), ReportError> {

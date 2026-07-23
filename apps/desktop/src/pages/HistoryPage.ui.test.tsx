@@ -220,6 +220,15 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+test("history displays the persisted model provenance", async () => {
+  renderHistory(makeBackend(async () => [makeRun()]));
+
+  await screen.findByRole("link", { name: /查看本次结果/ });
+  expect(
+    screen.getByText("模型来源：Windows 客户端界面 · 用户已确认"),
+  ).toBeInTheDocument();
+});
+
 test("renders a stable safe placeholder for an invalid legacy model name", async () => {
   const unsafeModel = "GPT\u200B-X";
   renderHistory(

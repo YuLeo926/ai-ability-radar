@@ -10,6 +10,7 @@ import type {
   TargetKind,
 } from "../api/backend";
 import { formatReasoningEffort } from "../domain/reasoningEffort";
+import { formatModelProvenance } from "../domain/modelProvenance";
 import { formatReportedModel } from "../domain/reportedModel";
 import "./ResultsHistory.css";
 
@@ -596,6 +597,10 @@ function HistorySeries({
                 "未记录",
               )}
             </dd>
+          </div>
+          <div>
+            <dt>模型来源与核验</dt>
+            <dd>{formatModelProvenance(representative.target)}</dd>
           </div>
           <div>
             <dt>模式</dt>
