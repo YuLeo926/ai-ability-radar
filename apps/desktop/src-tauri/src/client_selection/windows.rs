@@ -601,38 +601,61 @@ fn collect_window_controls<C: ScanClock>(
     let (window_bounds, root) = acquire_verified_root(automation, window, gate)?;
     let mut queue = VecDeque::from([(root, 0_usize)]);
     let mut controls = Vec::new();
-    let mut traversal_truncated = false;
+    traverse_queue(
+        &mut queue,
+        budget,
+        || gate.clock.now(),
+        |element| {
+            collect_element_name(element, window_bounds, &mut controls, gate)?;
+            gate.check()
+        },
+        |element| {
+            gate.call(|| {
+                // SAFETY: `walker` and `element` are live COM interfaces on
+                // the initialized worker thread.
+                optional_element(unsafe { walker.GetFirstChildElement(element) })
+            })
+        },
+        |current| {
+            gate.call(|| {
+                // SAFETY: Both interfaces are live and stay on this COM worker.
+                optional_element(unsafe { walker.GetNextSiblingElement(current) })
+            })
+        },
+    )?;
+    Ok(controls)
+}
 
+fn traverse_queue<Node, Now, Visit, FirstChild, NextSibling>(
+    queue: &mut VecDeque<(Node, usize)>,
+    budget: &mut TraversalBudget,
+    mut now: Now,
+    mut visit: Visit,
+    mut first_child: FirstChild,
+    mut next_sibling: NextSibling,
+) -> Result<(), ScanFailure>
+where
+    Node: Clone,
+    Now: FnMut() -> Instant,
+    Visit: FnMut(&Node) -> Result<(), ScanFailure>,
+    FirstChild: FnMut(&Node) -> Result<Option<Node>, ScanFailure>,
+    NextSibling: FnMut(&Node) -> Result<Option<Node>, ScanFailure>,
+{
     while let Some((element, depth)) = queue.pop_front() {
-        budget.try_visit(depth, gate.clock.now())?;
-        collect_element_name(&element, window_bounds, &mut controls, gate)?;
-        gate.check()?;
+        budget.try_visit(depth, now())?;
+        visit(&element)?;
 
-        let mut child = gate.call(|| {
-            // SAFETY: `walker` and `element` are live COM interfaces on the
-            // initialized worker thread.
-            optional_element(unsafe { walker.GetFirstChildElement(&element) })
-        })?;
+        let mut child = first_child(&element)?;
         while let Some(current) = child {
-            gate.check()?;
             let child_depth = depth.saturating_add(1);
             if !budget.can_enqueue(queue.len(), child_depth) {
-                traversal_truncated = true;
-                break;
+                return Err(ScanFailure::TimedOut);
             }
             queue.push_back((current.clone(), child_depth));
-            child = gate.call(|| {
-                // SAFETY: Both interfaces are live and stay on this COM worker.
-                optional_element(unsafe { walker.GetNextSiblingElement(&current) })
-            })?;
+            child = next_sibling(&current)?;
         }
     }
-
-    if traversal_truncated {
-        Err(ScanFailure::TimedOut)
-    } else {
-        Ok(controls)
-    }
+    Ok(())
 }
 
 fn acquire_verified_root<C: ScanClock>(
@@ -640,42 +663,50 @@ fn acquire_verified_root<C: ScanClock>(
     window: &ProviderWindow,
     gate: &DeadlineGate<'_, C>,
 ) -> Result<(RECT, IUIAutomationElement), ScanFailure> {
-    acquire_verified_root_with(
-        gate,
+    acquire_title_bound_root_with(
         window.process_id,
+        &window.identity.title_hint,
         || verify_window_process_binding(gate, window.hwnd, window.process_id, &window.process),
+        || window_title(window.hwnd, gate),
         || {
-            let mut bounds = RECT::default();
-            // SAFETY: The HWND has just been rebound to the retained process
-            // and `bounds` is writable for this call.
-            unsafe { GetWindowRect(window.hwnd, &mut bounds) }
-                .map_err(|_| ScanFailure::Unavailable)?;
-            Ok(bounds)
+            gate.call(|| {
+                let mut bounds = RECT::default();
+                // SAFETY: The HWND has just been rebound to the retained
+                // process and `bounds` is writable for this call.
+                unsafe { GetWindowRect(window.hwnd, &mut bounds) }
+                    .map_err(|_| ScanFailure::Unavailable)?;
+                Ok(bounds)
+            })
         },
         || {
-            // SAFETY: `automation` is live and the HWND is rebound immediately
-            // before this UIA root creation call.
-            unsafe { automation.ElementFromHandle(window.hwnd) }
-                .map_err(|_| ScanFailure::Unavailable)
+            gate.call(|| {
+                // SAFETY: `automation` is live and the HWND is rebound
+                // immediately before this UIA root creation call.
+                unsafe { automation.ElementFromHandle(window.hwnd) }
+                    .map_err(|_| ScanFailure::Unavailable)
+            })
         },
         |root| {
-            // SAFETY: `root` is the live UIA element returned above.
-            unsafe { root.CurrentProcessId() }.map_err(|_| ScanFailure::Unavailable)
+            gate.call(|| {
+                // SAFETY: `root` is the live UIA element returned above.
+                unsafe { root.CurrentProcessId() }.map_err(|_| ScanFailure::Unavailable)
+            })
         },
     )
 }
 
-fn acquire_verified_root_with<C, Root, Verify, ReadRect, CreateRoot, ReadRootProcess>(
-    gate: &DeadlineGate<'_, C>,
+fn acquire_title_bound_root_with<Root, Verify, ReadTitle, ReadRect, CreateRoot, ReadRootProcess>(
     expected_process_id: u32,
+    stored_title: &str,
     mut verify_window_binding: Verify,
+    mut read_title: ReadTitle,
     read_window_rect: ReadRect,
     create_root: CreateRoot,
     read_root_process_id: ReadRootProcess,
 ) -> Result<(RECT, Root), ScanFailure>
 where
-    C: ScanClock,
     Verify: FnMut() -> Result<(), ScanFailure>,
+    ReadTitle: FnMut() -> Result<String, ScanFailure>,
     ReadRect: FnOnce() -> Result<RECT, ScanFailure>,
     CreateRoot: FnOnce() -> Result<Root, ScanFailure>,
     ReadRootProcess: FnOnce(&Root) -> Result<i32, ScanFailure>,
@@ -684,19 +715,30 @@ where
         return Err(ScanFailure::Unavailable);
     }
     verify_window_binding()?;
-    let bounds = gate.call(read_window_rect)?;
+    let title_before_root = read_title()?;
+    verify_window_binding()?;
+    if title_before_root != stored_title {
+        return Err(ScanFailure::Unavailable);
+    }
+
+    let bounds = read_window_rect()?;
     if bounds.right <= bounds.left || bounds.bottom <= bounds.top {
         return Err(ScanFailure::Unavailable);
     }
 
     verify_window_binding()?;
-    let root = gate.call(create_root)?;
-    let root_process_id = gate.call(|| read_root_process_id(&root))?;
+    let root = create_root()?;
+    let root_process_id = read_root_process_id(&root)?;
     let root_process_id = u32::try_from(root_process_id).map_err(|_| ScanFailure::Unavailable)?;
     if root_process_id == 0 || root_process_id != expected_process_id {
         return Err(ScanFailure::Unavailable);
     }
     verify_window_binding()?;
+    let title_after_root = read_title()?;
+    verify_window_binding()?;
+    if title_after_root != stored_title {
+        return Err(ScanFailure::Unavailable);
+    }
     Ok((bounds, root))
 }
 
@@ -1126,14 +1168,6 @@ mod tests {
 
     #[test]
     fn pid_change_between_identity_and_uia_prevents_every_property_call() {
-        let before = Instant::now();
-        let clock = SyntheticClock {
-            before,
-            deadline: before + Duration::from_secs(1),
-            valid_checks: usize::MAX,
-            checks: Cell::new(0),
-        };
-        let gate = DeadlineGate::new(clock.deadline, &clock);
         let binding_checks = Cell::new(0);
         let replacement_window_process_id = Cell::new(99_u32);
         let rect_calls = Cell::new(0);
@@ -1141,15 +1175,16 @@ mod tests {
         let root_pid_calls = Cell::new(0);
         let selector_property_calls = Cell::new(0);
 
-        let result = acquire_verified_root_with(
-            &gate,
+        let result = acquire_title_bound_root_with(
             41,
+            "ChatGPT",
             || {
                 binding_checks.set(binding_checks.get() + 1);
                 (replacement_window_process_id.get() == 41)
                     .then_some(())
                     .ok_or(ScanFailure::Unavailable)
             },
+            || Ok("ChatGPT".to_owned()),
             || {
                 rect_calls.set(rect_calls.get() + 1);
                 Ok(RECT {
@@ -1182,24 +1217,17 @@ mod tests {
 
     #[test]
     fn mismatched_uia_root_owner_prevents_selector_property_calls() {
-        let before = Instant::now();
-        let clock = SyntheticClock {
-            before,
-            deadline: before + Duration::from_secs(1),
-            valid_checks: usize::MAX,
-            checks: Cell::new(0),
-        };
-        let gate = DeadlineGate::new(clock.deadline, &clock);
         let binding_checks = Cell::new(0);
         let selector_property_calls = Cell::new(0);
 
-        let result = acquire_verified_root_with(
-            &gate,
+        let result = acquire_title_bound_root_with(
             41,
+            "ChatGPT",
             || {
                 binding_checks.set(binding_checks.get() + 1);
                 Ok(())
             },
+            || Ok("ChatGPT".to_owned()),
             || {
                 Ok(RECT {
                     left: 0,
@@ -1216,7 +1244,7 @@ mod tests {
         });
 
         assert_eq!(result, Err(ScanFailure::Unavailable));
-        assert_eq!(binding_checks.get(), 2);
+        assert_eq!(binding_checks.get(), 3);
         assert_eq!(selector_property_calls.get(), 0);
     }
 
@@ -1240,6 +1268,205 @@ mod tests {
                 "{binding:?}"
             );
         }
+    }
+
+    #[test]
+    fn title_change_before_root_stops_rect_root_and_all_traversal() {
+        let binding_calls = Cell::new(0);
+        let title_calls = Cell::new(0);
+        let rect_calls = Cell::new(0);
+        let root_calls = Cell::new(0);
+        let root_pid_calls = Cell::new(0);
+        let selector_property_calls = Cell::new(0);
+        let queue_calls = Cell::new(0);
+
+        let result = acquire_title_bound_root_with(
+            41,
+            "ChatGPT",
+            || {
+                binding_calls.set(binding_calls.get() + 1);
+                Ok(())
+            },
+            || {
+                title_calls.set(title_calls.get() + 1);
+                Ok("Codex".to_owned())
+            },
+            || {
+                rect_calls.set(rect_calls.get() + 1);
+                Ok(RECT {
+                    left: 0,
+                    top: 0,
+                    right: 100,
+                    bottom: 100,
+                })
+            },
+            || {
+                root_calls.set(root_calls.get() + 1);
+                Ok(())
+            },
+            |_| {
+                root_pid_calls.set(root_pid_calls.get() + 1);
+                Ok(41)
+            },
+        )
+        .map(|_| {
+            selector_property_calls.set(selector_property_calls.get() + 1);
+            queue_calls.set(queue_calls.get() + 1);
+        });
+
+        assert_eq!(result, Err(ScanFailure::Unavailable));
+        assert_eq!(binding_calls.get(), 2);
+        assert_eq!(title_calls.get(), 1);
+        assert_eq!(rect_calls.get(), 0);
+        assert_eq!(root_calls.get(), 0);
+        assert_eq!(root_pid_calls.get(), 0);
+        assert_eq!(selector_property_calls.get(), 0);
+        assert_eq!(queue_calls.get(), 0);
+    }
+
+    #[test]
+    fn title_change_after_root_stops_every_selector_and_queue_call() {
+        let binding_calls = Cell::new(0);
+        let title_calls = Cell::new(0);
+        let rect_calls = Cell::new(0);
+        let root_calls = Cell::new(0);
+        let root_pid_calls = Cell::new(0);
+        let selector_property_calls = Cell::new(0);
+        let queue_calls = Cell::new(0);
+
+        let result = acquire_title_bound_root_with(
+            41,
+            "ChatGPT",
+            || {
+                binding_calls.set(binding_calls.get() + 1);
+                Ok(())
+            },
+            || {
+                let call = title_calls.get();
+                title_calls.set(call + 1);
+                Ok(if call == 0 { "ChatGPT" } else { "Codex" }.to_owned())
+            },
+            || {
+                rect_calls.set(rect_calls.get() + 1);
+                Ok(RECT {
+                    left: 0,
+                    top: 0,
+                    right: 100,
+                    bottom: 100,
+                })
+            },
+            || {
+                root_calls.set(root_calls.get() + 1);
+                Ok(())
+            },
+            |_| {
+                root_pid_calls.set(root_pid_calls.get() + 1);
+                Ok(41)
+            },
+        )
+        .map(|_| {
+            selector_property_calls.set(selector_property_calls.get() + 1);
+            queue_calls.set(queue_calls.get() + 1);
+        });
+
+        assert_eq!(result, Err(ScanFailure::Unavailable));
+        assert_eq!(binding_calls.get(), 5);
+        assert_eq!(title_calls.get(), 2);
+        assert_eq!(rect_calls.get(), 1);
+        assert_eq!(root_calls.get(), 1);
+        assert_eq!(root_pid_calls.get(), 1);
+        assert_eq!(selector_property_calls.get(), 0);
+        assert_eq!(queue_calls.get(), 0);
+    }
+
+    #[test]
+    fn node_513_stops_before_any_prequeued_node_is_read() {
+        let started = Instant::now();
+        let mut budget = TraversalBudget::new(512, 24, started + Duration::from_secs(1));
+        let mut queue = (0..512).map(|node| (node, 0)).collect::<VecDeque<_>>();
+        let control_calls = (0..513).map(|_| Cell::new(0)).collect::<Vec<_>>();
+        let bounds_calls = (0..513).map(|_| Cell::new(0)).collect::<Vec<_>>();
+        let name_calls = (0..513).map(|_| Cell::new(0)).collect::<Vec<_>>();
+        let child_calls = (0..513).map(|_| Cell::new(0)).collect::<Vec<_>>();
+        let sibling_calls = Cell::new(0);
+
+        let result = traverse_queue(
+            &mut queue,
+            &mut budget,
+            || started,
+            |node| {
+                control_calls[*node].set(control_calls[*node].get() + 1);
+                bounds_calls[*node].set(bounds_calls[*node].get() + 1);
+                name_calls[*node].set(name_calls[*node].get() + 1);
+                Ok(())
+            },
+            |node| {
+                child_calls[*node].set(child_calls[*node].get() + 1);
+                Ok((*node == 0).then_some(512))
+            },
+            |_| {
+                sibling_calls.set(sibling_calls.get() + 1);
+                Ok(None)
+            },
+        );
+
+        assert_eq!(result, Err(ScanFailure::TimedOut));
+        assert_eq!(control_calls[0].get(), 1);
+        assert_eq!(bounds_calls[0].get(), 1);
+        assert_eq!(name_calls[0].get(), 1);
+        assert_eq!(child_calls[0].get(), 1);
+        for node in 1..513 {
+            assert_eq!(control_calls[node].get(), 0, "control node {node}");
+            assert_eq!(bounds_calls[node].get(), 0, "bounds node {node}");
+            assert_eq!(name_calls[node].get(), 0, "name node {node}");
+            assert_eq!(child_calls[node].get(), 0, "child node {node}");
+        }
+        assert_eq!(sibling_calls.get(), 0);
+    }
+
+    #[test]
+    fn depth_25_stops_before_any_prequeued_node_is_read() {
+        let started = Instant::now();
+        let mut budget = TraversalBudget::new(512, 24, started + Duration::from_secs(1));
+        let mut queue = VecDeque::from([(0, 24), (1, 0), (2, 0)]);
+        let control_calls = (0..4).map(|_| Cell::new(0)).collect::<Vec<_>>();
+        let bounds_calls = (0..4).map(|_| Cell::new(0)).collect::<Vec<_>>();
+        let name_calls = (0..4).map(|_| Cell::new(0)).collect::<Vec<_>>();
+        let child_calls = (0..4).map(|_| Cell::new(0)).collect::<Vec<_>>();
+        let sibling_calls = Cell::new(0);
+
+        let result = traverse_queue(
+            &mut queue,
+            &mut budget,
+            || started,
+            |node| {
+                control_calls[*node].set(control_calls[*node].get() + 1);
+                bounds_calls[*node].set(bounds_calls[*node].get() + 1);
+                name_calls[*node].set(name_calls[*node].get() + 1);
+                Ok(())
+            },
+            |node| {
+                child_calls[*node].set(child_calls[*node].get() + 1);
+                Ok((*node == 0).then_some(3))
+            },
+            |_| {
+                sibling_calls.set(sibling_calls.get() + 1);
+                Ok(None)
+            },
+        );
+
+        assert_eq!(result, Err(ScanFailure::TimedOut));
+        assert_eq!(control_calls[0].get(), 1);
+        assert_eq!(bounds_calls[0].get(), 1);
+        assert_eq!(name_calls[0].get(), 1);
+        assert_eq!(child_calls[0].get(), 1);
+        for node in 1..4 {
+            assert_eq!(control_calls[node].get(), 0, "control node {node}");
+            assert_eq!(bounds_calls[node].get(), 0, "bounds node {node}");
+            assert_eq!(name_calls[node].get(), 0, "name node {node}");
+            assert_eq!(child_calls[node].get(), 0, "child node {node}");
+        }
+        assert_eq!(sibling_calls.get(), 0);
     }
 
     #[test]
