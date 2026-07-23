@@ -511,18 +511,30 @@ afterEach(() => {
 test("setup mode exposes the precision hero, panel, model field, and start action", async () => {
   renderWizard(fakeBackend());
 
-  await screen.findByRole("heading", {
+  const heading = await screen.findByRole("heading", {
     name: "ChatGPT 客户端快速体检",
   });
+  const setupRoot = screen.getByRole("main");
   const hero = screen.queryByTestId("manual-setup-hero");
   expect.soft(hero, "manual setup hero contract").not.toBeNull();
   if (hero) {
     expect.soft(hero).toHaveClass("manual-setup-hero");
+    expect.soft(hero).toContainElement(heading);
   }
   const panel = screen.queryByTestId("manual-setup-panel");
   expect.soft(panel, "manual setup panel contract").not.toBeNull();
   if (panel) {
     expect.soft(panel).toHaveClass("manual-setup-panel");
+  }
+  if (hero && panel) {
+    expect.soft(hero.parentElement).toBe(setupRoot);
+    expect.soft(panel.parentElement).toBe(setupRoot);
+    expect.soft(hero).not.toContainElement(panel);
+    expect.soft(panel).not.toContainElement(hero);
+    const childOrder = Array.from(setupRoot.children);
+    expect
+      .soft(childOrder.indexOf(hero))
+      .toBeLessThan(childOrder.indexOf(panel));
   }
   expect(screen.getByLabelText("当前显示的模型")).toHaveAttribute(
     "autocomplete",

@@ -80,6 +80,43 @@ function tokenValue(theme: "light" | "dark", name: string): string {
   return match[1];
 }
 
+function withoutCssUrlPayloads(source: string): string {
+  const urlStart = /\burl\s*\(/gi;
+  let cursor = 0;
+  let output = "";
+  let match: RegExpExecArray | null;
+
+  while ((match = urlStart.exec(source))) {
+    output += `${source.slice(cursor, match.index)}url()`;
+    let index = urlStart.lastIndex;
+    let depth = 1;
+    let quote: '"' | "'" | null = null;
+
+    while (index < source.length && depth > 0) {
+      const character = source[index];
+      if (character === "\\") {
+        index += 2;
+        continue;
+      }
+      if (quote) {
+        if (character === quote) quote = null;
+      } else if (character === '"' || character === "'") {
+        quote = character;
+      } else if (character === "(") {
+        depth += 1;
+      } else if (character === ")") {
+        depth -= 1;
+      }
+      index += 1;
+    }
+
+    cursor = index;
+    urlStart.lastIndex = index;
+  }
+
+  return output + source.slice(cursor);
+}
+
 function bootstrap(): Bootstrap {
   return {
     clientPack: {
@@ -608,13 +645,23 @@ describe("Task 21 accessibility baseline", () => {
   });
 
   test("page styles consume shared color tokens instead of hard-coded colors", () => {
+    const dataUrlFixture =
+      ".fixture { background: url(\"data:image/svg+xml,<svg fill='rgb(1 2 3)' stroke='#fff'/>\"); }";
+    expect(withoutCssUrlPayloads(dataUrlFixture)).toBe(
+      ".fixture { background: url(); }",
+    );
+
     for (const file of [
       "ManualRunPage.css",
       "CliRunPage.css",
       "ResultsHistory.css",
     ]) {
       const source = readFileSync(join(sourceRoot, "pages", file), "utf8");
-      expect(source, file).not.toMatch(/#[0-9a-f]{3,8}\b/i);
+      const declarations = withoutCssUrlPayloads(source);
+      expect(declarations, file).not.toMatch(/#[0-9a-f]{3,8}\b/i);
+      expect(declarations, file).not.toMatch(
+        /\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color)\s*\(/i,
+      );
       expect(source, file).toMatch(/var\(--text-primary\)/);
       expect(source, file).toMatch(/var\(--border\)/);
     }

@@ -166,11 +166,14 @@ test("shows four stable targets in separate client and CLI groups", async () => 
 test("uses the precision-radar Home structure and separates CLI guidance", async () => {
   renderHome(backendFor(async () => readyBootstrap()));
 
-  await screen.findByRole("heading", { name: "选择要体检的 AI" });
+  const heading = await screen.findByRole("heading", {
+    name: "选择要体检的 AI",
+  });
   const hero = screen.queryByTestId("home-hero");
   expect.soft(hero, "Home hero contract").not.toBeNull();
   if (hero) {
     expect.soft(hero).toHaveClass("home-hero");
+    expect.soft(hero).toContainElement(heading);
   }
 
   const cliSection = screen.getByRole("region", { name: "编程 CLI" });
@@ -186,7 +189,26 @@ test("uses the precision-radar Home structure and separates CLI guidance", async
   if (guidance) {
     expect.soft(guidance).toHaveClass("cli-guidance");
     expect.soft(guidance).toHaveTextContent("新增 PATH 目录后请重启应用");
-    expect.soft(guidance.closest(".section-heading-actions")).toBeNull();
+    expect
+      .soft(guidance.closest(".section-heading-actions, .section-action"))
+      .toBeNull();
+    expect.soft(guidance.parentElement).toBe(cliSection);
+
+    const sectionHeader =
+      cliSection.querySelector<HTMLElement>(":scope > .section-heading");
+    const targetGrid =
+      cliSection.querySelector<HTMLElement>(":scope > .target-grid");
+    expect.soft(sectionHeader, "CLI section header").not.toBeNull();
+    expect.soft(targetGrid, "CLI target grid").not.toBeNull();
+    if (sectionHeader && targetGrid) {
+      const childOrder = Array.from(cliSection.children);
+      expect
+        .soft(childOrder.indexOf(sectionHeader))
+        .toBeLessThan(childOrder.indexOf(guidance));
+      expect
+        .soft(childOrder.indexOf(guidance))
+        .toBeLessThan(childOrder.indexOf(targetGrid));
+    }
   }
 });
 
@@ -238,10 +260,16 @@ test("refreshes CLI state in place and keeps retry failures inline", async () =>
   if (refreshingButton) {
     expect.soft(refreshingButton).toBeDisabled();
   }
-  const refreshStatus = screen.queryByRole("status", {
-    name: "正在重新检测 CLI",
-  });
-  expect.soft(refreshStatus, "inline refresh status").not.toBeNull();
+  const refreshControl =
+    existingCliSection.querySelector<HTMLElement>(".cli-refresh-control");
+  expect.soft(refreshControl, "inline refresh control").not.toBeNull();
+  if (refreshControl) {
+    const refreshStatus = within(refreshControl).queryByRole("status");
+    expect.soft(refreshStatus, "inline refresh status").not.toBeNull();
+    if (refreshStatus) {
+      expect.soft(refreshStatus).toHaveTextContent("正在重新检测 CLI");
+    }
+  }
 
   await act(async () => {
     firstRefresh.resolve(refreshed);

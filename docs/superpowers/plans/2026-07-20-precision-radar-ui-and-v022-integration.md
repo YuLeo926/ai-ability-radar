@@ -101,14 +101,61 @@ test("the precision-radar surface uses no CSS gradients", () => {
 Add:
 
 ```ts
+function withoutCssUrlPayloads(source: string): string {
+  const urlStart = /\burl\s*\(/gi;
+  let cursor = 0;
+  let output = "";
+  let match: RegExpExecArray | null;
+
+  while ((match = urlStart.exec(source))) {
+    output += `${source.slice(cursor, match.index)}url()`;
+    let index = urlStart.lastIndex;
+    let depth = 1;
+    let quote: '"' | "'" | null = null;
+
+    while (index < source.length && depth > 0) {
+      const character = source[index];
+      if (character === "\\") {
+        index += 2;
+        continue;
+      }
+      if (quote) {
+        if (character === quote) quote = null;
+      } else if (character === '"' || character === "'") {
+        quote = character;
+      } else if (character === "(") {
+        depth += 1;
+      } else if (character === ")") {
+        depth -= 1;
+      }
+      index += 1;
+    }
+
+    cursor = index;
+    urlStart.lastIndex = index;
+  }
+
+  return output + source.slice(cursor);
+}
+
 test("page styles consume shared color tokens instead of hard-coded colors", () => {
+  const dataUrlFixture =
+    ".fixture { background: url(\"data:image/svg+xml,<svg fill='rgb(1 2 3)' stroke='#fff'/>\"); }";
+  expect(withoutCssUrlPayloads(dataUrlFixture)).toBe(
+    ".fixture { background: url(); }",
+  );
+
   for (const file of [
     "ManualRunPage.css",
     "CliRunPage.css",
     "ResultsHistory.css",
   ]) {
     const source = readFileSync(join(sourceRoot, "pages", file), "utf8");
-    expect(source, file).not.toMatch(/#[0-9a-f]{3,8}\b/i);
+    const declarations = withoutCssUrlPayloads(source);
+    expect(declarations, file).not.toMatch(/#[0-9a-f]{3,8}\b/i);
+    expect(declarations, file).not.toMatch(
+      /\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color)\s*\(/i,
+    );
     expect(source, file).toMatch(/var\(--text-primary\)/);
     expect(source, file).toMatch(/var\(--border\)/);
   }
@@ -120,11 +167,10 @@ test("page styles consume shared color tokens instead of hard-coded colors", () 
 After rendering Home, assert:
 
 ```ts
-expect(screen.getByTestId("home-hero")).toHaveClass("home-hero");
-expect(screen.getByTestId("cli-guidance")).toHaveTextContent(
-  "新增 PATH 目录后请重启应用",
-);
-
+const heading = screen.getByRole("heading", { name: "选择要体检的 AI" });
+const hero = screen.getByTestId("home-hero");
+expect(hero).toHaveClass("home-hero");
+expect(hero).toContainElement(heading);
 const cliSection = screen.getByRole("region", { name: "编程 CLI" });
 expect(
   within(cliSection).getByRole("button", { name: "重新检测 CLI" }),
@@ -132,27 +178,55 @@ expect(
 expect(
   within(cliSection).getByText("CLI 快速体检 · v1.0.0"),
 ).toBeInTheDocument();
-```
 
-The guidance must be outside `.section-heading-actions`; assert its nearest
-element has class `cli-guidance`.
+const guidance = screen.getByTestId("cli-guidance");
+expect(guidance).toHaveClass("cli-guidance");
+expect(guidance).toHaveTextContent("新增 PATH 目录后请重启应用");
+expect(
+  guidance.closest(".section-heading-actions, .section-action"),
+).toBeNull();
+expect(guidance.parentElement).toBe(cliSection);
+
+const sectionHeader = cliSection.querySelector(":scope > .section-heading");
+const targetGrid = cliSection.querySelector(":scope > .target-grid");
+const childOrder = Array.from(cliSection.children);
+expect(childOrder.indexOf(sectionHeader!))
+  .toBeLessThan(childOrder.indexOf(guidance));
+expect(childOrder.indexOf(guidance))
+  .toBeLessThan(childOrder.indexOf(targetGrid!));
+```
 
 Add a deferred refresh test: after clicking “重新检测 CLI”, the existing
 hero and target cards remain mounted, the button is disabled with text
-“正在重新检测…”, and an inline `role="status"` is present. Resolve the
-deferred bootstrap and assert the same card DOM region updates without a
-full-page loading replacement. Reject a second deferred bootstrap and assert
-the old cards remain with an inline retryable error.
+“正在重新检测…”, and an inline `role="status"` is present. Locate that status
+by role inside `.cli-refresh-control` without an accessible-name filter, then
+assert its text is `正在重新检测 CLI`; this preserves the approved
+`<span className="sr-only" role="status">…</span>` shape. Resolve the deferred
+bootstrap and assert the same card DOM region updates without a full-page
+loading replacement. Reject a second deferred bootstrap and assert the old
+cards remain with an inline retryable error. Use soft presence assertions so
+both controlled promises are explicitly settled on the RED path.
 
 - [ ] **Step 3: Add Manual setup structure assertions**
 
 In `ManualRunPage.test.tsx`, assert setup mode contains:
 
 ```ts
-expect(screen.getByTestId("manual-setup-hero"))
-  .toHaveClass("manual-setup-hero");
-expect(screen.getByTestId("manual-setup-panel"))
-  .toHaveClass("manual-setup-panel");
+const heading = screen.getByRole("heading", {
+  name: "ChatGPT 客户端快速体检",
+});
+const setupRoot = screen.getByRole("main");
+const hero = screen.getByTestId("manual-setup-hero");
+const panel = screen.getByTestId("manual-setup-panel");
+expect(hero).toHaveClass("manual-setup-hero");
+expect(panel).toHaveClass("manual-setup-panel");
+expect(hero).toContainElement(heading);
+expect(hero.parentElement).toBe(setupRoot);
+expect(panel.parentElement).toBe(setupRoot);
+expect(hero).not.toContainElement(panel);
+expect(panel).not.toContainElement(hero);
+expect(Array.from(setupRoot.children).indexOf(hero))
+  .toBeLessThan(Array.from(setupRoot.children).indexOf(panel));
 expect(screen.getByLabelText("当前显示的模型"))
   .toHaveAttribute("autocomplete", "off");
 expect(screen.getByRole("button", { name: "开始快速体检" }))
@@ -1027,7 +1101,8 @@ In `CliRunPage.css` and `ResultsHistory.css`, replace hard-coded colors using:
 | `#102a25`, `#17312c`, `#29463f` | `var(--text-primary)` |
 | `#35514b`, `#43655e`, `#557069`, `#6a7f79` | `var(--text-muted)` |
 | `#fbfdfc`, `#f8fbfa`, `#f7faf9` | `var(--panel)` |
-| `#fff`, `#ffffff` | `var(--panel-raised)` except white text on danger buttons |
+| `#fff`, `#ffffff` surfaces | `var(--panel-raised)` |
+| danger-button foreground | `var(--on-brand)` |
 | `#edf6f3`, `#eef6f3`, `#e9f3f0`, `#e4f1ed` | `var(--brand-soft)` |
 | `#d1dfdb`, `#c8d9d4`, `#d5e1de`, `#dce7e4` | `var(--border)` |
 | `#8eaaa3`, `#9fc2b9`, `#a9c0ba`, `#aebdb9` | `var(--border-strong)` |
