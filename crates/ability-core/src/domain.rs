@@ -13,6 +13,28 @@ pub enum TargetKind {
     ClaudeCode,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelSource {
+    Manual,
+    WindowsAccessibility,
+    CliRequested,
+    CliReported,
+    DefaultRoute,
+    #[default]
+    LegacyUnknown,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelVerification {
+    UserConfirmed,
+    ProviderReported,
+    Unverified,
+    #[default]
+    LegacyUnknown,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunMode {
@@ -82,6 +104,10 @@ pub struct TargetSelection {
     pub kind: TargetKind,
     pub reported_model: String,
     pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub model_source: ModelSource,
+    #[serde(default)]
+    pub model_verification: ModelVerification,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

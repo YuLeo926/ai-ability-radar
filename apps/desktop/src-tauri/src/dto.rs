@@ -1,6 +1,7 @@
 use ability_adapters::{RunEvent, TargetAvailability};
 use ability_core::{
-    Category, FailureKind, RunMode, RunRecord, TargetKind, TaskOutcome, TaskResult,
+    Category, FailureKind, ModelSource, ModelVerification, RunMode, RunRecord, TargetKind,
+    TaskOutcome, TaskResult,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -29,6 +30,8 @@ pub struct TargetSelectionInput {
     pub kind: TargetKind,
     pub reported_model: String,
     pub reasoning_effort: Option<String>,
+    pub model_source: ModelSource,
+    pub model_verification: ModelVerification,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,6 +75,8 @@ pub struct ResumeTargetSelectionInput {
     pub reported_model: String,
     #[serde(deserialize_with = "deserialize_required_nullable_string")]
     pub reasoning_effort: Option<String>,
+    pub model_source: ModelSource,
+    pub model_verification: ModelVerification,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,7 +206,7 @@ pub type CliRunEventDto = RunEvent;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ability_core::{RunMode, TargetKind};
+    use ability_core::{ModelSource, ModelVerification, RunMode, TargetKind};
     use serde_json::json;
 
     #[test]
@@ -210,7 +215,9 @@ mod tests {
             "target": {
                 "kind": "codex_cli",
                 "reportedModel": "gpt-5.1-codex",
-                "reasoningEffort": "high"
+                "reasoningEffort": "high",
+                "modelSource": "cli_requested",
+                "modelVerification": "user_confirmed"
             },
             "mode": "quick"
         }))
@@ -219,7 +226,26 @@ mod tests {
         assert_eq!(input.target.kind, TargetKind::CodexCli);
         assert_eq!(input.target.reported_model, "gpt-5.1-codex");
         assert_eq!(input.target.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(input.target.model_source, ModelSource::CliRequested);
+        assert_eq!(
+            input.target.model_verification,
+            ModelVerification::UserConfirmed
+        );
         assert_eq!(input.mode, RunMode::Quick);
+    }
+
+    #[test]
+    fn start_run_input_requires_model_provenance() {
+        let missing = serde_json::from_value::<StartRunInput>(json!({
+            "target": {
+                "kind": "codex_cli",
+                "reportedModel": "default",
+                "reasoningEffort": null
+            },
+            "mode": "quick"
+        }));
+
+        assert!(missing.is_err());
     }
 
     #[test]
@@ -228,7 +254,9 @@ mod tests {
             "target": {
                 "kind": "codex_cli",
                 "reportedModel": "default",
-                "reasoningEffort": null
+                "reasoningEffort": null,
+                "modelSource": "default_route",
+                "modelVerification": "unverified"
             },
             "mode": "quick",
             "arguments": ["--dangerously-skip-permissions"]
@@ -240,6 +268,8 @@ mod tests {
                 "kind": "codex_cli",
                 "reportedModel": "default",
                 "reasoningEffort": null,
+                "modelSource": "default_route",
+                "modelVerification": "unverified",
                 "program": "anything"
             },
             "mode": "quick"
@@ -295,7 +325,9 @@ mod tests {
             "expectedTarget": {
                 "kind": "codex_cli",
                 "reportedModel": "gpt-5.1-codex",
-                "reasoningEffort": "high"
+                "reasoningEffort": "high",
+                "modelSource": "cli_requested",
+                "modelVerification": "user_confirmed"
             }
         }))
         .unwrap();
@@ -305,6 +337,14 @@ mod tests {
             valid.expected_target.reasoning_effort.as_deref(),
             Some("high")
         );
+        assert_eq!(
+            valid.expected_target.model_source,
+            ModelSource::CliRequested
+        );
+        assert_eq!(
+            valid.expected_target.model_verification,
+            ModelVerification::UserConfirmed
+        );
 
         for forbidden in [
             json!({
@@ -312,7 +352,9 @@ mod tests {
                 "expectedTarget": {
                     "kind": "codex_cli",
                     "reportedModel": "gpt-5.1-codex",
-                    "reasoningEffort": "high"
+                    "reasoningEffort": "high",
+                    "modelSource": "cli_requested",
+                    "modelVerification": "user_confirmed"
                 },
                 "path": "C:/Users/Alice"
             }),
@@ -322,6 +364,8 @@ mod tests {
                     "kind": "codex_cli",
                     "reportedModel": "gpt-5.1-codex",
                     "reasoningEffort": "high",
+                    "modelSource": "cli_requested",
+                    "modelVerification": "user_confirmed",
                     "program": "cmd.exe"
                 }
             }),
@@ -330,7 +374,9 @@ mod tests {
                 "expectedTarget": {
                     "kind": "codex_cli",
                     "reportedModel": "gpt-5.1-codex",
-                    "reasoningEffort": "high"
+                    "reasoningEffort": "high",
+                    "modelSource": "cli_requested",
+                    "modelVerification": "user_confirmed"
                 },
                 "force": true
             }),
@@ -338,7 +384,9 @@ mod tests {
                 "runId": valid.run_id,
                 "expectedTarget": {
                     "kind": "codex_cli",
-                    "reportedModel": "gpt-5.1-codex"
+                    "reportedModel": "gpt-5.1-codex",
+                    "modelSource": "cli_requested",
+                    "modelVerification": "user_confirmed"
                 }
             }),
         ] {

@@ -61,6 +61,8 @@ function makeRun(overrides: Partial<RunRecord> = {}): RunRecord {
       kind: "chat_gpt_client",
       reportedModel: "GPT-X",
       reasoningEffort: "high",
+      modelSource: "windows_accessibility",
+      modelVerification: "user_confirmed",
     },
     mode: "quick",
     suiteId: "client-quick",
@@ -193,6 +195,12 @@ describe("isSafeRunRecord", () => {
     const record = makeRun();
     expect(isSafeRunRecord(record)).toBe(true);
     expect(isSafeRunRecordList([record])).toBe(true);
+  });
+
+  test("run validation rejects unknown model provenance", () => {
+    const run = makeRun();
+    run.target.modelSource = "answer_inference" as never;
+    expect(isSafeRunRecord(run)).toBe(false);
   });
 
   test("requires nonempty legal category scores and their one-decimal equal-weight mean", () => {
@@ -609,6 +617,8 @@ describe("isSafeRunDetail", () => {
                 kind: "chat_gpt_client",
                 reportedModel: "default",
                 reasoningEffort: undefined,
+                modelSource: "legacy_unknown",
+                modelVerification: "legacy_unknown",
               },
               environment: {
                 ...makeRun().environment,

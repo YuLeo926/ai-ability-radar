@@ -41,6 +41,8 @@ test("new runs are quick-only while persisted records retain the stable mode uni
       kind: "chat_gpt_client",
       reportedModel: "GPT-5",
       reasoningEffort: null,
+      modelSource: "manual",
+      modelVerification: "user_confirmed",
     },
     mode: "quick",
   };

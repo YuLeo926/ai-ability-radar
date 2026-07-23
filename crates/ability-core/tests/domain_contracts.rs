@@ -1,5 +1,6 @@
 use ability_core::{
-    Category, EnvironmentFingerprint, RunMode, RunRecord, RunStatus, TargetKind, TargetSelection,
+    Category, EnvironmentFingerprint, ModelSource, ModelVerification, RunMode, RunRecord,
+    RunStatus, TargetKind, TargetSelection,
 };
 
 #[test]
@@ -15,6 +16,8 @@ fn a_new_run_starts_created_with_zero_progress() {
             kind: TargetKind::CodexCli,
             reported_model: "current CLI selection".into(),
             reasoning_effort: Some("high".into()),
+            model_source: ModelSource::LegacyUnknown,
+            model_verification: ModelVerification::LegacyUnknown,
         },
         RunMode::Quick,
         "cli-quick".into(),

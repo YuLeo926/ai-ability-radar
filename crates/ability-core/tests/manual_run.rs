@@ -1,6 +1,6 @@
 use ability_core::{
-    EnvironmentFingerprint, ManualRunService, PackLoader, RunMode, RunRepository, RunServiceError,
-    RunStatus, TargetKind, TargetSelection,
+    EnvironmentFingerprint, ManualRunService, ModelSource, ModelVerification, PackLoader, RunMode,
+    RunRepository, RunServiceError, RunStatus, TargetKind, TargetSelection,
 };
 use std::fs;
 use std::sync::Arc;
@@ -70,6 +70,8 @@ fn chatgpt_target() -> TargetSelection {
         kind: TargetKind::ChatGptClient,
         reported_model: "user-selected".into(),
         reasoning_effort: None,
+        model_source: ModelSource::Manual,
+        model_verification: ModelVerification::UserConfirmed,
     }
 }
 

@@ -48,6 +48,8 @@ function makeRun(
       kind,
       reportedModel: kind === "claude_client" ? "Claude Sonnet" : "GPT-5",
       reasoningEffort: null,
+      modelSource: "manual",
+      modelVerification: "user_confirmed",
     },
     mode: "quick",
     suiteId: "client-quick-v1",
@@ -318,6 +320,22 @@ test.each([
     }),
   ],
   [
+    "model source",
+    (preview: RunRecord) => ({
+      ...makeRun("chat_gpt_client"),
+      environment: { ...makeRun().environment, resumed: true },
+      target: { ...preview.target, modelSource: "windows_accessibility" },
+    }),
+  ],
+  [
+    "model verification",
+    (preview: RunRecord) => ({
+      ...makeRun("chat_gpt_client"),
+      environment: { ...makeRun().environment, resumed: true },
+      target: { ...preview.target, modelVerification: "unverified" },
+    }),
+  ],
+  [
     "status",
     (preview: RunRecord) => ({
       ...makeRun("chat_gpt_client"),
@@ -506,6 +524,8 @@ test.each([
         kind,
         reportedModel: model,
         reasoningEffort: "high",
+        modelSource: "manual",
+        modelVerification: "user_confirmed",
       },
       mode: "quick",
     });
@@ -535,6 +555,8 @@ test.each([
         kind,
         reportedModel: "default",
         reasoningEffort: null,
+        modelSource: "manual",
+        modelVerification: "user_confirmed",
       },
       mode: "quick",
     });
@@ -558,6 +580,8 @@ test("sends ChatGPT xhigh and preserves a Claude custom effort", async () => {
       kind: "chat_gpt_client",
       reportedModel: "GPT-5",
       reasoningEffort: "xhigh",
+      modelSource: "manual",
+      modelVerification: "user_confirmed",
     },
     mode: "quick",
   });
@@ -577,6 +601,8 @@ test("sends ChatGPT xhigh and preserves a Claude custom effort", async () => {
       kind: "claude_client",
       reportedModel: "Claude Sonnet",
       reasoningEffort: "扩展思考",
+      modelSource: "manual",
+      modelVerification: "user_confirmed",
     },
     mode: "quick",
   });
@@ -1318,6 +1344,8 @@ test("a valid matching start returned after navigation is interrupted exactly", 
       kind: "claude_client",
       reportedModel: "Claude Sonnet",
       reasoningEffort: null,
+      modelSource: "manual",
+      modelVerification: "user_confirmed",
     },
     mode: "quick",
   });

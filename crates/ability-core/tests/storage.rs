@@ -1,6 +1,7 @@
 use ability_core::{
-    Category, EnvironmentFingerprint, RunMode, RunRecord, RunRepository, RunStatus, ScoreSummary,
-    StorageError, TargetKind, TargetSelection, TaskOutcome, TaskResult, summarize_scores,
+    Category, EnvironmentFingerprint, ModelSource, ModelVerification, RunMode, RunRecord,
+    RunRepository, RunStatus, ScoreSummary, StorageError, TargetKind, TargetSelection, TaskOutcome,
+    TaskResult, summarize_scores,
 };
 use chrono::{Duration, Utc};
 use std::collections::BTreeMap;
@@ -13,6 +14,8 @@ fn sample_run() -> RunRecord {
             kind: TargetKind::ChatGptClient,
             reported_model: "user-selected".into(),
             reasoning_effort: None,
+            model_source: ModelSource::LegacyUnknown,
+            model_verification: ModelVerification::LegacyUnknown,
         },
         RunMode::Quick,
         "client-quick".into(),
@@ -33,6 +36,18 @@ fn sample_run() -> RunRecord {
     );
     run.status = RunStatus::Running;
     run
+}
+
+#[test]
+fn legacy_target_json_defaults_provenance_without_rewriting_model() {
+    let target: TargetSelection = serde_json::from_str(
+        r#"{"kind":"chat_gpt_client","reportedModel":"GPT-X","reasoningEffort":"high"}"#,
+    )
+    .unwrap();
+
+    assert_eq!(target.reported_model, "GPT-X");
+    assert_eq!(target.model_source, ModelSource::LegacyUnknown);
+    assert_eq!(target.model_verification, ModelVerification::LegacyUnknown);
 }
 
 fn passing_result(run_id: Uuid, task_id: &str) -> TaskResult {

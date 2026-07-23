@@ -1,7 +1,7 @@
 use ability_core::{
-    Category, EnvironmentFingerprint, FailureKind, ReportError, RunMode, RunRecord, RunStatus,
-    ScoreSummary, TargetKind, TargetSelection, TaskOutcome, TaskResult, build_public_report,
-    render_public_report_html, validate_public_report,
+    Category, EnvironmentFingerprint, FailureKind, ModelSource, ModelVerification, ReportError,
+    RunMode, RunRecord, RunStatus, ScoreSummary, TargetKind, TargetSelection, TaskOutcome,
+    TaskResult, build_public_report, render_public_report_html, validate_public_report,
 };
 use std::collections::BTreeMap;
 
@@ -11,6 +11,8 @@ fn sample_evidence(model: &str) -> (RunRecord, Vec<TaskResult>) {
             kind: TargetKind::CodexCli,
             reported_model: model.into(),
             reasoning_effort: Some("high".into()),
+            model_source: ModelSource::LegacyUnknown,
+            model_verification: ModelVerification::LegacyUnknown,
         },
         RunMode::Quick,
         "cli-quick".into(),

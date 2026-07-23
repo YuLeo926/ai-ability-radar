@@ -9,6 +9,8 @@ function makeRun(overrides: Partial<RunRecord> = {}): RunRecord {
       kind: "codex_cli",
       reportedModel: "default",
       reasoningEffort: "high",
+      modelSource: "default_route",
+      modelVerification: "unverified",
     },
     mode: "quick",
     suiteId: "cli-quick",
@@ -48,6 +50,8 @@ describe("comparableSeriesKey", () => {
         kind: "codex_cli",
         reportedModel: "a\u001fb",
         reasoningEffort: "c",
+        modelSource: "legacy_unknown",
+        modelVerification: "legacy_unknown",
       },
     });
     const right = makeRun({
@@ -55,6 +59,8 @@ describe("comparableSeriesKey", () => {
         kind: "codex_cli",
         reportedModel: "a",
         reasoningEffort: "b\u001fc",
+        modelSource: "legacy_unknown",
+        modelVerification: "legacy_unknown",
       },
     });
 
@@ -137,6 +143,8 @@ describe("comparableSeriesKey", () => {
       target: {
         kind: "codex_cli",
         reportedModel: "default",
+        modelSource: "default_route",
+        modelVerification: "unverified",
       },
       environment: {
         ...makeRun().environment,

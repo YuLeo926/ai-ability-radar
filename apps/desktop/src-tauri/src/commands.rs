@@ -17,6 +17,8 @@ use ability_core::{
     EnvironmentFingerprint, LoadedPack, ManualRunService, ManualStep, RunMode, RunRecord,
     RunRepository, RunStatus, TargetKind, TargetSelection,
 };
+#[cfg(test)]
+use ability_core::{ModelSource, ModelVerification};
 use std::collections::BTreeMap;
 use std::fs;
 #[cfg(windows)]
@@ -158,6 +160,8 @@ fn validate_start(input: StartRunInput, family: StartFamily) -> Result<Validated
             kind: input.target.kind,
             reported_model,
             reasoning_effort,
+            model_source: input.target.model_source,
+            model_verification: input.target.model_verification,
         },
         mode: input.mode,
     })
@@ -200,6 +204,8 @@ fn validate_resume_target(
         kind: input.kind,
         reported_model: input.reported_model,
         reasoning_effort,
+        model_source: input.model_source,
+        model_verification: input.model_verification,
     })
 }
 
@@ -2450,6 +2456,8 @@ mod tests {
                 kind: TargetKind::ClaudeClient,
                 reported_model: "Claude".into(),
                 reasoning_effort: Some("\u{6269}\u{5c55}\u{601d}\u{8003}".into()),
+                model_source: ModelSource::LegacyUnknown,
+                model_verification: ModelVerification::LegacyUnknown,
             },
             StartFamily::Manual,
         )
@@ -2465,6 +2473,8 @@ mod tests {
                     kind: TargetKind::CodexCli,
                     reported_model: "default".into(),
                     reasoning_effort: Some(value.into()),
+                    model_source: ModelSource::LegacyUnknown,
+                    model_verification: ModelVerification::LegacyUnknown,
                 },
                 StartFamily::Cli,
             )
@@ -2496,6 +2506,8 @@ mod tests {
                         kind: TargetKind::ChatGptClient,
                         reported_model: model.into(),
                         reasoning_effort: None,
+                        model_source: ModelSource::LegacyUnknown,
+                        model_verification: ModelVerification::LegacyUnknown,
                     },
                     StartFamily::Manual,
                 )
@@ -2519,6 +2531,8 @@ mod tests {
                         kind: TargetKind::ChatGptClient,
                         reported_model: model.clone(),
                         reasoning_effort: None,
+                        model_source: ModelSource::LegacyUnknown,
+                        model_verification: ModelVerification::LegacyUnknown,
                     },
                     StartFamily::Manual,
                 )
@@ -2538,6 +2552,8 @@ mod tests {
                 kind: TargetKind::ChatGptClient,
                 reported_model: too_long,
                 reasoning_effort: None,
+                model_source: ModelSource::LegacyUnknown,
+                model_verification: ModelVerification::LegacyUnknown,
             },
             StartFamily::Manual,
         )
@@ -3145,6 +3161,8 @@ mod tests {
                     kind: TargetKind::ChatGptClient,
                     reported_model: "GPT-5".into(),
                     reasoning_effort: None,
+                    model_source: ModelSource::Manual,
+                    model_verification: ModelVerification::UserConfirmed,
                 },
                 RunMode::Quick,
                 environment(&pack, None, None),
@@ -3227,6 +3245,8 @@ mod tests {
                     kind: TargetKind::ChatGptClient,
                     reported_model: "GPT-5".into(),
                     reasoning_effort: None,
+                    model_source: ModelSource::Manual,
+                    model_verification: ModelVerification::UserConfirmed,
                 },
                 RunMode::Quick,
                 environment(&pack, None, None),
@@ -3315,6 +3335,8 @@ mod tests {
                     kind: TargetKind::ChatGptClient,
                     reported_model: "GPT-5".into(),
                     reasoning_effort: None,
+                    model_source: ModelSource::Manual,
+                    model_verification: ModelVerification::UserConfirmed,
                 },
                 RunMode::Quick,
                 environment(&pack, None, None),
@@ -3991,6 +4013,8 @@ mod tests {
                 kind,
                 reported_model: model.into(),
                 reasoning_effort: effort.map(str::to_owned),
+                model_source: ModelSource::LegacyUnknown,
+                model_verification: ModelVerification::LegacyUnknown,
             },
             mode,
         }
@@ -4017,6 +4041,8 @@ mod tests {
                 kind: TargetKind::CodexCli,
                 reported_model: "default".into(),
                 reasoning_effort: None,
+                model_source: ModelSource::DefaultRoute,
+                model_verification: ModelVerification::Unverified,
             },
             RunMode::Quick,
             pack.manifest.id.clone(),
@@ -4071,6 +4097,8 @@ mod tests {
                 kind: TargetKind::CodexCli,
                 reported_model: model.into(),
                 reasoning_effort: Some("high".into()),
+                model_source: ModelSource::CliRequested,
+                model_verification: ModelVerification::UserConfirmed,
             },
             RunMode::Quick,
             pack.manifest.id.clone(),

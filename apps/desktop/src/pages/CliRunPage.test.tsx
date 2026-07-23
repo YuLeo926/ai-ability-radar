@@ -21,6 +21,7 @@ import type {
   RunEvent,
   RunRecord,
   TargetKind,
+  TargetSelection,
 } from "../api/backend";
 import {
   CLI_EFFORT_DISPLAY_CASES,
@@ -81,6 +82,8 @@ function makeRun(
       kind,
       reportedModel: "default",
       reasoningEffort: null,
+      modelSource: "default_route",
+      modelVerification: "unverified",
     },
     mode: "quick",
     suiteId: "cli-quick-v1",
@@ -272,9 +275,11 @@ test("same-family CLI route mismatch is rejected before any resume call", async 
     .not.toBeInTheDocument();
 });
 
-test.each([
+test.each<[string, Partial<TargetSelection>]>([
   ["model", { reportedModel: "changed-model" }],
   ["reasoning effort", { reasoningEffort: "low" }],
+  ["model source", { modelSource: "cli_reported" }],
+  ["model verification", { modelVerification: "provider_reported" }],
 ])(
   "CLI recovery rejects a returned same-kind run with changed %s",
   async (_field, targetChange) => {
@@ -447,6 +452,8 @@ test.each([
         kind,
         reportedModel: "gpt-5.4/custom:beta_1",
         reasoningEffort: "high",
+        modelSource: "cli_requested",
+        modelVerification: "user_confirmed",
       },
       mode: "quick",
     });
@@ -468,6 +475,8 @@ test("uses provider-specific CLI efforts", async () => {
       kind: "codex_cli",
       reportedModel: "default",
       reasoningEffort: "max",
+      modelSource: "default_route",
+      modelVerification: "unverified",
     },
     mode: "quick",
   });
@@ -487,6 +496,8 @@ test("uses provider-specific CLI efforts", async () => {
       kind: "claude_code",
       reportedModel: "default",
       reasoningEffort: null,
+      modelSource: "default_route",
+      modelVerification: "unverified",
     },
     mode: "quick",
   });
@@ -663,6 +674,8 @@ test("mirrors CLI model validation, default normalization, and safe start retry"
       kind: "codex_cli",
       reportedModel: "default",
       reasoningEffort: null,
+      modelSource: "default_route",
+      modelVerification: "unverified",
     },
     mode: "quick",
   });
@@ -671,6 +684,8 @@ test("mirrors CLI model validation, default normalization, and safe start retry"
       kind: "codex_cli",
       reportedModel: "default",
       reasoningEffort: null,
+      modelSource: "default_route",
+      modelVerification: "unverified",
     },
     mode: "quick",
   });

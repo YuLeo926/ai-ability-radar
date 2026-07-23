@@ -77,7 +77,9 @@ function sameTarget(left: TargetSelection, right: TargetSelection): boolean {
   return (
     left.kind === right.kind &&
     left.reportedModel === right.reportedModel &&
-    (left.reasoningEffort ?? null) === (right.reasoningEffort ?? null)
+    (left.reasoningEffort ?? null) === (right.reasoningEffort ?? null) &&
+    left.modelSource === right.modelSource &&
+    left.modelVerification === right.modelVerification
   );
 }
 
@@ -840,6 +842,8 @@ function ManualWizard({
       kind,
       reportedModel: model.trim(),
       reasoningEffort: normalizedReasoningEffort || null,
+      modelSource: "manual",
+      modelVerification: "user_confirmed",
     };
     let run: RunRecord;
     try {

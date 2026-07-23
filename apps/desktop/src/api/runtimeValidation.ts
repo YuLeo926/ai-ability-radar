@@ -1,6 +1,8 @@
 import type {
   Category,
   FailureKind,
+  ModelSource,
+  ModelVerification,
   RunDetail,
   RunRecord,
   RunStatus,
@@ -15,6 +17,20 @@ const targetKinds = new Set<TargetKind>([
   "claude_client",
   "codex_cli",
   "claude_code",
+]);
+const modelSources = new Set<ModelSource>([
+  "manual",
+  "windows_accessibility",
+  "cli_requested",
+  "cli_reported",
+  "default_route",
+  "legacy_unknown",
+]);
+const modelVerifications = new Set<ModelVerification>([
+  "user_confirmed",
+  "provider_reported",
+  "unverified",
+  "legacy_unknown",
 ]);
 const runStatuses = new Set<RunStatus>([
   "created",
@@ -184,6 +200,10 @@ export function isSafeRunRecord(value: unknown): value is RunRecord {
     !targetKinds.has(value.target.kind as TargetKind) ||
     typeof value.target.reportedModel !== "string" ||
     !isOptionalString(value.target.reasoningEffort) ||
+    !modelSources.has(value.target.modelSource as ModelSource) ||
+    !modelVerifications.has(
+      value.target.modelVerification as ModelVerification,
+    ) ||
     (value.mode !== "quick" && value.mode !== "deep") ||
     typeof value.suiteId !== "string" ||
     typeof value.suiteVersion !== "string" ||

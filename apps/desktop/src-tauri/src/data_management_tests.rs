@@ -1,8 +1,9 @@
 use crate::app_state::RunOperationRegistry;
 use crate::data_management::{create_full_backup, prune_expired_artifacts};
 use ability_core::{
-    summarize_scores, ArtifactStore, Category, EnvironmentFingerprint, RunMode, RunRecord,
-    RunRepository, RunStatus, TargetKind, TargetSelection, TaskOutcome, TaskResult,
+    summarize_scores, ArtifactStore, Category, EnvironmentFingerprint, ModelSource,
+    ModelVerification, RunMode, RunRecord, RunRepository, RunStatus, TargetKind, TargetSelection,
+    TaskOutcome, TaskResult,
 };
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::Connection;
@@ -25,6 +26,8 @@ fn run(target: TargetKind) -> RunRecord {
             kind: target,
             reported_model: "fake-model".into(),
             reasoning_effort: None,
+            model_source: ModelSource::LegacyUnknown,
+            model_verification: ModelVerification::LegacyUnknown,
         },
         RunMode::Quick,
         "test-suite".into(),

@@ -4,8 +4,9 @@ use ability_adapters::{
     TargetAvailability, VerificationGrade, WorkspaceVerifier, adapter_error_grade,
 };
 use ability_core::{
-    EnvironmentFingerprint, FailureKind, LoadedPack, PackLoader, RunMode, RunRepository, RunStatus,
-    StorageError, TargetKind, TargetSelection, TaskOutcome, TaskResult,
+    EnvironmentFingerprint, FailureKind, LoadedPack, ModelSource, ModelVerification, PackLoader,
+    RunMode, RunRepository, RunStatus, StorageError, TargetKind, TargetSelection, TaskOutcome,
+    TaskResult,
 };
 use async_trait::async_trait;
 use std::collections::VecDeque;
@@ -285,6 +286,8 @@ fn target(kind: TargetKind) -> TargetSelection {
         kind,
         reported_model: "CLI current selection".into(),
         reasoning_effort: None,
+        model_source: ModelSource::LegacyUnknown,
+        model_verification: ModelVerification::LegacyUnknown,
     }
 }
 

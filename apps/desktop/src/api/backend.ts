@@ -4,6 +4,20 @@ export type TargetKind =
   | "codex_cli"
   | "claude_code";
 
+export type ModelSource =
+  | "manual"
+  | "windows_accessibility"
+  | "cli_requested"
+  | "cli_reported"
+  | "default_route"
+  | "legacy_unknown";
+
+export type ModelVerification =
+  | "user_confirmed"
+  | "provider_reported"
+  | "unverified"
+  | "legacy_unknown";
+
 export type RunMode = "quick" | "deep";
 export type AvailabilityStatus =
   | "ready"
@@ -44,6 +58,8 @@ export interface TargetSelection {
   kind: TargetKind;
   reportedModel: string;
   reasoningEffort?: string | null;
+  modelSource: ModelSource;
+  modelVerification: ModelVerification;
 }
 
 export interface PrerequisiteStatus {
@@ -153,6 +169,8 @@ export interface ResumeRunInput {
     kind: TargetKind;
     reportedModel: string;
     reasoningEffort: string | null;
+    modelSource: ModelSource;
+    modelVerification: ModelVerification;
   };
 }
 

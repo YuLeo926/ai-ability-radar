@@ -23,6 +23,8 @@ test("uses exactly the eighteen reviewed commands and narrow camelCase payloads"
       kind: "chat_gpt_client",
       reportedModel: "GPT-5",
       reasoningEffort: null,
+      modelSource: "manual",
+      modelVerification: "user_confirmed",
     },
     mode: "quick",
   };
@@ -31,6 +33,8 @@ test("uses exactly the eighteen reviewed commands and narrow camelCase payloads"
       kind: "codex_cli",
       reportedModel: "default",
       reasoningEffort: "high",
+      modelSource: "default_route",
+      modelVerification: "unverified",
     },
     mode: "quick",
   };
@@ -51,6 +55,8 @@ test("uses exactly the eighteen reviewed commands and narrow camelCase payloads"
       kind: "chat_gpt_client",
       reportedModel: "GPT-5",
       reasoningEffort: "high",
+      modelSource: "manual",
+      modelVerification: "user_confirmed",
     },
   });
   await tauriBackend.resumeCliRun({
@@ -59,6 +65,8 @@ test("uses exactly the eighteen reviewed commands and narrow camelCase payloads"
       kind: "codex_cli",
       reportedModel: "gpt-5.1-codex",
       reasoningEffort: null,
+      modelSource: "cli_requested",
+      modelVerification: "user_confirmed",
     },
   });
   await tauriBackend.cancelRun("run-cli");
@@ -93,6 +101,8 @@ test("uses exactly the eighteen reviewed commands and narrow camelCase payloads"
             kind: "chat_gpt_client",
             reportedModel: "GPT-5",
             reasoningEffort: "high",
+            modelSource: "manual",
+            modelVerification: "user_confirmed",
           },
         },
       },
@@ -106,6 +116,8 @@ test("uses exactly the eighteen reviewed commands and narrow camelCase payloads"
             kind: "codex_cli",
             reportedModel: "gpt-5.1-codex",
             reasoningEffort: null,
+            modelSource: "cli_requested",
+            modelVerification: "user_confirmed",
           },
         },
       },

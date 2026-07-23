@@ -1,7 +1,7 @@
 use ability_core::{
-    Category, EnvironmentFingerprint, FailureKind, ManualRunService, PackLoader, RunMode,
-    RunRecord, RunRepository, RunServiceError, RunStatus, TargetKind, TargetSelection, TaskOutcome,
-    TaskResult,
+    Category, EnvironmentFingerprint, FailureKind, ManualRunService, ModelSource,
+    ModelVerification, PackLoader, RunMode, RunRecord, RunRepository, RunServiceError, RunStatus,
+    TargetKind, TargetSelection, TaskOutcome, TaskResult,
 };
 use rusqlite::params;
 use std::cell::Cell;
@@ -86,6 +86,8 @@ fn target() -> TargetSelection {
         kind: TargetKind::ChatGptClient,
         reported_model: "Model-X".into(),
         reasoning_effort: Some("high".into()),
+        model_source: ModelSource::LegacyUnknown,
+        model_verification: ModelVerification::LegacyUnknown,
     }
 }
 

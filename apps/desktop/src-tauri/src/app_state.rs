@@ -7,6 +7,8 @@ use ability_core::{
     ArtifactStore, LoadedPack, ManualRunService, PackLoader, PackRegistry, RunRepository,
     TargetKind,
 };
+#[cfg(test)]
+use ability_core::{ModelSource, ModelVerification};
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -692,6 +694,8 @@ mod tests {
                 kind: TargetKind::ChatGptClient,
                 reported_model: "test-model".into(),
                 reasoning_effort: None,
+                model_source: ModelSource::LegacyUnknown,
+                model_verification: ModelVerification::LegacyUnknown,
             },
             RunMode::Quick,
             client_pack.manifest.id.clone(),
@@ -744,6 +748,8 @@ mod tests {
                 kind: TargetKind::ChatGptClient,
                 reported_model: "fake-model".into(),
                 reasoning_effort: None,
+                model_source: ModelSource::LegacyUnknown,
+                model_verification: ModelVerification::LegacyUnknown,
             },
             RunMode::Quick,
             client_pack.manifest.id.clone(),

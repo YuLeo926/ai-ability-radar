@@ -8,6 +8,8 @@ use ability_core::{
     TargetKind, TargetSelection, TaskOutcome, TaskResult, summarize_scores, validate_recovery,
     validate_recovery_checkpoints,
 };
+#[cfg(test)]
+use ability_core::{ModelSource, ModelVerification};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
@@ -1375,6 +1377,8 @@ mod cancellation_copy_tests {
                     kind: TargetKind::CodexCli,
                     reported_model: "default".into(),
                     reasoning_effort: None,
+                    model_source: ModelSource::DefaultRoute,
+                    model_verification: ModelVerification::Unverified,
                 },
                 RunMode::Quick,
                 EnvironmentFingerprint {

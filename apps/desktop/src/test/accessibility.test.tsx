@@ -128,6 +128,8 @@ function runRecord(): RunRecord {
       kind: "chat_gpt_client",
       reportedModel: "GPT-X",
       reasoningEffort: "high",
+      modelSource: "windows_accessibility",
+      modelVerification: "user_confirmed",
     },
     mode: "quick",
     suiteId: "client-quick",
@@ -380,6 +382,8 @@ describe("Task 21 accessibility baseline", () => {
       kind: "codex_cli",
       reportedModel: "default",
       reasoningEffort: null,
+      modelSource: "default_route",
+      modelVerification: "unverified",
     };
     const cli = renderRoute(
       "/cli/codex_cli",

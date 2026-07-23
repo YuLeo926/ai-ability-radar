@@ -81,7 +81,9 @@ function sameTarget(left: TargetSelection, right: TargetSelection): boolean {
   return (
     left.kind === right.kind &&
     left.reportedModel === right.reportedModel &&
-    (left.reasoningEffort ?? null) === (right.reasoningEffort ?? null)
+    (left.reasoningEffort ?? null) === (right.reasoningEffort ?? null) &&
+    left.modelSource === right.modelSource &&
+    left.modelVerification === right.modelVerification
   );
 }
 
@@ -539,6 +541,12 @@ function CliWizard({
                 reasoningEffort:
                   normalizeReasoningEffortForTarget(kind, reasoningEffort) ||
                   null,
+                modelSource: model.trim()
+                  ? "cli_requested"
+                  : "default_route",
+                modelVerification: model.trim()
+                  ? "user_confirmed"
+                  : "unverified",
               },
               mode: "quick",
             }),

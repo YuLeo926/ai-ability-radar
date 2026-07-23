@@ -3,6 +3,8 @@ use crate::{
     RecoveryArtifactCheckpoint, RunMode, RunRecord, RunRepository, RunStatus, StorageError,
     TargetKind, TargetSelection, TaskOutcome, TaskResult, grade_submission, summarize_scores,
 };
+#[cfg(test)]
+use crate::{ModelSource, ModelVerification};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -1349,6 +1351,8 @@ mod tests {
                     kind: TargetKind::ChatGptClient,
                     reported_model: "test".into(),
                     reasoning_effort: None,
+                    model_source: ModelSource::LegacyUnknown,
+                    model_verification: ModelVerification::LegacyUnknown,
                 },
                 RunMode::Quick,
                 environment(&loaded_pack),
@@ -1385,6 +1389,8 @@ mod tests {
                         kind: TargetKind::ChatGptClient,
                         reported_model: "test".into(),
                         reasoning_effort: None,
+                        model_source: ModelSource::LegacyUnknown,
+                        model_verification: ModelVerification::LegacyUnknown,
                     },
                     RunMode::Quick,
                     environment(&loaded_pack),
@@ -1498,6 +1504,8 @@ mod tests {
                     kind: TargetKind::ChatGptClient,
                     reported_model: "test".into(),
                     reasoning_effort: None,
+                    model_source: ModelSource::LegacyUnknown,
+                    model_verification: ModelVerification::LegacyUnknown,
                 },
                 RunMode::Quick,
                 environment(&loaded_pack),

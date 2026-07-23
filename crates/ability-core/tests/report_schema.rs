@@ -1,6 +1,7 @@
 use ability_core::{
-    Category, EnvironmentFingerprint, FailureKind, RunMode, RunRecord, RunStatus, ScoreSummary,
-    TargetKind, TargetSelection, TaskOutcome, TaskResult, build_public_report,
+    Category, EnvironmentFingerprint, FailureKind, ModelSource, ModelVerification, RunMode,
+    RunRecord, RunStatus, ScoreSummary, TargetKind, TargetSelection, TaskOutcome, TaskResult,
+    build_public_report,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -11,6 +12,8 @@ fn fixture_report() -> Value {
             kind: TargetKind::ChatGptClient,
             reported_model: "GPT-X".into(),
             reasoning_effort: None,
+            model_source: ModelSource::LegacyUnknown,
+            model_verification: ModelVerification::LegacyUnknown,
         },
         RunMode::Quick,
         "client-quick".into(),

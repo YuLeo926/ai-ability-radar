@@ -5,8 +5,8 @@ use ability_adapters::{
     ProcessRunner, TokioProcessRunner, WorkspaceVerifier,
 };
 use ability_core::{
-    EnvironmentFingerprint, LoadedPack, PackLoader, RunMode, RunRepository, RunStatus, TargetKind,
-    TargetSelection, TaskOutcome,
+    EnvironmentFingerprint, LoadedPack, ModelSource, ModelVerification, PackLoader, RunMode,
+    RunRepository, RunStatus, TargetKind, TargetSelection, TaskOutcome,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -85,6 +85,8 @@ async fn execute_complete_run(
                 kind: adapter.kind(),
                 reported_model: "deterministic fake".into(),
                 reasoning_effort: None,
+                model_source: ModelSource::LegacyUnknown,
+                model_verification: ModelVerification::LegacyUnknown,
             },
             RunMode::Quick,
             environment(&pack, version),
@@ -165,6 +167,8 @@ async fn execute_cancelled_run(
                 kind: TargetKind::CodexCli,
                 reported_model: "delayed deterministic fake".into(),
                 reasoning_effort: None,
+                model_source: ModelSource::LegacyUnknown,
+                model_verification: ModelVerification::LegacyUnknown,
             },
             RunMode::Quick,
             environment(&pack, "fake delayed".into()),
