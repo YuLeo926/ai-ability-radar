@@ -41,6 +41,12 @@ pub struct StartRunInput {
     pub mode: RunMode,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DetectClientSelectionInput {
+    pub target: TargetKind,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SubmitAnswerInput {
@@ -208,6 +214,20 @@ mod tests {
     use super::*;
     use ability_core::{ModelSource, ModelVerification, RunMode, TargetKind};
     use serde_json::json;
+
+    #[test]
+    fn detect_client_selection_input_accepts_client_and_cli_target_kinds() {
+        let input: DetectClientSelectionInput = serde_json::from_value(json!({
+            "target": "chat_gpt_client"
+        }))
+        .unwrap();
+        assert_eq!(input.target, TargetKind::ChatGptClient);
+
+        assert!(serde_json::from_value::<DetectClientSelectionInput>(json!({
+            "target": "codex_cli"
+        }))
+        .is_ok());
+    }
 
     #[test]
     fn start_run_input_uses_the_expected_camel_case_wire_shape() {

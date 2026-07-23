@@ -3,10 +3,12 @@ use crate::app_state::{
     CancellationRegistration, CancellationRegistry, LocalDataGate, LocalDataMutationClaim,
     RunOperationRegistry,
 };
+use crate::client_selection::{self, ClientSelectionDetection};
 use crate::dto::{
-    BootstrapDto, CliRunEventDto, DataSettingsDto, DeleteTargetHistoryInput, ExportReportInput,
-    FullBackupInput, PackSummaryDto, ResumeRunInput, ResumeTargetSelectionInput, RunDetailDto,
-    RunErrorEvent, RunIdInput, SetRetentionInput, StartRunInput, SubmitAnswerInput, TaskResultDto,
+    BootstrapDto, CliRunEventDto, DataSettingsDto, DeleteTargetHistoryInput,
+    DetectClientSelectionInput, ExportReportInput, FullBackupInput, PackSummaryDto, ResumeRunInput,
+    ResumeTargetSelectionInput, RunDetailDto, RunErrorEvent, RunIdInput, SetRetentionInput,
+    StartRunInput, SubmitAnswerInput, TaskResultDto,
 };
 use ability_adapters::{
     AgentAdapter, AvailabilityStatus, CliRunService, PrerequisiteStatus, ProcessRunner,
@@ -385,6 +387,19 @@ fn validate_task_id(value: &str) -> Result<&str, String> {
         return Err("无效的题目编号".into());
     }
     Ok(value)
+}
+
+#[tauri::command]
+pub async fn detect_client_selection(
+    input: DetectClientSelectionInput,
+) -> Result<ClientSelectionDetection, String> {
+    if !matches!(
+        input.target,
+        TargetKind::ChatGptClient | TargetKind::ClaudeClient
+    ) {
+        return Err("模型辅助识别仅支持客户端体检".into());
+    }
+    Ok(client_selection::detect_client_selection(input.target).await)
 }
 
 #[tauri::command]
@@ -2267,7 +2282,7 @@ fn run_detail_from_repository(
 mod tests {
     use super::*;
     use crate::app_state::CancellationRegistry;
-    use crate::dto::{StartRunInput, TargetSelectionInput};
+    use crate::dto::{DetectClientSelectionInput, StartRunInput, TargetSelectionInput};
     use ability_adapters::{
         AdapterCompletion, AdapterError, AuthState, AvailabilityStatus, CliRunService,
         ExecutionRequest, LaunchSource, PrerequisiteStatus, ProcessError, ProcessOutput,
@@ -2287,6 +2302,17 @@ mod tests {
     struct CountingAdapter {
         detect_calls: AtomicUsize,
         execute_calls: AtomicUsize,
+    }
+
+    #[tokio::test]
+    async fn detect_client_selection_rejects_cli_target_with_stable_message() {
+        let error = detect_client_selection(DetectClientSelectionInput {
+            target: TargetKind::CodexCli,
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, "模型辅助识别仅支持客户端体检");
     }
 
     #[async_trait::async_trait]

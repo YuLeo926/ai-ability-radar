@@ -2,6 +2,11 @@ use ability_core::{
     contains_forbidden_display_character, is_valid_reported_model, ModelSource, TargetKind,
 };
 use serde::Serialize;
+#[cfg(windows)]
+use std::time::Duration;
+
+#[cfg(windows)]
+mod windows;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -600,16 +605,79 @@ fn push_unique_candidate(
     });
 }
 
+#[cfg(windows)]
+async fn detect_client_selection_with_budget<F>(
+    target: TargetKind,
+    timeout: Duration,
+    scan: F,
+) -> ClientSelectionDetection
+where
+    F: FnOnce(TargetKind) -> Result<ClientSelectionDetection, windows::ScanFailure>
+        + Send
+        + 'static,
+{
+    match tokio::time::timeout(timeout, tokio::task::spawn_blocking(move || scan(target))).await {
+        Ok(Ok(result)) => windows::detection_from_scan(result),
+        Ok(Err(_)) => ClientSelectionDetection::failed(ClientSelectionStatus::Failed),
+        Err(_) => ClientSelectionDetection::failed(ClientSelectionStatus::TimedOut),
+    }
+}
+
+pub(crate) async fn detect_client_selection(target: TargetKind) -> ClientSelectionDetection {
+    if !matches!(target, TargetKind::ChatGptClient | TargetKind::ClaudeClient) {
+        return ClientSelectionDetection::failed(ClientSelectionStatus::Failed);
+    }
+
+    #[cfg(windows)]
+    {
+        detect_client_selection_with_budget(target, Duration::from_millis(1_500), windows::scan)
+            .await
+    }
+
+    #[cfg(not(windows))]
+    ClientSelectionDetection::failed(ClientSelectionStatus::Unsupported)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    #[cfg(windows)]
+    use std::thread;
 
     fn raw_control(kind: ControlKind, name: &str) -> RawControl {
         RawControl {
             kind,
             name: name.to_owned(),
         }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn synthetic_blocking_scan_exceeding_outer_budget_maps_to_timed_out() {
+        let detection = detect_client_selection_with_budget(
+            TargetKind::ChatGptClient,
+            Duration::from_millis(10),
+            |_| {
+                thread::sleep(Duration::from_millis(50));
+                Ok(ClientSelectionDetection::failed(
+                    ClientSelectionStatus::NotExposed,
+                ))
+            },
+        )
+        .await;
+
+        assert_eq!(detection.status, ClientSelectionStatus::TimedOut);
+        assert!(detection.candidates.is_empty());
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn supported_client_target_is_unsupported_off_windows() {
+        let detection = detect_client_selection(TargetKind::ChatGptClient).await;
+
+        assert_eq!(detection.status, ClientSelectionStatus::Unsupported);
+        assert!(detection.candidates.is_empty());
     }
 
     fn control_for(surface: ClientSurface, kind: ControlKind, name: &str) -> ObservedControl {
