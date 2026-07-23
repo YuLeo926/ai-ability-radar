@@ -80,13 +80,90 @@ pub(crate) struct RawControl {
     pub(crate) name: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ObservedControl {
-    surface: ClientSurface,
-    confidence: ClientSelectionConfidence,
-    kind: ControlKind,
-    role: SelectorRole,
-    name: String,
+mod checked_observation {
+    use super::*;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct ObservedControl {
+        surface: ClientSurface,
+        confidence: ClientSelectionConfidence,
+        kind: ControlKind,
+        role: SelectorRole,
+        name: String,
+    }
+
+    impl ObservedControl {
+        pub(super) fn surface(&self) -> ClientSurface {
+            self.surface
+        }
+
+        pub(super) fn confidence(&self) -> ClientSelectionConfidence {
+            self.confidence
+        }
+
+        pub(super) fn checked_value(&self, target: TargetKind) -> Option<(SelectorRole, String)> {
+            if !allowed_selector(self.kind) {
+                return None;
+            }
+            let (role, value) = selector_role(target, &self.name)?;
+            (role == self.role).then_some((role, value))
+        }
+    }
+
+    pub(crate) fn observe_window_controls(
+        provider: ProviderFamily,
+        controls: &[RawControl],
+        title_hint: &str,
+    ) -> Option<Vec<ObservedControl>> {
+        let (surface, confidence) = classify_surface(provider, controls, title_hint)?;
+        let target = match provider {
+            ProviderFamily::OpenAi => TargetKind::ChatGptClient,
+            ProviderFamily::Anthropic => TargetKind::ClaudeClient,
+        };
+        Some(
+            controls
+                .iter()
+                .filter(|control| allowed_selector(control.kind))
+                .filter_map(|control| {
+                    let (role, name) = selector_role(target, &control.name)?;
+                    Some(ObservedControl {
+                        surface,
+                        confidence,
+                        kind: control.kind,
+                        role,
+                        name,
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_fixture(
+        surface: ClientSurface,
+        confidence: ClientSelectionConfidence,
+        kind: ControlKind,
+        role: SelectorRole,
+        name: &str,
+    ) -> ObservedControl {
+        ObservedControl {
+            surface,
+            confidence,
+            kind,
+            role,
+            name: name.to_owned(),
+        }
+    }
+}
+
+pub(crate) use checked_observation::ObservedControl;
+
+pub(crate) fn observe_window_controls(
+    provider: ProviderFamily,
+    controls: &[RawControl],
+    title_hint: &str,
+) -> Option<Vec<ObservedControl>> {
+    checked_observation::observe_window_controls(provider, controls, title_hint)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,34 +365,6 @@ fn title_contains_token(value: &str, expected: &str) -> bool {
         .any(|token| token.eq_ignore_ascii_case(expected))
 }
 
-pub(crate) fn observe_window_controls(
-    provider: ProviderFamily,
-    controls: &[RawControl],
-    title_hint: &str,
-) -> Option<Vec<ObservedControl>> {
-    let (surface, confidence) = classify_surface(provider, controls, title_hint)?;
-    let target = match provider {
-        ProviderFamily::OpenAi => TargetKind::ChatGptClient,
-        ProviderFamily::Anthropic => TargetKind::ClaudeClient,
-    };
-    Some(
-        controls
-            .iter()
-            .filter(|control| allowed_selector(control.kind))
-            .filter_map(|control| {
-                let (role, name) = selector_role(target, &control.name)?;
-                Some(ObservedControl {
-                    surface,
-                    confidence,
-                    kind: control.kind,
-                    role,
-                    name,
-                })
-            })
-            .collect(),
-    )
-}
-
 fn allowed_selector(kind: ControlKind) -> bool {
     matches!(
         kind,
@@ -441,14 +490,14 @@ pub(crate) fn extract_candidates(
         let mut efforts: Vec<ObservedValue> = Vec::new();
         for control in controls
             .iter()
-            .filter(|control| control.surface == surface && allowed_selector(control.kind))
+            .filter(|control| control.surface() == surface)
         {
-            match validated_observed_value(target, control) {
+            match control.checked_value(target) {
                 Some((SelectorRole::Model, model)) => {
-                    insert_observed_value(&mut models, model, control.confidence);
+                    insert_observed_value(&mut models, model, control.confidence());
                 }
                 Some((SelectorRole::Effort, effort)) => {
-                    insert_observed_value(&mut efforts, effort, control.confidence);
+                    insert_observed_value(&mut efforts, effort, control.confidence());
                 }
                 _ => {}
             }
@@ -500,14 +549,6 @@ pub(crate) fn extract_candidates(
         _ => ClientSelectionStatus::Multiple,
     };
     ClientSelectionDetection { status, candidates }
-}
-
-fn validated_observed_value(
-    target: TargetKind,
-    control: &ObservedControl,
-) -> Option<(SelectorRole, String)> {
-    let (role, value) = selector_role(target, &control.name)?;
-    (role == control.role).then_some((role, value))
 }
 
 fn insert_observed_value(
@@ -579,13 +620,13 @@ mod tests {
         let role = selector_role(target, name)
             .map(|(role, _)| role)
             .unwrap_or(SelectorRole::Model);
-        ObservedControl {
+        checked_observation::test_fixture(
             surface,
-            confidence: ClientSelectionConfidence::VisibleSelector,
+            ClientSelectionConfidence::VisibleSelector,
             kind,
             role,
-            name: name.to_owned(),
-        }
+            name,
+        )
     }
 
     fn control(kind: ControlKind, name: &str) -> ObservedControl {
