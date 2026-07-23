@@ -334,6 +334,45 @@ test("refreshes CLI state in place and keeps retry failures inline", async () =>
   }
 });
 
+test("sanitizes inline CLI refresh errors without exposing objects", async () => {
+  const firstRefresh = deferred<Bootstrap>();
+  const objectRefresh = deferred<Bootstrap>();
+  const load = vi
+    .fn<() => Promise<Bootstrap>>()
+    .mockResolvedValueOnce(readyBootstrap())
+    .mockImplementationOnce(() => firstRefresh.promise)
+    .mockImplementationOnce(() => objectRefresh.promise);
+  const user = userEvent.setup();
+  renderHome(backendFor(load));
+
+  const cliSection = await screen.findByRole("region", { name: "编程 CLI" });
+  await user.click(
+    within(cliSection).getByRole("button", { name: "重新检测 CLI" }),
+  );
+  await act(async () => {
+    firstRefresh.reject(
+      new Error(`  模拟 CLI\u0000重新检测\n失败  ${"过长".repeat(100)} `),
+    );
+    await firstRefresh.promise.catch(() => undefined);
+  });
+
+  const cleanedError = screen.getByRole("alert");
+  expect(cleanedError).toHaveTextContent("模拟 CLI 重新检测 失败");
+  expect(cleanedError.textContent).not.toMatch(/[\u0000-\u001f\u007f]/);
+  expect(cleanedError.textContent?.length).toBeLessThanOrEqual(200);
+
+  await user.click(screen.getByRole("button", { name: "重新检测 CLI" }));
+  await act(async () => {
+    objectRefresh.reject({ message: "不应暴露", stack: "secret stack" });
+    await objectRefresh.promise.catch(() => undefined);
+  });
+
+  const safeFallback = screen.getByRole("alert");
+  expect(safeFallback).toHaveTextContent("无法重新检测 CLI，请重试。");
+  expect(safeFallback).not.toHaveTextContent("[object Object]");
+  expect(safeFallback).not.toHaveTextContent("secret stack");
+});
+
 test.each([
   ["not_found", "未检测到受支持入口"],
   ["runtime_missing", "缺少 Node.js 运行时"],
@@ -440,7 +479,7 @@ test("re-detects CLI availability and explains inherited PATH limits", async () 
   expect(await screen.findByText("未检测到受支持入口")).toBeInTheDocument();
   expect(
     screen.getByText(
-      /已继承 PATH 目录内的变化可立即重新检测.*新增 PATH 目录.*重启应用.*重新检测/,
+      /已继承 PATH 目录内的变化可以立即刷新.*新增 PATH 目录.*重启应用.*重新检测/,
     ),
   ).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "重新检测 CLI" }));
@@ -579,6 +618,20 @@ test("a synchronous bridge failure is announced inside the shell", async () => {
     within(alert).getByRole("heading", { name: "无法读取本机环境" }),
   ).toBeInTheDocument();
   expect(within(alert).getByText("模拟同步桥接失败")).toBeInTheDocument();
+});
+
+test("uses an initial-load fallback instead of exposing a rejected object", async () => {
+  const backend = backendFor(async () => readyBootstrap());
+  backend.getBootstrap = async () => {
+    throw { message: "不应暴露", stack: "secret stack" };
+  };
+
+  renderHome(backend);
+
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("无法读取本机环境，请重试。");
+  expect(alert).not.toHaveTextContent("[object Object]");
+  expect(alert).not.toHaveTextContent("secret stack");
 });
 
 test("a stale bootstrap completion cannot replace newer backend state", async () => {

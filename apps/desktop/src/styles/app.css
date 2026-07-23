@@ -358,6 +358,36 @@ button:disabled,
   font-size: clamp(1.02rem, 2vw, 1.18rem);
 }
 
+.home-page {
+  padding-top: clamp(1.75rem, 4vw, 3rem);
+}
+
+.home-hero {
+  max-width: 62rem;
+  margin-bottom: var(--space-7);
+}
+
+.hero-data-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.25rem;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.88rem;
+}
+
+.hero-data-strip span::before {
+  content: "";
+  display: inline-block;
+  width: 0.42rem;
+  height: 0.42rem;
+  margin-right: 0.45rem;
+  border-radius: 50%;
+  background: var(--brand);
+  vertical-align: 0.08rem;
+}
+
 .target-sections {
   display: grid;
   gap: clamp(2.5rem, 6vw, 4.5rem);
@@ -376,6 +406,10 @@ button:disabled,
   gap: 1rem;
 }
 
+.section-heading {
+  align-items: center;
+}
+
 .section-heading h2,
 .section-heading p,
 .section-heading-row h2,
@@ -383,31 +417,45 @@ button:disabled,
   margin-block: 0;
 }
 
-.pack-summary {
-  color: var(--text-muted);
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-}
-
-.pack-summary p {
-  margin: 0;
-}
-
-.section-heading-actions {
-  display: flex;
-  flex: 0 1 36rem;
-  align-items: center;
-  justify-content: end;
-  gap: 0.75rem;
-}
-
-.cli-redetect {
+.section-heading-copy {
   display: grid;
-  max-width: 28rem;
+  gap: var(--space-1);
+}
+
+.section-pack-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  color: var(--text-muted);
+  font-size: 0.88rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.section-action {
+  flex: 0 1 28rem;
+}
+
+.cli-refresh-control {
+  display: grid;
   justify-items: end;
   gap: var(--space-2);
-  color: var(--text-muted);
+}
+
+.inline-error {
+  max-width: 28rem;
+  margin: 0;
+  color: var(--danger);
+  font-size: 0.86rem;
   text-align: right;
+}
+
+.cli-guidance {
+  margin: 0 0 var(--space-4);
+  padding: 0.65rem 0.8rem;
+  border-left: 0.2rem solid var(--mineral);
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  font-size: 0.86rem;
 }
 
 .secondary-action {
@@ -425,21 +473,26 @@ button:disabled,
 
 .target-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(16rem, 100%), 1fr));
-  gap: 1rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
 }
 
 .target-card {
   position: relative;
   display: flex;
   min-width: 0;
-  min-height: 17rem;
-  padding: clamp(1.1rem, 3vw, 1.5rem);
+  min-height: 14.5rem;
+  padding: var(--space-5);
   border: 1px solid var(--border);
-  border-top: 3px solid var(--mineral);
+  border-top: 0.2rem solid var(--mineral);
   border-radius: var(--radius-md);
   flex-direction: column;
   background: var(--panel);
+  box-shadow: var(--shadow-sm);
+}
+
+.target-card:hover {
+  border-color: var(--border-strong);
   box-shadow: var(--shadow-md);
 }
 
@@ -498,25 +551,23 @@ button:disabled,
   margin: 1.35rem 0 0.8rem;
   align-items: center;
   gap: 0.5rem;
-  color: var(--text-primary);
   font-weight: 700;
 }
 
-.target-status::before {
-  content: "状态";
-  padding: 0.08rem 0.4rem;
-  border: 1px solid currentColor;
-  border-radius: 999px;
-  font-size: 0.7rem;
-  letter-spacing: 0.05em;
-}
-
-.status-ready {
+.app-shell .target-card .target-status.status-ready {
   color: var(--success);
 }
 
-.status-warning {
+.app-shell .target-card .target-status.status-warning {
   color: var(--warning);
+}
+
+.status-indicator {
+  width: 0.55rem;
+  height: 0.55rem;
+  border: 0.12rem solid currentColor;
+  border-radius: 50%;
+  box-shadow: 0 0 0 0.18rem var(--panel);
 }
 
 .target-action {
@@ -906,19 +957,20 @@ button:disabled,
     align-items: start;
   }
 
-  .pack-summary {
-    text-align: left;
+  .section-action {
+    justify-self: start;
   }
 
-  .section-heading-actions {
-    align-items: start;
-    justify-content: start;
-    flex-wrap: wrap;
-  }
-
-  .cli-redetect {
+  .cli-refresh-control {
     justify-items: start;
+  }
+
+  .inline-error {
     text-align: left;
+  }
+
+  .target-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .report-review-backdrop {
@@ -979,7 +1031,7 @@ button:disabled,
     border: 1px solid CanvasText;
   }
 
-  .target-status::before,
+  .status-indicator,
   .target-card,
   .notice,
   .evidence-note {
