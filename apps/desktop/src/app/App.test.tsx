@@ -114,6 +114,20 @@ test("main navigation marks the current page and reaches history", async () => {
   );
 });
 
+test("the topbar constrains shared navigation inside its grid wrapper", async () => {
+  renderRoute("/");
+  await screen.findByRole("heading", { name: "选择要体检的 AI" });
+
+  const topbar = document.querySelector("header.topbar");
+  expect(topbar).not.toBeNull();
+  const inner = topbar?.querySelector(":scope > .topbar-inner");
+  expect(inner).not.toBeNull();
+  expect(inner?.children).toHaveLength(3);
+  expect(inner?.children[0]).toHaveClass("brand");
+  expect(inner?.children[1]).toHaveClass("main-navigation");
+  expect(inner?.children[2]).toHaveClass("theme-control");
+});
+
 test("history navigation is exact and is not active on unrelated child paths", () => {
   renderRoute("/history/unrelated");
 

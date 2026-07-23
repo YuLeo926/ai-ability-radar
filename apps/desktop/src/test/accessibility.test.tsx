@@ -629,6 +629,29 @@ describe("Task 21 accessibility baseline", () => {
     },
   );
 
+  test("shared tokens and shell background use the precision-radar palette", () => {
+    expect(tokensCss).toContain("--canvas: #f2f3ee;");
+    expect(tokensCss).toContain("--surface-strong: #d6e3de;");
+    expect(tokensCss).toContain("--grid-pattern: url(\"data:image/svg+xml,%3Csvg");
+    expect(tokensCss).toContain("--canvas: #0a1513;");
+    expect(tokensCss).toContain("--surface-strong: #284a43;");
+    expect(tokensCss).toContain("--on-brand: #071a17;");
+
+    const appCss = readFileSync(join(sourceRoot, "styles", "app.css"), "utf8");
+    expect(appCss).toMatch(
+      /body\s*\{[\s\S]*background-color:\s*var\(--canvas\);[\s\S]*background-image:\s*var\(--grid-pattern\);[\s\S]*background-size:\s*2\.5rem 2\.5rem;/,
+    );
+    expect(appCss).toMatch(
+      /\.topbar-inner\s*\{[\s\S]*width:\s*min\(76rem, calc\(100% - clamp\(1\.25rem, 4vw, 3rem\)\)\);/,
+    );
+    expect(appCss).not.toMatch(
+      /(?:linear|radial|conic|repeating-radial)-gradient\s*\(/i,
+    );
+    expect(appCss).toMatch(
+      /\.target-card::after\s*\{[\s\S]*border-radius:\s*50%;[\s\S]*box-shadow:/,
+    );
+  });
+
   test("the precision-radar surface uses no CSS gradients", () => {
     const styleFiles = [
       join(sourceRoot, "styles", "app.css"),

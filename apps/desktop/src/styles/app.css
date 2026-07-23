@@ -16,11 +16,8 @@ body {
   min-width: 320px;
   min-height: 100vh;
   background-color: var(--canvas);
-  background-image:
-    linear-gradient(rgb(18 110 105 / 5%) 1px, transparent 1px),
-    linear-gradient(90deg, rgb(18 110 105 / 5%) 1px, transparent 1px),
-    radial-gradient(circle at 92% 3%, rgb(49 93 120 / 13%), transparent 32rem);
-  background-size: 2.5rem 2.5rem, 2.5rem 2.5rem, auto;
+  background-image: var(--grid-pattern);
+  background-size: 2.5rem 2.5rem;
   color: var(--text-primary);
   font: 400 1rem/1.6 var(--font-body);
   text-rendering: optimizeLegibility;
@@ -99,7 +96,7 @@ button.danger,
 .evidence-button.danger {
   border-color: var(--danger);
   background: var(--danger);
-  color: #ffffff;
+  color: var(--on-brand);
 }
 
 .evidence-button.danger-outline {
@@ -160,15 +157,21 @@ button:disabled,
   position: sticky;
   z-index: 40;
   top: 0;
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  min-height: 4.25rem;
-  padding: 0.55rem clamp(0.75rem, 3vw, 2.25rem);
+  min-height: 3.75rem;
+  padding: 0;
   border-bottom: 1px solid var(--border);
-  align-items: center;
-  gap: clamp(0.6rem, 2vw, 1.5rem);
   background: var(--panel);
-  box-shadow: 0 1px 0 rgb(255 255 255 / 16%);
+  box-shadow: var(--shadow-sm);
+}
+
+.topbar-inner {
+  display: grid;
+  width: min(76rem, calc(100% - clamp(1.25rem, 4vw, 3rem)));
+  min-height: 3.75rem;
+  margin: 0 auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: clamp(0.75rem, 2vw, 1.5rem);
 }
 
 .brand {
@@ -196,9 +199,7 @@ button:disabled,
   border: 1px solid var(--brand);
   border-radius: 50%;
   place-items: center;
-  background:
-    linear-gradient(90deg, transparent 48%, var(--border-strong) 49% 51%, transparent 52%),
-    linear-gradient(transparent 48%, var(--border-strong) 49% 51%, transparent 52%);
+  background: var(--panel-raised);
 }
 
 .brand-mark::before,
@@ -209,15 +210,15 @@ button:disabled,
 }
 
 .brand-mark::before {
-  inset: 0.34rem;
+  inset: 0.4rem;
   border: 1px solid var(--border-strong);
 }
 
 .brand-mark::after {
-  width: 0.35rem;
-  height: 0.35rem;
+  width: 0.38rem;
+  height: 0.38rem;
   background: var(--warning);
-  box-shadow: 0.45rem -0.43rem 0 -0.09rem var(--brand);
+  box-shadow: 0 0 0 0.28rem var(--panel-raised);
 }
 
 .main-navigation {
@@ -305,12 +306,12 @@ button:disabled,
 }
 
 .app-shell h1 {
-  max-width: 19ch;
+  max-width: 22ch;
   margin: 0;
-  font-size: clamp(2.15rem, 5.3vw, 4.5rem);
+  font-size: clamp(2rem, 4.4vw, 3.75rem);
   font-weight: 650;
-  line-height: 1.02;
-  letter-spacing: -0.045em;
+  line-height: 1.04;
+  letter-spacing: -0.035em;
   text-align: left;
 }
 
@@ -339,10 +340,11 @@ button:disabled,
 .hero::after,
 .evidence-hero::after {
   content: "";
-  width: min(13rem, 38vw);
-  height: 2px;
-  margin-top: 0.4rem;
-  background: linear-gradient(90deg, var(--brand), var(--warning), transparent);
+  width: 4rem;
+  height: 0.2rem;
+  margin-top: 0.35rem;
+  border-left: 0.65rem solid var(--warning);
+  background: var(--brand);
 }
 
 .hero p,
@@ -446,13 +448,16 @@ button:disabled,
   position: absolute;
   top: 1.15rem;
   right: 1.15rem;
-  width: 2.6rem;
-  height: 2.6rem;
-  border: 1px solid var(--border);
+  width: 0.36rem;
+  height: 0.36rem;
+  border: 0;
   border-radius: 50%;
-  background:
-    radial-gradient(circle, var(--brand) 0 0.12rem, transparent 0.15rem),
-    repeating-radial-gradient(circle, transparent 0 0.38rem, var(--border) 0.4rem 0.43rem);
+  background: var(--brand);
+  box-shadow:
+    0 0 0 0.42rem var(--panel),
+    0 0 0 0.5rem var(--border),
+    0 0 0 0.9rem var(--panel),
+    0 0 0 0.98rem var(--border);
   opacity: 0.62;
   pointer-events: none;
 }
@@ -879,6 +884,9 @@ button:disabled,
 @media (max-width: 48rem) {
   .topbar {
     position: relative;
+  }
+
+  .topbar-inner {
     grid-template-columns: minmax(0, 1fr) auto;
   }
 

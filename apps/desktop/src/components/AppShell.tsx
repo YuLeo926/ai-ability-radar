@@ -28,28 +28,29 @@ export function AppShell() {
         {t("skip.main")}
       </a>
       <header className="topbar">
-        <Link className="brand" to="/">
-          <span aria-hidden="true" className="brand-mark">
-          </span>
-          <span>{t("app.name")}</span>
-        </Link>
-        <nav aria-label={t("nav.label")} className="main-navigation">
-          <Link
-            aria-current={startActive ? "page" : undefined}
-            className={navClassName(startActive)}
-            to="/"
-          >
-            {t("nav.start")}
+        <div className="topbar-inner">
+          <Link className="brand" to="/">
+            <span aria-hidden="true" className="brand-mark" />
+            <span>{t("app.name")}</span>
           </Link>
-          <Link
-            aria-current={historyActive ? "page" : undefined}
-            className={navClassName(historyActive)}
-            to="/history"
-          >
-            {t("nav.history")}
-          </Link>
-        </nav>
-        <ThemeToggle />
+          <nav aria-label={t("nav.label")} className="main-navigation">
+            <Link
+              aria-current={startActive ? "page" : undefined}
+              className={navClassName(startActive)}
+              to="/"
+            >
+              {t("nav.start")}
+            </Link>
+            <Link
+              aria-current={historyActive ? "page" : undefined}
+              className={navClassName(historyActive)}
+              to="/history"
+            >
+              {t("nav.history")}
+            </Link>
+          </nav>
+          <ThemeToggle />
+        </div>
       </header>
       <div className="app-content">
         <Outlet />
