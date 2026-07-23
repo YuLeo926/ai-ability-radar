@@ -31,6 +31,7 @@ and Windows 11 VM evidence is still Pending.
 
 - [ ] cargo fmt, clippy, tests, npm tests, build, and axe pass.
 - [ ] Windows 10 and 11 acceptance matrix is complete.
+- [ ] Claude Desktop 客户端可见选择器识别／诚实回退已在受支持的 Windows 真机上人工验证；synthetic tests 不能满足此 gate。
 - [ ] NSIS and MSI install, launch, and uninstall.
 - [ ] 免安装 ZIP 在干净的 Windows 10 和 Windows 11 x64 VM 中解压并启动。
 - [ ] 免安装 ZIP 不创建安装项，数据仍写入 `%APPDATA%\com.aiability.radar`。

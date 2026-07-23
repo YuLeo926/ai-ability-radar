@@ -13,6 +13,7 @@ and a pass/fail evidence link. Code inspection is never a manual pass.
 | Portable data remains in `%APPDATA%\com.aiability.radar` | Yes | Yes | No | Yes |
 | Portable inner checksum verification | Yes | Yes | Yes | Yes |
 | Client run without Node.js | Yes | Yes | Partial | Yes |
+| Claude Desktop visible-selector identification / honest fallback | Yes | Yes | Partial | Yes |
 | Codex fake CLI 2/2 | Yes | Yes | Yes | Yes |
 | Claude fake CLI 2/2 | Yes | Yes | Yes | Yes |
 | Missing Node blocks before CLI call | Yes | Yes | Yes | Yes |
@@ -34,6 +35,10 @@ build, the real coordinator with both fake adapters, cancellation supervision,
 adversarial scans, and NSIS/MSI bundle attempts. Automated evidence does not
 replace either clean-VM column.
 
+The Claude Desktop row is `Partial` only because selector behavior has
+synthetic coverage. Synthetic tests cannot satisfy either Windows real-machine
+evidence cell or the release checklist gate.
+
 ## Clean-VM evidence ledger
 
 No clean Windows 10 or Windows 11 VM was available during Task 23. Every
@@ -47,6 +52,7 @@ applicable manual cell therefore remains Pending.
 | Portable data remains in `%APPDATA%\com.aiability.radar` | Pending — tester/date/app commit/OS build/pass-fail link: not recorded; clean VM unavailable | Pending — tester/date/app commit/OS build/pass-fail link: not recorded; clean VM unavailable |
 | Portable inner checksum verification | Pending — tester/date/app commit/OS build/pass-fail link: not recorded; clean VM unavailable | Pending — tester/date/app commit/OS build/pass-fail link: not recorded; clean VM unavailable |
 | Client run without Node.js | Pending — tester/date/app commit/OS build/pass-fail link: not recorded; clean VM unavailable | Pending — tester/date/app commit/OS build/pass-fail link: not recorded; clean VM unavailable |
+| Claude Desktop visible-selector identification / honest fallback | Pending — tester/date/app commit/OS build/pass-fail link: not recorded; Claude Desktop not installed; no real-machine evidence | Pending — tester/date/app commit/OS build/pass-fail link: not recorded; Claude Desktop not installed; no real-machine evidence |
 | Codex fake CLI 2/2 | Pending — tester/date/app commit/OS build/pass-fail link: not recorded; clean VM unavailable | Pending — tester/date/app commit/OS build/pass-fail link: not recorded; clean VM unavailable |
 | Claude fake CLI 2/2 | Pending — tester/date/app commit/OS build/pass-fail link: not recorded; clean VM unavailable | Pending — tester/date/app commit/OS build/pass-fail link: not recorded; clean VM unavailable |
 | Missing Node blocks before CLI call | Pending — tester/date/app commit/OS build/pass-fail link: not recorded; clean VM unavailable | Pending — tester/date/app commit/OS build/pass-fail link: not recorded; clean VM unavailable |
