@@ -117,6 +117,40 @@ function withoutCssUrlPayloads(source: string): string {
   return output + source.slice(cursor);
 }
 
+function cssRuleBody(source: string, selector: string): string {
+  const selectorIndex = source.indexOf(selector);
+  if (selectorIndex < 0) {
+    throw new Error(`Missing CSS selector: ${selector}`);
+  }
+  const openingBrace = source.indexOf("{", selectorIndex + selector.length);
+  if (openingBrace < 0) {
+    throw new Error(`Missing opening brace for CSS selector: ${selector}`);
+  }
+
+  let depth = 1;
+  let cursor = openingBrace + 1;
+  while (cursor < source.length && depth > 0) {
+    if (source[cursor] === "{") depth += 1;
+    if (source[cursor] === "}") depth -= 1;
+    cursor += 1;
+  }
+  if (depth !== 0) {
+    throw new Error(`Missing closing brace for CSS selector: ${selector}`);
+  }
+  return source.slice(openingBrace + 1, cursor - 1);
+}
+
+function tokenDeclarations(selector: string): Record<string, string> {
+  const declarations: Record<string, string> = {};
+  const block = cssRuleBody(tokensCss, selector);
+  const declaration = /^\s*(--[\w-]+):\s*([\s\S]*?);\s*$/gm;
+  let match: RegExpExecArray | null;
+  while ((match = declaration.exec(block))) {
+    declarations[match[1]] = match[2].replace(/\s+/g, " ").trim();
+  }
+  return declarations;
+}
+
 function bootstrap(): Bootstrap {
   return {
     clientPack: {
@@ -630,12 +664,72 @@ describe("Task 21 accessibility baseline", () => {
   );
 
   test("shared tokens and shell background use the precision-radar palette", () => {
-    expect(tokensCss).toContain("--canvas: #f2f3ee;");
-    expect(tokensCss).toContain("--surface-strong: #d6e3de;");
-    expect(tokensCss).toContain("--grid-pattern: url(\"data:image/svg+xml,%3Csvg");
-    expect(tokensCss).toContain("--canvas: #0a1513;");
-    expect(tokensCss).toContain("--surface-strong: #284a43;");
-    expect(tokensCss).toContain("--on-brand: #071a17;");
+    const lightTokens = {
+      "--canvas": "#f2f3ee",
+      "--panel": "#fbfcf8",
+      "--panel-raised": "#ffffff",
+      "--surface-muted": "#e7eeea",
+      "--surface-strong": "#d6e3de",
+      "--text-primary": "#102824",
+      "--text-muted": "#4c6660",
+      "--border": "#b7c9c3",
+      "--border-strong": "#607d76",
+      "--brand": "#0b7067",
+      "--brand-strong": "#07584f",
+      "--brand-soft": "#d7ebe5",
+      "--mineral": "#315e70",
+      "--success": "#176c4f",
+      "--success-soft": "#dceee4",
+      "--warning": "#865400",
+      "--warning-soft": "#f5e6bf",
+      "--danger": "#96363b",
+      "--danger-soft": "#f5dfe1",
+      "--focus": "#145da0",
+      "--on-brand": "#ffffff",
+      "--scrim": "rgb(2 15 14 / 72%)",
+      "--grid-pattern": "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40' viewBox='0 0 40 40'%3E%3Cpath d='M40 0H0V40' fill='none' stroke='%230b7067' stroke-opacity='.055'/%3E%3C/svg%3E\")",
+      "--shadow-sm": "0 1px 2px rgb(16 40 36 / 8%)",
+      "--shadow-md": "0 14px 34px rgb(16 40 36 / 10%)",
+      "--radius-sm": "0.4rem",
+      "--radius-md": "0.75rem",
+      "--space-1": "0.25rem",
+      "--space-2": "0.5rem",
+      "--space-3": "0.75rem",
+      "--space-4": "1rem",
+      "--space-5": "1.5rem",
+      "--space-6": "2rem",
+      "--space-7": "3rem",
+      "--font-display": "\"Segoe UI Variable Display\", \"Microsoft YaHei UI\", \"Segoe UI\", sans-serif",
+      "--font-body": "\"Segoe UI Variable Text\", \"Microsoft YaHei UI\", \"Segoe UI\", sans-serif",
+    };
+    const darkTokens = {
+      "--canvas": "#0a1513",
+      "--panel": "#10221f",
+      "--panel-raised": "#152b27",
+      "--surface-muted": "#1c3732",
+      "--surface-strong": "#284a43",
+      "--text-primary": "#edf6f2",
+      "--text-muted": "#b6cbc5",
+      "--border": "#3a5a53",
+      "--border-strong": "#78978f",
+      "--brand": "#78d4c5",
+      "--brand-strong": "#a0e7dc",
+      "--brand-soft": "#173e37",
+      "--mineral": "#91bfd0",
+      "--success": "#88d8af",
+      "--success-soft": "#173c2f",
+      "--warning": "#efc36d",
+      "--warning-soft": "#45371c",
+      "--danger": "#ff9ea4",
+      "--danger-soft": "#47272b",
+      "--focus": "#9dcaff",
+      "--on-brand": "#071a17",
+      "--grid-pattern": "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40' viewBox='0 0 40 40'%3E%3Cpath d='M40 0H0V40' fill='none' stroke='%2378d4c5' stroke-opacity='.055'/%3E%3C/svg%3E\")",
+    };
+
+    expect(tokenDeclarations(":root")).toEqual(lightTokens);
+    expect(tokenDeclarations(':root[data-theme="dark"]')).toEqual(darkTokens);
+    expect(tokenDeclarations(":root:not([data-theme])")).toEqual(darkTokens);
 
     const appCss = readFileSync(join(sourceRoot, "styles", "app.css"), "utf8");
     expect(appCss).toMatch(
@@ -650,6 +744,20 @@ describe("Task 21 accessibility baseline", () => {
     expect(appCss).toMatch(
       /\.target-card::after\s*\{[\s\S]*border-radius:\s*50%;[\s\S]*box-shadow:/,
     );
+    const appDeclarations = withoutCssUrlPayloads(appCss);
+    expect(appDeclarations).not.toMatch(/#[0-9a-f]{3,8}\b/i);
+    expect(appDeclarations).not.toMatch(
+      /\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color)\s*\(/i,
+    );
+
+    const narrowTopbar = cssRuleBody(
+      appCss,
+      "@media (max-width: 48rem)",
+    );
+    expect(narrowTopbar).toMatch(
+      /\.topbar-inner\s*\{\s*position:\s*relative;\s*grid-template-columns:\s*minmax\(0, 1fr\) auto;/,
+    );
+    expect(narrowTopbar).not.toMatch(/\.topbar\s*\{/);
   });
 
   test("the precision-radar surface uses no CSS gradients", () => {

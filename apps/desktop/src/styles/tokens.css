@@ -21,6 +21,7 @@
   --danger-soft: #f5dfe1;
   --focus: #145da0;
   --on-brand: #ffffff;
+  --scrim: rgb(2 15 14 / 72%);
   --grid-pattern: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40' viewBox='0 0 40 40'%3E%3Cpath d='M40 0H0V40' fill='none' stroke='%230b7067' stroke-opacity='.055'/%3E%3C/svg%3E");
   --shadow-sm: 0 1px 2px rgb(16 40 36 / 8%);
   --shadow-md: 0 14px 34px rgb(16 40 36 / 10%);

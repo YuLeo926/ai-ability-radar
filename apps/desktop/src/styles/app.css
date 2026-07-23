@@ -791,7 +791,7 @@ button:disabled,
 }
 
 .app-shell .report-review-backdrop {
-  background: rgb(2 15 14 / 72%);
+  background: var(--scrim);
 }
 
 .app-shell .report-review-dialog {
@@ -882,11 +882,8 @@ button:disabled,
 }
 
 @media (max-width: 48rem) {
-  .topbar {
-    position: relative;
-  }
-
   .topbar-inner {
+    position: relative;
     grid-template-columns: minmax(0, 1fr) auto;
   }
 
