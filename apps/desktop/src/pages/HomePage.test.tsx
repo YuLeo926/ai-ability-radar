@@ -1,4 +1,4 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { expect, test, vi } from "vitest";
@@ -371,6 +371,81 @@ test("sanitizes inline CLI refresh errors without exposing objects", async () =>
   expect(safeFallback).toHaveTextContent("无法重新检测 CLI，请重试。");
   expect(safeFallback).not.toHaveTextContent("[object Object]");
   expect(safeFallback).not.toHaveTextContent("secret stack");
+});
+
+test("sanitizes C1 controls from a string CLI refresh rejection", async () => {
+  const refresh = deferred<Bootstrap>();
+  const load = vi
+    .fn<() => Promise<Bootstrap>>()
+    .mockResolvedValueOnce(readyBootstrap())
+    .mockImplementationOnce(() => refresh.promise);
+  const user = userEvent.setup();
+  renderHome(backendFor(load));
+
+  const cliSection = await screen.findByRole("region", { name: "编程 CLI" });
+  await user.click(
+    within(cliSection).getByRole("button", { name: "重新检测 CLI" }),
+  );
+  await act(async () => {
+    refresh.reject("  正常中文\u0085重新\u009b检测失败  ");
+    await refresh.promise.catch(() => undefined);
+  });
+
+  const alert = screen.getByRole("alert");
+  expect(alert).toHaveTextContent("正常中文 重新 检测失败");
+  expect(alert.textContent).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+});
+
+test("guards a rapid repeated CLI refresh before React rerenders", async () => {
+  const refresh = deferred<Bootstrap>();
+  const load = vi
+    .fn<() => Promise<Bootstrap>>()
+    .mockResolvedValueOnce(readyBootstrap())
+    .mockImplementationOnce(() => refresh.promise);
+  renderHome(backendFor(load));
+
+  const refreshButton = await screen.findByRole("button", {
+    name: "重新检测 CLI",
+  });
+  fireEvent.click(refreshButton);
+  fireEvent.click(refreshButton);
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(load).toHaveBeenCalledTimes(2);
+
+  await act(async () => {
+    refresh.resolve(readyBootstrap());
+    await refresh.promise;
+  });
+  expect(screen.getByRole("button", { name: "重新检测 CLI" })).toBeEnabled();
+});
+
+test("ignores a settled pending refresh after Home unmounts", async () => {
+  const refresh = deferred<Bootstrap>();
+  const load = vi
+    .fn<() => Promise<Bootstrap>>()
+    .mockResolvedValueOnce(readyBootstrap())
+    .mockImplementationOnce(() => refresh.promise);
+  const user = userEvent.setup();
+  const view = renderHome(backendFor(load));
+
+  await user.click(
+    within(await screen.findByRole("region", { name: "编程 CLI" })).getByRole(
+      "button",
+      { name: "重新检测 CLI" },
+    ),
+  );
+  expect(load).toHaveBeenCalledTimes(2);
+  view.unmount();
+
+  await act(async () => {
+    refresh.reject(new Error("late refresh failure"));
+    await refresh.promise.catch(() => undefined);
+  });
+
+  expect(view.container).toBeEmptyDOMElement();
+  expect(screen.queryByRole("heading", { name: "选择要体检的 AI" })).not.toBeInTheDocument();
 });
 
 test.each([

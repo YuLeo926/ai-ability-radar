@@ -51,7 +51,7 @@ function visibleError(reason: unknown, fallback: string): string {
   const value =
     reason instanceof Error ? reason.message : typeof reason === "string" ? reason : "";
   const sanitized = value
-    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 200);
