@@ -163,6 +163,50 @@ test("multiple renders distinct radio choices and applies only a chosen result",
   });
 });
 
+test("duplicate-only multiple follows the clean single path", async () => {
+  const first = candidate({ reasoningEffort: undefined });
+  const detect = vi.fn(async () => ({
+    status: "multiple" as const,
+    candidates: [first, { ...first, reasoningEffort: null }],
+  }));
+  const onApply = vi.fn();
+
+  render(panel(detect, { formDirty: false, onApply }));
+
+  await waitFor(() =>
+    expect(onApply).toHaveBeenCalledWith({ model: "GPT-5.6" }),
+  );
+  expect(screen.queryByRole("radiogroup")).not.toBeInTheDocument();
+  expect(
+    screen.queryByText("识别到多个客户端选择，请选择后应用"),
+  ).not.toBeInTheDocument();
+});
+
+test("duplicate-only multiple uses latest dirty state before explicit single apply", async () => {
+  const pending = deferred<ClientSelectionDetection>();
+  const first = candidate({ model: undefined });
+  const detect = vi.fn(() => pending.promise);
+  const onApply = vi.fn();
+  const user = userEvent.setup();
+  const view = render(panel(detect, { formDirty: false, onApply }));
+
+  view.rerender(panel(detect, { formDirty: true, onApply }));
+  await act(async () => {
+    pending.resolve({
+      status: "multiple",
+      candidates: [first, { ...first, model: null }],
+    });
+    await pending.promise;
+  });
+
+  expect(onApply).not.toHaveBeenCalled();
+  expect(screen.queryByRole("radiogroup")).not.toBeInTheDocument();
+  await user.click(
+    await screen.findByRole("button", { name: "应用识别结果" }),
+  );
+  expect(onApply).toHaveBeenCalledWith({ reasoningEffort: "max" });
+});
+
 test("a single result arriving after typing requires explicit apply", async () => {
   const pending = deferred<ClientSelectionDetection>();
   const detect = vi.fn(() => pending.promise);

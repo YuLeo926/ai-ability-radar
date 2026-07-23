@@ -13,6 +13,7 @@ import type {
   TaskOutcome,
   TaskResult,
 } from "./backend";
+import { clientSelectionCandidateKey } from "../domain/clientSelection";
 
 const targetKinds = new Set<TargetKind>([
   "chat_gpt_client",
@@ -197,7 +198,10 @@ export function isSafeClientSelectionDetection(
     return value.candidates.length === 1;
   }
   if (value.status === "multiple") {
-    return value.candidates.length >= 2;
+    return (
+      value.candidates.length >= 2 &&
+      new Set(value.candidates.map(clientSelectionCandidateKey)).size >= 2
+    );
   }
   return value.candidates.length === 0;
 }

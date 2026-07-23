@@ -3,6 +3,10 @@ import type {
   ClientSelectionCandidate,
   ClientSelectionDetection,
 } from "../api/backend";
+import {
+  clientSelectionCandidateKey,
+  distinctClientSelectionCandidates,
+} from "../domain/clientSelection";
 
 export const CLIENT_AUTO_DETECT_KEY =
   "ai-ability-radar.client-selection-auto-detect";
@@ -54,28 +58,6 @@ function readAutoDetectionPreference(): boolean {
   } catch {
     return true;
   }
-}
-
-function candidateKey(candidate: ClientSelectionCandidate): string {
-  return JSON.stringify([
-    candidate.model ?? null,
-    candidate.reasoningEffort ?? null,
-    candidate.surface,
-    candidate.source,
-    candidate.confidence,
-  ]);
-}
-
-function distinctCandidates(
-  candidates: ClientSelectionCandidate[],
-): ClientSelectionCandidate[] {
-  const seen = new Set<string>();
-  return candidates.filter((candidate) => {
-    const key = candidateKey(candidate);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
 }
 
 function appliedSelection(
@@ -171,6 +153,19 @@ export function ClientSelectionPanel({
   autoDetectionEnabledRef.current = autoDetectionEnabled;
   targetRef.current = target;
 
+  function acceptSingleCandidate(candidate: ClientSelectionCandidate) {
+    const requiresApply = formDirtyRef.current;
+    setState({
+      kind: "single",
+      candidate,
+      message: `已从 ${surfaceLabels[candidate.surface]} 客户端界面读取，待确认`,
+      requiresApply,
+    });
+    if (!requiresApply) {
+      onApplyRef.current(appliedSelection(candidate));
+    }
+  }
+
   useEffect(() => {
     mountedRef.current = true;
     return () => {
@@ -229,23 +224,21 @@ export function ClientSelectionPanel({
       if (result.status === "detected") {
         const candidate = result.candidates[0];
         if (!candidate) return;
-        const requiresApply = formDirtyRef.current;
-        setState({
-          kind: "single",
-          candidate,
-          message: `已从 ${surfaceLabels[candidate.surface]} 客户端界面读取，待确认`,
-          requiresApply,
-        });
-        if (!requiresApply) {
-          onApplyRef.current(appliedSelection(candidate));
-        }
+        acceptSingleCandidate(candidate);
         return;
       }
 
       if (result.status === "multiple") {
+        const candidates = distinctClientSelectionCandidates(
+          result.candidates,
+        );
+        if (candidates.length === 1) {
+          acceptSingleCandidate(candidates[0]);
+          return;
+        }
         setState({
           kind: "multiple",
-          candidates: distinctCandidates(result.candidates),
+          candidates,
           message: "识别到多个客户端选择，请选择后应用",
           selectedKey: null,
         });
@@ -311,7 +304,8 @@ export function ClientSelectionPanel({
   function applySelected() {
     if (state.kind !== "multiple" || state.selectedKey === null) return;
     const selected = state.candidates.find(
-      (candidate) => candidateKey(candidate) === state.selectedKey,
+      (candidate) =>
+        clientSelectionCandidateKey(candidate) === state.selectedKey,
     );
     if (selected) {
       onApplyRef.current(appliedSelection(selected));
@@ -365,7 +359,7 @@ export function ClientSelectionPanel({
         >
           <legend className="sr-only">客户端识别结果</legend>
           {state.candidates.map((candidate) => {
-            const key = candidateKey(candidate);
+            const key = clientSelectionCandidateKey(candidate);
             return (
               <label className="selection-option" key={key}>
                 <input

@@ -695,48 +695,63 @@ test("a model-only result preserves the user's effort and records model provenan
   });
 });
 
-test("editing either field after automatic apply marks it edited and returns to manual provenance", async () => {
-  const backend = fakeBackend({
-    detectClientSelection: vi.fn<Backend["detectClientSelection"]>(
-      async () => ({
-        status: "detected",
-        candidates: [
-          {
-            model: "GPT-5.6",
-            reasoningEffort: "max",
-            surface: "codex_desktop",
-            source: "windows_accessibility",
-            confidence: "visible_selector",
-          },
-        ],
-      }),
-    ),
-  });
-  const user = userEvent.setup();
-  renderWizard(backend);
-  const model = await screen.findByLabelText("当前显示的模型");
-  expect(model).toHaveValue("GPT-5.6");
+test.each([
+  ["model", "GPT-Manual", "max"],
+  ["reasoning effort", "GPT-5.6", "high"],
+] as const)(
+  "editing %s after automatic apply marks it edited and returns to manual provenance",
+  async (field, expectedModel, expectedEffort) => {
+    const backend = fakeBackend({
+      detectClientSelection: vi.fn<Backend["detectClientSelection"]>(
+        async () => ({
+          status: "detected",
+          candidates: [
+            {
+              model: "GPT-5.6",
+              reasoningEffort: "max",
+              surface: "codex_desktop",
+              source: "windows_accessibility",
+              confidence: "visible_selector",
+            },
+          ],
+        }),
+      ),
+    });
+    const user = userEvent.setup();
+    renderWizard(backend);
+    const model = await screen.findByLabelText("当前显示的模型");
+    expect(model).toHaveValue("GPT-5.6");
 
-  await user.clear(model);
-  await user.type(model, "GPT-Manual");
-  expect(
-    screen.getByText("用户已修改，请确认当前填写值"),
-  ).toBeInTheDocument();
-  await user.click(screen.getByLabelText("我会为每道题新建空白对话"));
-  await user.click(screen.getByRole("button", { name: "开始快速体检" }));
-  await screen.findByText("只输出第 1 题答案");
+    if (field === "model") {
+      await user.clear(model);
+      await user.type(model, expectedModel);
+    } else {
+      await user.selectOptions(
+        screen.getByLabelText("推理档位（没有显示可留空）"),
+        expectedEffort,
+      );
+    }
+    expect(
+      screen.getByText("用户已修改，请确认当前填写值"),
+    ).toBeInTheDocument();
+    await user.click(screen.getByLabelText("我会为每道题新建空白对话"));
+    await user.click(
+      screen.getByRole("button", { name: "开始快速体检" }),
+    );
+    await screen.findByText("只输出第 1 题答案");
 
-  expect(backend.startManualRun).toHaveBeenCalledWith({
-    target: {
-      kind: "chat_gpt_client",
-      reportedModel: "GPT-Manual",
-      reasoningEffort: "max",
-      modelSource: "manual",
-      modelVerification: "user_confirmed",
-    },
-    mode: "quick",
-  });
-});
+    expect(backend.startManualRun).toHaveBeenCalledWith({
+      target: {
+        kind: "chat_gpt_client",
+        reportedModel: expectedModel,
+        reasoningEffort: expectedEffort,
+        modelSource: "manual",
+        modelVerification: "user_confirmed",
+      },
+      mode: "quick",
+    });
+  },
+);
 
 test("detection failure leaves manual fields usable and start behavior unchanged", async () => {
   const backend = fakeBackend({

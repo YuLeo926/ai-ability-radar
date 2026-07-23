@@ -285,6 +285,34 @@ describe("isSafeClientSelectionDetection", () => {
       }),
     ).toBe(false);
   });
+
+  test("requires multiple to contain at least two distinct normalized candidates", () => {
+    const duplicate = selectionCandidate();
+    const {
+      reasoningEffort,
+      surface,
+      source,
+      confidence,
+    } = selectionCandidate();
+    const modelAbsent = { reasoningEffort, surface, source, confidence };
+    const modelNull = { ...modelAbsent, model: null };
+    const { model } = selectionCandidate();
+    const effortAbsent = { model, surface, source, confidence };
+    const effortNull = { ...effortAbsent, reasoningEffort: null };
+
+    for (const candidates of [
+      [duplicate, { ...duplicate }],
+      [modelAbsent, modelNull],
+      [effortAbsent, effortNull],
+    ]) {
+      expect(
+        isSafeClientSelectionDetection({
+          status: "multiple",
+          candidates,
+        }),
+      ).toBe(false);
+    }
+  });
 });
 
 describe("scoreableResultScore", () => {
