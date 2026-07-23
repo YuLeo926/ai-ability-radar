@@ -190,6 +190,12 @@ function runDetail(): RunDetail {
 function fakeBackend(overrides: Partial<Backend> = {}): Backend {
   return {
     getBootstrap: vi.fn(async () => bootstrap()),
+    detectClientSelection: vi.fn<Backend["detectClientSelection"]>(
+      async () => ({
+        status: "not_running",
+        candidates: [],
+      }),
+    ),
     startManualRun: vi.fn(async (input) => ({
       ...runRecord(),
       target: input.target,
@@ -347,6 +353,46 @@ describe("Task 21 accessibility baseline", () => {
     expect(
       screen.getByRole("button", { name: "检查并导出可分享报告" }),
     ).toHaveFocus();
+  });
+
+  test("multiple client selection exposes labelled radio and checkbox controls without serious axe violations", async () => {
+    const manual = renderRoute(
+      "/manual/chat_gpt_client",
+      fakeBackend({
+        detectClientSelection: vi.fn<Backend["detectClientSelection"]>(
+          async () => ({
+            status: "multiple",
+            candidates: [
+              {
+                model: "GPT-5.6",
+                reasoningEffort: "high",
+                surface: "chatgpt",
+                source: "windows_accessibility",
+                confidence: "visible_selector",
+              },
+              {
+                model: "GPT-5.6 Codex",
+                reasoningEffort: "max",
+                surface: "codex_desktop",
+                source: "windows_accessibility",
+                confidence: "best_effort",
+              },
+            ],
+          }),
+        ),
+      }),
+    );
+
+    const choices = await screen.findByRole("radiogroup", {
+      name: "客户端识别结果",
+    });
+    expect(choices.querySelectorAll('input[type="radio"]')).toHaveLength(2);
+    expect(
+      screen.getByRole("checkbox", {
+        name: "进入设置页时自动读取客户端可见选择器",
+      }),
+    ).toBeInTheDocument();
+    await expectNoSeriousAxeViolations(manual.container);
   });
 
   test("manual task, CLI progress, history empty/confirmation, and not-found pass axe", async () => {

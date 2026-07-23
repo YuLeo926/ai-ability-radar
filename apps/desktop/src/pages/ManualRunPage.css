@@ -74,6 +74,92 @@
   padding-top: 0.5rem;
 }
 
+.client-selection-panel {
+  display: grid;
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  gap: 0.85rem;
+  background: var(--surface-muted);
+}
+
+.selection-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.selection-heading > div {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.selection-heading h2,
+.selection-heading p,
+.selection-status,
+.selection-edited {
+  margin: 0;
+}
+
+.selection-setting,
+.selection-option {
+  display: flex;
+  gap: 0.7rem;
+  align-items: flex-start;
+}
+
+.run-page .selection-setting input,
+.run-page .selection-option input {
+  width: 1.2rem;
+  min-width: 1.2rem;
+  min-height: 1.2rem;
+  margin-top: 0.25rem;
+  accent-color: var(--brand);
+}
+
+.selection-status {
+  color: var(--text-muted);
+}
+
+.selection-candidate,
+.selection-option {
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-raised);
+}
+
+.selection-options {
+  display: grid;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  margin: 0;
+  gap: 0.65rem;
+}
+
+.selection-candidate-copy {
+  display: grid;
+  min-width: 0;
+  gap: 0.15rem;
+}
+
+.selection-candidate-primary {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.selection-candidate-meta {
+  color: var(--text-muted);
+  font-size: 0.88rem;
+}
+
+.selection-edited {
+  color: var(--warning);
+  font-weight: 700;
+}
+
 .run-page .field {
   display: grid;
   gap: 0.45rem;
@@ -258,6 +344,10 @@
 @media (max-width: 42rem) {
   .manual-fields {
     grid-template-columns: 1fr;
+  }
+
+  .selection-heading {
+    display: grid;
   }
 
   .run-page h1 {

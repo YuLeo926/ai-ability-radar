@@ -7,7 +7,12 @@ import {
 } from "react-router-dom";
 import { useBackend } from "../api/BackendContext";
 import { isSafeRunRecord } from "../api/runtimeValidation";
+import { ClientSelectionPanel } from "../components/ClientSelectionPanel";
 import { ReasoningEffortField } from "../components/ReasoningEffortField";
+import type {
+  ModelSource,
+  ModelVerification,
+} from "../domain/modelProvenance";
 import {
   formatReasoningEffort,
   normalizeReasoningEffortForTarget,
@@ -18,6 +23,7 @@ import {
 } from "../domain/reportedModel";
 import { useT } from "../i18n/I18nContext";
 import type {
+  Backend,
   ManualStep,
   RunRecord,
   TargetKind,
@@ -100,9 +106,14 @@ function SetupPage({
   onModelChange,
   onReasoningEffortChange,
   onReasoningValidationChange,
+  onSelectionApply,
   onStart,
+  selectionEdited,
+  selectionFormDirty,
+  detectClientSelection,
 }: {
   busy: boolean;
+  detectClientSelection: Backend["detectClientSelection"];
   error: string;
   freshChat: boolean;
   kind: ClientTargetKind;
@@ -114,7 +125,13 @@ function SetupPage({
   onModelChange(value: string): void;
   onReasoningEffortChange(value: string): void;
   onReasoningValidationChange(error: string | null): void;
+  onSelectionApply(value: {
+    model?: string;
+    reasoningEffort?: string;
+  }): void;
   onStart(): void;
+  selectionEdited: boolean;
+  selectionFormDirty: boolean;
 }) {
   const modelError = reportedModelError(model);
   const showModelError = modelTouched && modelError;
@@ -140,6 +157,17 @@ function SetupPage({
           <p>这里测量端到端客户端表现，不是底层模型的“智商”。</p>
           <p>原始回答只保存在本机，不会自动上传。</p>
         </aside>
+
+        {!busy ? (
+          <ClientSelectionPanel
+            detect={detectClientSelection}
+            edited={selectionEdited}
+            enabled
+            formDirty={selectionFormDirty}
+            onApply={onSelectionApply}
+            target={kind}
+          />
+        ) : null}
 
         <div className="manual-fields">
           <label className="field">
@@ -580,6 +608,11 @@ function ManualWizard({
   const [cancelError, setCancelError] = useState("");
   const [model, setModel] = useState("");
   const [modelTouched, setModelTouched] = useState(false);
+  const [modelSource, setModelSource] = useState<ModelSource>("manual");
+  const [modelVerification] =
+    useState<ModelVerification>("user_confirmed");
+  const [formDirty, setFormDirty] = useState(false);
+  const [selectionWasApplied, setSelectionWasApplied] = useState(false);
   const [reasoningEffort, setReasoningEffort] = useState("");
   const [reasoningError, setReasoningError] = useState<string | null>(null);
   const [freshChat, setFreshChat] = useState(false);
@@ -842,8 +875,8 @@ function ManualWizard({
       kind,
       reportedModel: model.trim(),
       reasoningEffort: normalizedReasoningEffort || null,
-      modelSource: "manual",
-      modelVerification: "user_confirmed",
+      modelSource,
+      modelVerification,
     };
     let run: RunRecord;
     try {
@@ -1017,11 +1050,28 @@ function ManualWizard({
     setCancelConfirm(false);
     setCancelError("");
   };
+  const applyClientSelection = (selection: {
+    model?: string;
+    reasoningEffort?: string;
+  }) => {
+    if (selection.model) {
+      setModel(selection.model);
+      setModelTouched(false);
+      setModelSource("windows_accessibility");
+    }
+    if (selection.reasoningEffort) {
+      setReasoningEffort(selection.reasoningEffort);
+      setReasoningError(null);
+    }
+    setFormDirty(false);
+    setSelectionWasApplied(true);
+  };
 
   if (state.kind === "setup" || state.kind === "starting") {
     return (
       <SetupPage
         busy={state.kind === "starting"}
+        detectClientSelection={backend.detectClientSelection}
         error={state.kind === "setup" ? state.error : ""}
         freshChat={freshChat}
         kind={kind}
@@ -1031,12 +1081,21 @@ function ManualWizard({
         onModelChange={(value) => {
           setModelTouched(true);
           setModel(value);
+          setFormDirty(true);
+          setModelSource("manual");
         }}
-        onReasoningEffortChange={setReasoningEffort}
+        onReasoningEffortChange={(value) => {
+          setReasoningEffort(value);
+          setFormDirty(true);
+          setModelSource("manual");
+        }}
         onReasoningValidationChange={setReasoningError}
+        onSelectionApply={applyClientSelection}
         onStart={() => void start()}
         reasoningError={reasoningError}
         reasoningEffort={reasoningEffort}
+        selectionEdited={selectionWasApplied && formDirty}
+        selectionFormDirty={formDirty}
       />
     );
   }

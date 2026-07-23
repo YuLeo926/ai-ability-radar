@@ -1,5 +1,7 @@
 import type {
   Category,
+  ClientSelectionCandidate,
+  ClientSelectionDetection,
   FailureKind,
   ModelSource,
   ModelVerification,
@@ -76,9 +78,128 @@ const infrastructureFailureKinds = new Set<FailureKind>([
   "infrastructure_timeout",
   "verifier_error",
 ]);
+const clientSelectionStatuses = new Set<ClientSelectionDetection["status"]>([
+  "detected",
+  "multiple",
+  "not_running",
+  "not_exposed",
+  "unsupported",
+  "timed_out",
+  "failed",
+]);
+const clientSelectionSurfaces = new Set<ClientSelectionCandidate["surface"]>([
+  "chatgpt",
+  "codex_desktop",
+  "claude",
+]);
+const clientSelectionConfidences = new Set<
+  ClientSelectionCandidate["confidence"]
+>(["visible_selector", "best_effort"]);
+const clientSelectionKeys = new Set([
+  "model",
+  "reasoningEffort",
+  "surface",
+  "source",
+  "confidence",
+]);
+const clientSelectionDetectionKeys = new Set(["status", "candidates"]);
+const forbiddenDisplayCharacter =
+  /[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}\uD800-\uDFFF]/u;
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function hasExactKeys(
+  value: Record<string, unknown>,
+  allowed: ReadonlySet<string>,
+  required: readonly string[],
+): boolean {
+  const keys = Object.keys(value);
+  return (
+    keys.every((key) => allowed.has(key)) &&
+    required.every((key) =>
+      Object.prototype.hasOwnProperty.call(value, key),
+    )
+  );
+}
+
+function isSafeDisplayText(value: unknown, maxCharacters: number): boolean {
+  return (
+    typeof value === "string" &&
+    value === value.trim() &&
+    value.length > 0 &&
+    Array.from(value).length <= maxCharacters &&
+    !forbiddenDisplayCharacter.test(value)
+  );
+}
+
+function isSafeClientSelectionCandidate(
+  value: unknown,
+): value is ClientSelectionCandidate {
+  if (
+    !isObject(value) ||
+    !hasExactKeys(value, clientSelectionKeys, [
+      "surface",
+      "source",
+      "confidence",
+    ])
+  ) {
+    return false;
+  }
+  const model =
+    value.model === undefined || value.model === null
+      ? null
+      : isSafeDisplayText(value.model, 120)
+        ? value.model
+        : false;
+  const reasoningEffort =
+    value.reasoningEffort === undefined || value.reasoningEffort === null
+      ? null
+      : isSafeDisplayText(value.reasoningEffort, 40)
+        ? value.reasoningEffort
+        : false;
+
+  return (
+    model !== false &&
+    reasoningEffort !== false &&
+    (model !== null || reasoningEffort !== null) &&
+    clientSelectionSurfaces.has(
+      value.surface as ClientSelectionCandidate["surface"],
+    ) &&
+    value.source === "windows_accessibility" &&
+    clientSelectionConfidences.has(
+      value.confidence as ClientSelectionCandidate["confidence"],
+    )
+  );
+}
+
+export function isSafeClientSelectionDetection(
+  value: unknown,
+): value is ClientSelectionDetection {
+  if (
+    !isObject(value) ||
+    !hasExactKeys(value, clientSelectionDetectionKeys, [
+      "status",
+      "candidates",
+    ]) ||
+    !clientSelectionStatuses.has(
+      value.status as ClientSelectionDetection["status"],
+    ) ||
+    !Array.isArray(value.candidates) ||
+    value.candidates.length > 24 ||
+    !value.candidates.every(isSafeClientSelectionCandidate)
+  ) {
+    return false;
+  }
+
+  if (value.status === "detected") {
+    return value.candidates.length === 1;
+  }
+  if (value.status === "multiple") {
+    return value.candidates.length >= 2;
+  }
+  return value.candidates.length === 0;
 }
 
 function isOptionalString(value: unknown): boolean {

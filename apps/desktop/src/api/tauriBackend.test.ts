@@ -16,8 +16,12 @@ beforeEach(() => {
   bridge.listen.mockReset();
 });
 
-test("uses exactly the eighteen reviewed commands and narrow camelCase payloads", async () => {
-  bridge.invoke.mockResolvedValue(undefined);
+test("uses exactly the nineteen reviewed commands and narrow camelCase payloads", async () => {
+  bridge.invoke.mockImplementation(async (command: string) =>
+    command === "detect_client_selection"
+      ? { status: "not_running", candidates: [] }
+      : undefined,
+  );
   const manualInput: StartRunInput = {
     target: {
       kind: "chat_gpt_client",
@@ -45,6 +49,7 @@ test("uses exactly the eighteen reviewed commands and narrow camelCase payloads"
   };
 
   await tauriBackend.getBootstrap();
+  await tauriBackend.detectClientSelection("chat_gpt_client");
   await tauriBackend.startManualRun(manualInput);
   await tauriBackend.nextManualStep("run-manual");
   await tauriBackend.submitManualAnswer(answer);
@@ -88,6 +93,10 @@ test("uses exactly the eighteen reviewed commands and narrow camelCase payloads"
 
   expect(bridge.invoke.mock.calls).toEqual([
     ["get_bootstrap"],
+    [
+      "detect_client_selection",
+      { input: { target: "chat_gpt_client" } },
+    ],
     ["start_manual_run", { input: manualInput }],
     ["next_manual_step", { runId: "run-manual" }],
     ["submit_manual_answer", { input: answer }],
@@ -148,6 +157,44 @@ test("uses exactly the eighteen reviewed commands and narrow camelCase payloads"
   expect(JSON.stringify(bridge.invoke.mock.calls)).not.toMatch(
     /destination|filePath|outputPath|artifactPath|program/i,
   );
+});
+
+test.each(["windowTitle", "processPath", "rawControls"])(
+  "rejects client selection data containing extra %s with the stable protocol error",
+  async (field) => {
+    bridge.invoke.mockResolvedValue({
+      status: "detected",
+      candidates: [
+        {
+          model: "GPT-5.6",
+          reasoningEffort: "max",
+          surface: "codex_desktop",
+          source: "windows_accessibility",
+          confidence: "visible_selector",
+          [field]: field === "rawControls" ? ["private"] : "private",
+        },
+      ],
+    });
+
+    await expect(
+      tauriBackend.detectClientSelection("chat_gpt_client"),
+    ).rejects.toThrow("本地模型识别返回了无效数据");
+    expect(bridge.invoke).toHaveBeenCalledWith("detect_client_selection", {
+      input: { target: "chat_gpt_client" },
+    });
+  },
+);
+
+test("propagates detect-client invoke failures without replacing them", async () => {
+  const invokeError = new Error("模拟本地识别失败");
+  bridge.invoke.mockRejectedValue(invokeError);
+
+  await expect(
+    tauriBackend.detectClientSelection("claude_client"),
+  ).rejects.toBe(invokeError);
+  expect(bridge.invoke).toHaveBeenCalledWith("detect_client_selection", {
+    input: { target: "claude_client" },
+  });
 });
 
 test("listens only to reviewed events, forwards payloads, and returns unlisten", async () => {

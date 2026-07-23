@@ -18,6 +18,26 @@ export type ModelVerification =
   | "unverified"
   | "legacy_unknown";
 
+export interface ClientSelectionCandidate {
+  model?: string | null;
+  reasoningEffort?: string | null;
+  surface: "chatgpt" | "codex_desktop" | "claude";
+  source: "windows_accessibility";
+  confidence: "visible_selector" | "best_effort";
+}
+
+export interface ClientSelectionDetection {
+  status:
+    | "detected"
+    | "multiple"
+    | "not_running"
+    | "not_exposed"
+    | "unsupported"
+    | "timed_out"
+    | "failed";
+  candidates: ClientSelectionCandidate[];
+}
+
 export type RunMode = "quick" | "deep";
 export type AvailabilityStatus =
   | "ready"
@@ -200,6 +220,9 @@ export type Unlisten = () => void;
 
 export interface Backend {
   getBootstrap(): Promise<Bootstrap>;
+  detectClientSelection(
+    target: "chat_gpt_client" | "claude_client",
+  ): Promise<ClientSelectionDetection>;
   startManualRun(input: StartRunInput): Promise<RunRecord>;
   nextManualStep(runId: string): Promise<ManualStep | null>;
   submitManualAnswer(input: SubmitManualAnswerInput): Promise<TaskResult>;

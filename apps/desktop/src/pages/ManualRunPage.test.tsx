@@ -16,6 +16,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import { BackendProvider } from "../api/BackendContext";
 import type {
   Backend,
+  ClientSelectionDetection,
   ManualStep,
   RunDetail,
   RunRecord,
@@ -100,6 +101,12 @@ function fakeBackend(overrides: Partial<Backend> = {}): Backend {
     getBootstrap: vi.fn(async () => {
       throw new Error("unused fake getBootstrap");
     }),
+    detectClientSelection: vi.fn<Backend["detectClientSelection"]>(
+      async () => ({
+        status: "not_running",
+        candidates: [],
+      }),
+    ),
     startManualRun: vi.fn(async (input) => ({
       ...makeRun(input.target.kind),
       target: input.target,
@@ -147,8 +154,23 @@ test("resume preview shows the persisted target snapshot before continuing it ex
   const resumeManualRun = vi.fn(async () => resumed);
   const nextManualStep = vi.fn(async () => makeStep(2));
   const startManualRun = vi.fn(async () => makeRun());
+  const detectClientSelection = vi.fn<Backend["detectClientSelection"]>(
+    async () => ({
+      status: "detected",
+      candidates: [
+        {
+          model: "GPT-Should-Not-Replace",
+          reasoningEffort: "max",
+          surface: "chatgpt",
+          source: "windows_accessibility",
+          confidence: "visible_selector",
+        },
+      ],
+    }),
+  );
   const backend = fakeBackend({
     getRunDetail: vi.fn(async () => ({ run: preview, taskResults: [] })),
+    detectClientSelection,
     resumeManualRun,
     nextManualStep,
     startManualRun,
@@ -175,6 +197,7 @@ test("resume preview shows the persisted target snapshot before continuing it ex
   });
   expect(nextManualStep).toHaveBeenCalledWith(RUN_ID);
   expect(startManualRun).not.toHaveBeenCalled();
+  expect(detectClientSelection).not.toHaveBeenCalled();
   expect(
     screen.queryByLabelText("当前显示的模型"),
   ).not.toBeInTheDocument();
@@ -531,6 +554,214 @@ test.each([
     });
   },
 );
+
+test("automatically applies a complete detected selection with Windows provenance", async () => {
+  const user = userEvent.setup();
+  const backend = fakeBackend({
+    detectClientSelection: vi.fn<Backend["detectClientSelection"]>(
+      async () => ({
+        status: "detected",
+        candidates: [
+          {
+            model: "GPT-5.6",
+            reasoningEffort: "max",
+            surface: "codex_desktop",
+            source: "windows_accessibility",
+            confidence: "visible_selector",
+          },
+        ],
+      }),
+    ),
+  });
+  renderWizard(backend);
+
+  expect(await screen.findByLabelText("当前显示的模型")).toHaveValue(
+    "GPT-5.6",
+  );
+  expect(
+    screen.getByLabelText("推理档位（没有显示可留空）"),
+  ).toHaveValue("max");
+  await user.click(screen.getByLabelText("我会为每道题新建空白对话"));
+  await user.click(screen.getByRole("button", { name: "开始快速体检" }));
+
+  await screen.findByText("只输出第 1 题答案");
+  expect(backend.startManualRun).toHaveBeenCalledWith({
+    target: {
+      kind: "chat_gpt_client",
+      reportedModel: "GPT-5.6",
+      reasoningEffort: "max",
+      modelSource: "windows_accessibility",
+      modelVerification: "user_confirmed",
+    },
+    mode: "quick",
+  });
+});
+
+test("an effort-only result preserves the manual model and manual provenance", async () => {
+  const pending = deferred<ClientSelectionDetection>();
+  const backend = fakeBackend({
+    detectClientSelection: vi.fn(() => pending.promise),
+  });
+  const user = userEvent.setup();
+  renderWizard(backend);
+
+  await user.type(screen.getByLabelText("当前显示的模型"), "Manual GPT");
+  await act(async () => {
+    pending.resolve({
+      status: "detected",
+      candidates: [
+        {
+          model: null,
+          reasoningEffort: "high",
+          surface: "chatgpt",
+          source: "windows_accessibility",
+          confidence: "visible_selector",
+        },
+      ],
+    });
+    await pending.promise;
+  });
+  expect(screen.getByLabelText("当前显示的模型")).toHaveValue("Manual GPT");
+  await user.click(
+    await screen.findByRole("button", { name: "应用识别结果" }),
+  );
+  expect(screen.getByLabelText("当前显示的模型")).toHaveValue("Manual GPT");
+  expect(
+    screen.getByLabelText("推理档位（没有显示可留空）"),
+  ).toHaveValue("high");
+
+  await user.click(screen.getByLabelText("我会为每道题新建空白对话"));
+  await user.click(screen.getByRole("button", { name: "开始快速体检" }));
+  await screen.findByText("只输出第 1 题答案");
+  expect(backend.startManualRun).toHaveBeenCalledWith({
+    target: {
+      kind: "chat_gpt_client",
+      reportedModel: "Manual GPT",
+      reasoningEffort: "high",
+      modelSource: "manual",
+      modelVerification: "user_confirmed",
+    },
+    mode: "quick",
+  });
+});
+
+test("a model-only result preserves the user's effort and records model provenance", async () => {
+  const pending = deferred<ClientSelectionDetection>();
+  const backend = fakeBackend({
+    detectClientSelection: vi.fn(() => pending.promise),
+  });
+  const user = userEvent.setup();
+  renderWizard(backend);
+
+  await user.selectOptions(
+    screen.getByLabelText("推理档位（没有显示可留空）"),
+    "high",
+  );
+  await act(async () => {
+    pending.resolve({
+      status: "detected",
+      candidates: [
+        {
+          model: "GPT-5.6",
+          reasoningEffort: null,
+          surface: "codex_desktop",
+          source: "windows_accessibility",
+          confidence: "best_effort",
+        },
+      ],
+    });
+    await pending.promise;
+  });
+  await user.click(
+    await screen.findByRole("button", { name: "应用识别结果" }),
+  );
+  expect(screen.getByLabelText("当前显示的模型")).toHaveValue("GPT-5.6");
+  expect(
+    screen.getByLabelText("推理档位（没有显示可留空）"),
+  ).toHaveValue("high");
+
+  await user.click(screen.getByLabelText("我会为每道题新建空白对话"));
+  await user.click(screen.getByRole("button", { name: "开始快速体检" }));
+  await screen.findByText("只输出第 1 题答案");
+  expect(backend.startManualRun).toHaveBeenCalledWith({
+    target: {
+      kind: "chat_gpt_client",
+      reportedModel: "GPT-5.6",
+      reasoningEffort: "high",
+      modelSource: "windows_accessibility",
+      modelVerification: "user_confirmed",
+    },
+    mode: "quick",
+  });
+});
+
+test("editing either field after automatic apply marks it edited and returns to manual provenance", async () => {
+  const backend = fakeBackend({
+    detectClientSelection: vi.fn<Backend["detectClientSelection"]>(
+      async () => ({
+        status: "detected",
+        candidates: [
+          {
+            model: "GPT-5.6",
+            reasoningEffort: "max",
+            surface: "codex_desktop",
+            source: "windows_accessibility",
+            confidence: "visible_selector",
+          },
+        ],
+      }),
+    ),
+  });
+  const user = userEvent.setup();
+  renderWizard(backend);
+  const model = await screen.findByLabelText("当前显示的模型");
+  expect(model).toHaveValue("GPT-5.6");
+
+  await user.clear(model);
+  await user.type(model, "GPT-Manual");
+  expect(
+    screen.getByText("用户已修改，请确认当前填写值"),
+  ).toBeInTheDocument();
+  await user.click(screen.getByLabelText("我会为每道题新建空白对话"));
+  await user.click(screen.getByRole("button", { name: "开始快速体检" }));
+  await screen.findByText("只输出第 1 题答案");
+
+  expect(backend.startManualRun).toHaveBeenCalledWith({
+    target: {
+      kind: "chat_gpt_client",
+      reportedModel: "GPT-Manual",
+      reasoningEffort: "max",
+      modelSource: "manual",
+      modelVerification: "user_confirmed",
+    },
+    mode: "quick",
+  });
+});
+
+test("detection failure leaves manual fields usable and start behavior unchanged", async () => {
+  const backend = fakeBackend({
+    detectClientSelection: vi.fn(async () => {
+      throw new Error("模拟识别失败");
+    }),
+  });
+  const user = userEvent.setup();
+  renderWizard(backend);
+
+  expect(await screen.findByRole("status")).toHaveTextContent("可手动填写");
+  await completeSetup(user, "Manual Model");
+  await user.click(screen.getByRole("button", { name: "开始快速体检" }));
+  await screen.findByText("只输出第 1 题答案");
+  expect(backend.startManualRun).toHaveBeenCalledWith({
+    target: {
+      kind: "chat_gpt_client",
+      reportedModel: "Manual Model",
+      reasoningEffort: null,
+      modelSource: "manual",
+      modelVerification: "user_confirmed",
+    },
+    mode: "quick",
+  });
+});
 
 test.each([
   ["chat_gpt_client", "ChatGPT 客户端"],
@@ -1232,7 +1463,9 @@ test("an invalid start response never interrupts or advances an untrusted return
   });
   renderWizard(backend);
   await completeSetup(user);
-  await user.click(screen.getByRole("button"));
+  await user.click(
+    screen.getByRole("button", { name: "开始快速体检" }),
+  );
 
   expect(await screen.findByRole("alert")).toBeInTheDocument();
   expect(interruptManualRun).not.toHaveBeenCalled();

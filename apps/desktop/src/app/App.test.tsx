@@ -27,6 +27,10 @@ const backend: Backend = {
     },
     targets: [],
   }),
+  detectClientSelection: async () => ({
+    status: "not_running",
+    candidates: [],
+  }),
   startManualRun: async () => {
     throw new Error("unused fake startManualRun");
   },

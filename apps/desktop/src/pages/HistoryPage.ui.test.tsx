@@ -61,6 +61,10 @@ function makeBackend(listRuns: Backend["listRuns"]): Backend {
     getBootstrap: async () => {
       throw new Error("unused fake getBootstrap");
     },
+    detectClientSelection: async () => ({
+      status: "not_running",
+      candidates: [],
+    }),
     startManualRun: async () => {
       throw new Error("unused fake startManualRun");
     },

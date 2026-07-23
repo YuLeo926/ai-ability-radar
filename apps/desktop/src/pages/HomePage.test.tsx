@@ -57,6 +57,10 @@ function readyBootstrap(): Bootstrap {
 function backendFor(load: () => Promise<Bootstrap>): Backend {
   return {
     getBootstrap: load,
+    detectClientSelection: async () => ({
+      status: "not_running",
+      candidates: [],
+    }),
     startManualRun: async () => {
       throw new Error("unused fake startManualRun");
     },

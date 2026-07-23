@@ -116,6 +116,12 @@ function detail(run: RunRecord): RunDetail {
 function fakeBackend(overrides: Partial<Backend> = {}): Backend {
   return {
     getBootstrap: vi.fn(async () => makeBootstrap()),
+    detectClientSelection: vi.fn<Backend["detectClientSelection"]>(
+      async () => ({
+        status: "not_running",
+        candidates: [],
+      }),
+    ),
     startManualRun: vi.fn(async () => {
       throw new Error("unused fake startManualRun");
     }),
@@ -149,6 +155,35 @@ function fakeBackend(overrides: Partial<Backend> = {}): Backend {
     ...overrides,
   };
 }
+
+test("CLI setup never renders or calls client model identification", async () => {
+  const detectClientSelection = vi.fn<Backend["detectClientSelection"]>(
+    async () => ({
+      status: "detected",
+      candidates: [
+        {
+          model: "must-not-appear",
+          reasoningEffort: "max",
+          surface: "codex_desktop",
+          source: "windows_accessibility",
+          confidence: "visible_selector",
+        },
+      ],
+    }),
+  );
+  const backend = fakeBackend({ detectClientSelection });
+
+  renderWizard(backend, "/cli/codex_cli");
+
+  await screen.findByRole("heading", { name: "Codex CLI 快速体检" });
+  expect(detectClientSelection).not.toHaveBeenCalled();
+  expect(
+    screen.queryByRole("checkbox", {
+      name: "进入设置页时自动读取客户端可见选择器",
+    }),
+  ).not.toBeInTheDocument();
+  expect(document.body).not.toHaveTextContent("must-not-appear");
+});
 
 test("resume route keeps preflight and cost acknowledgement before continuing the persisted CLI run", async () => {
   const user = userEvent.setup();

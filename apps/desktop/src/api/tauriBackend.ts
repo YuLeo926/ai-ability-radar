@@ -11,9 +11,19 @@ import type {
   RunRecord,
   TaskResult,
 } from "./backend";
+import { isSafeClientSelectionDetection } from "./runtimeValidation";
 
 export const tauriBackend: Backend = {
   getBootstrap: () => invoke<Bootstrap>("get_bootstrap"),
+  detectClientSelection: async (target) => {
+    const value = await invoke<unknown>("detect_client_selection", {
+      input: { target },
+    });
+    if (!isSafeClientSelectionDetection(value)) {
+      throw new Error("本地模型识别返回了无效数据");
+    }
+    return value;
+  },
   startManualRun: (input) =>
     invoke<RunRecord>("start_manual_run", { input }),
   nextManualStep: (runId) =>

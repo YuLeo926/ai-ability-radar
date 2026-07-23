@@ -6,6 +6,7 @@ import type {
   TaskResult,
 } from "./backend";
 import {
+  isSafeClientSelectionDetection,
   isSafeRunDetail,
   isSafeRunRecord,
   isSafeRunRecordList,
@@ -107,6 +108,184 @@ function makeDetail(
     taskResults,
   };
 }
+
+function selectionCandidate(overrides: Record<string, unknown> = {}) {
+  return {
+    model: "GPT-5.6",
+    reasoningEffort: "max",
+    surface: "codex_desktop",
+    source: "windows_accessibility",
+    confidence: "visible_selector",
+    ...overrides,
+  };
+}
+
+describe("isSafeClientSelectionDetection", () => {
+  test("accepts the exact reviewed statuses, candidates, and optional values", () => {
+    expect(
+      isSafeClientSelectionDetection({
+        status: "detected",
+        candidates: [selectionCandidate()],
+      }),
+    ).toBe(true);
+    expect(
+      isSafeClientSelectionDetection({
+        status: "multiple",
+        candidates: [
+          selectionCandidate({ reasoningEffort: null }),
+          selectionCandidate({
+            model: null,
+            reasoningEffort: "high",
+            surface: "chatgpt",
+            confidence: "best_effort",
+          }),
+        ],
+      }),
+    ).toBe(true);
+
+    for (const status of [
+      "not_running",
+      "not_exposed",
+      "unsupported",
+      "timed_out",
+      "failed",
+    ]) {
+      expect(
+        isSafeClientSelectionDetection({ status, candidates: [] }),
+      ).toBe(true);
+    }
+  });
+
+  test("rejects extra top-level and candidate identity or raw-data fields", () => {
+    for (const extra of [
+      { windowTitle: "private conversation" },
+      { processPath: "private-process-path" },
+      { rawControls: ["private text"] },
+    ]) {
+      expect(
+        isSafeClientSelectionDetection({
+          status: "detected",
+          candidates: [selectionCandidate()],
+          ...extra,
+        }),
+      ).toBe(false);
+      expect(
+        isSafeClientSelectionDetection({
+          status: "detected",
+          candidates: [selectionCandidate(extra)],
+        }),
+      ).toBe(false);
+    }
+  });
+
+  test("rejects unknown status, surface, source, and confidence enums", () => {
+    expect(
+      isSafeClientSelectionDetection({
+        status: "success",
+        candidates: [],
+      }),
+    ).toBe(false);
+    for (const candidate of [
+      selectionCandidate({ surface: "browser" }),
+      selectionCandidate({ source: "window_title" }),
+      selectionCandidate({ confidence: "guessed" }),
+    ]) {
+      expect(
+        isSafeClientSelectionDetection({
+          status: "detected",
+          candidates: [candidate],
+        }),
+      ).toBe(false);
+    }
+  });
+
+  test("enforces display-safe scalar lengths and non-empty candidate values", () => {
+    expect(
+      isSafeClientSelectionDetection({
+        status: "detected",
+        candidates: [
+          selectionCandidate({
+            model: "模".repeat(120),
+            reasoningEffort: "想".repeat(40),
+          }),
+        ],
+      }),
+    ).toBe(true);
+    expect(
+      isSafeClientSelectionDetection({
+        status: "detected",
+        candidates: [
+          selectionCandidate({
+            model: "😀".repeat(120),
+            reasoningEffort: null,
+          }),
+        ],
+      }),
+    ).toBe(true);
+
+    for (const candidate of [
+      selectionCandidate({ model: "模".repeat(121) }),
+      selectionCandidate({ reasoningEffort: "想".repeat(41) }),
+      selectionCandidate({ model: " GPT-5.6" }),
+      selectionCandidate({ model: "GPT\u0000-5.6" }),
+      selectionCandidate({ model: "GPT\u202e-5.6" }),
+      selectionCandidate({ model: "GPT-\ud800" }),
+      selectionCandidate({ reasoningEffort: "high\u200b" }),
+      selectionCandidate({ model: "", reasoningEffort: "high" }),
+      selectionCandidate({ model: null, reasoningEffort: " " }),
+      selectionCandidate({ model: null, reasoningEffort: null }),
+    ]) {
+      expect(
+        isSafeClientSelectionDetection({
+          status: "detected",
+          candidates: [candidate],
+        }),
+      ).toBe(false);
+    }
+  });
+
+  test("enforces the 24-candidate cap and exact status cardinality", () => {
+    const candidates = Array.from({ length: 24 }, (_, index) =>
+      selectionCandidate({ model: `GPT-${index}` }),
+    );
+    expect(
+      isSafeClientSelectionDetection({
+        status: "multiple",
+        candidates,
+      }),
+    ).toBe(true);
+    expect(
+      isSafeClientSelectionDetection({
+        status: "multiple",
+        candidates: [...candidates, selectionCandidate({ model: "GPT-25" })],
+      }),
+    ).toBe(false);
+    expect(
+      isSafeClientSelectionDetection({
+        status: "detected",
+        candidates: [],
+      }),
+    ).toBe(false);
+    expect(
+      isSafeClientSelectionDetection({
+        status: "detected",
+        candidates: candidates.slice(0, 2),
+      }),
+    ).toBe(false);
+    expect(
+      isSafeClientSelectionDetection({
+        status: "multiple",
+        candidates: candidates.slice(0, 1),
+      }),
+    ).toBe(false);
+    expect(
+      isSafeClientSelectionDetection({
+        status: "not_running",
+        candidates: candidates.slice(0, 1),
+      }),
+    ).toBe(false);
+  });
+});
 
 describe("scoreableResultScore", () => {
   test("matches the core scoring predicate exactly", () => {
