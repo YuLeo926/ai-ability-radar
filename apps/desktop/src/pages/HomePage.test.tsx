@@ -96,6 +96,16 @@ function backendFor(load: () => Promise<Bootstrap>): Backend {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
+
 function renderHome(backend: Backend) {
   return render(
     <MemoryRouter>
@@ -151,6 +161,149 @@ test("shows four stable targets in separate client and CLI groups", async () => 
     }),
   ).toBeInTheDocument();
   expect(screen.getByText("npm 安装")).toBeInTheDocument();
+});
+
+test("uses the precision-radar Home structure and separates CLI guidance", async () => {
+  renderHome(backendFor(async () => readyBootstrap()));
+
+  await screen.findByRole("heading", { name: "选择要体检的 AI" });
+  const hero = screen.queryByTestId("home-hero");
+  expect.soft(hero, "Home hero contract").not.toBeNull();
+  if (hero) {
+    expect.soft(hero).toHaveClass("home-hero");
+  }
+
+  const cliSection = screen.getByRole("region", { name: "编程 CLI" });
+  expect(
+    within(cliSection).getByRole("button", { name: "重新检测 CLI" }),
+  ).toBeInTheDocument();
+  expect(
+    within(cliSection).getByText("CLI 快速体检 · v1.0.0"),
+  ).toBeInTheDocument();
+
+  const guidance = screen.queryByTestId("cli-guidance");
+  expect.soft(guidance, "CLI guidance contract").not.toBeNull();
+  if (guidance) {
+    expect.soft(guidance).toHaveClass("cli-guidance");
+    expect.soft(guidance).toHaveTextContent("新增 PATH 目录后请重启应用");
+    expect.soft(guidance.closest(".section-heading-actions")).toBeNull();
+  }
+});
+
+test("refreshes CLI state in place and keeps retry failures inline", async () => {
+  const refreshed = readyBootstrap();
+  refreshed.targets = refreshed.targets.map((target) =>
+    target.kind === "codex_cli"
+      ? { ...target, version: "codex-cli 0.142.5" }
+      : target,
+  );
+  const firstRefresh = deferred<Bootstrap>();
+  const failedRefresh = deferred<Bootstrap>();
+  const load = vi
+    .fn<() => Promise<Bootstrap>>()
+    .mockResolvedValueOnce(readyBootstrap())
+    .mockImplementationOnce(() => firstRefresh.promise)
+    .mockImplementationOnce(() => failedRefresh.promise);
+  const user = userEvent.setup();
+  renderHome(backendFor(load));
+
+  const heading = await screen.findByRole("heading", {
+    name: "选择要体检的 AI",
+  });
+  const existingHero = heading.closest("section");
+  const existingCliSection = screen.getByRole("region", { name: "编程 CLI" });
+  const existingCards =
+    existingCliSection.querySelector<HTMLElement>(".target-grid");
+  if (!existingHero || !existingCards) {
+    throw new Error(
+      "expected the ready Home fixture to expose hero and target regions",
+    );
+  }
+
+  await user.click(
+    within(existingCliSection).getByRole("button", {
+      name: "重新检测 CLI",
+    }),
+  );
+  expect(load).toHaveBeenCalledTimes(2);
+  expect.soft(existingHero).toBeInTheDocument();
+  expect.soft(existingCards).toBeInTheDocument();
+  expect.soft(
+    screen.queryByRole("status", { name: "正在检查本机环境" }),
+  ).not.toBeInTheDocument();
+  const refreshingButton = screen.queryByRole("button", {
+    name: "正在重新检测…",
+  });
+  expect.soft(refreshingButton, "in-place refresh button").not.toBeNull();
+  if (refreshingButton) {
+    expect.soft(refreshingButton).toBeDisabled();
+  }
+  const refreshStatus = screen.queryByRole("status", {
+    name: "正在重新检测 CLI",
+  });
+  expect.soft(refreshStatus, "inline refresh status").not.toBeNull();
+
+  await act(async () => {
+    firstRefresh.resolve(refreshed);
+    await firstRefresh.promise;
+  });
+  const refreshedCliSection = screen.getByRole("region", { name: "编程 CLI" });
+  const refreshedCards =
+    refreshedCliSection.querySelector<HTMLElement>(".target-grid");
+  if (!refreshedCards) {
+    throw new Error("expected refreshed Home data to retain its target region");
+  }
+  expect.soft(existingHero).toBeInTheDocument();
+  expect.soft(existingCards).toBeInTheDocument();
+  expect.soft(refreshedCards).toBe(existingCards);
+  const updatedVersion = within(existingCards).queryByText(
+    "版本：codex-cli 0.142.5",
+  );
+  expect.soft(updatedVersion, "same card region updates").not.toBeNull();
+  expect.soft(
+    screen.queryByRole("status", { name: "正在检查本机环境" }),
+  ).not.toBeInTheDocument();
+
+  await user.click(
+    within(refreshedCliSection).getByRole("button", {
+      name: "重新检测 CLI",
+    }),
+  );
+  expect(load).toHaveBeenCalledTimes(3);
+  await act(async () => {
+    failedRefresh.reject(new Error("模拟 CLI 重新检测失败"));
+    await failedRefresh.promise.catch(() => undefined);
+  });
+
+  const cliAfterError = screen.queryByRole("region", { name: "编程 CLI" });
+  expect.soft(cliAfterError).toBe(refreshedCliSection);
+  expect.soft(refreshedCards).toBeInTheDocument();
+  const retainedVersion = within(refreshedCards).queryByText(
+    "版本：codex-cli 0.142.5",
+  );
+  expect
+    .soft(retainedVersion, "old cards survive refresh failure")
+    .not.toBeNull();
+  expect.soft(
+    screen.queryByRole("heading", { name: "无法读取本机环境" }),
+  ).not.toBeInTheDocument();
+
+  const inlineError = cliAfterError
+    ? within(cliAfterError).queryByRole("alert")
+    : null;
+  expect.soft(inlineError, "inline refresh error").not.toBeNull();
+  if (inlineError) {
+    expect.soft(inlineError).toHaveTextContent("模拟 CLI 重新检测失败");
+  }
+  const retryButton = cliAfterError
+    ? within(cliAfterError).queryByRole("button", {
+        name: "重新检测 CLI",
+      })
+    : null;
+  expect.soft(retryButton, "retryable refresh control").not.toBeNull();
+  if (retryButton) {
+    expect.soft(retryButton).toBeEnabled();
+  }
 });
 
 test.each([

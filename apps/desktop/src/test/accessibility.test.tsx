@@ -592,6 +592,34 @@ describe("Task 21 accessibility baseline", () => {
     },
   );
 
+  test("the precision-radar surface uses no CSS gradients", () => {
+    const styleFiles = [
+      join(sourceRoot, "styles", "app.css"),
+      join(sourceRoot, "pages", "ManualRunPage.css"),
+      join(sourceRoot, "pages", "CliRunPage.css"),
+      join(sourceRoot, "pages", "ResultsHistory.css"),
+    ];
+    for (const file of styleFiles) {
+      const source = readFileSync(file, "utf8");
+      expect(source, file).not.toMatch(
+        /(?:linear|radial|conic|repeating-radial)-gradient\s*\(/i,
+      );
+    }
+  });
+
+  test("page styles consume shared color tokens instead of hard-coded colors", () => {
+    for (const file of [
+      "ManualRunPage.css",
+      "CliRunPage.css",
+      "ResultsHistory.css",
+    ]) {
+      const source = readFileSync(join(sourceRoot, "pages", file), "utf8");
+      expect(source, file).not.toMatch(/#[0-9a-f]{3,8}\b/i);
+      expect(source, file).toMatch(/var\(--text-primary\)/);
+      expect(source, file).toMatch(/var\(--border\)/);
+    }
+  });
+
   test("page focus rules use the semantic focus token and preserve forced colors", () => {
     const pageSources = [
       "ManualRunPage.css",
