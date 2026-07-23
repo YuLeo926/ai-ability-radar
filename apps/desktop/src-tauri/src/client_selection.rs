@@ -82,9 +82,11 @@ pub(crate) struct RawControl {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ObservedControl {
-    pub(crate) surface: ClientSurface,
-    pub(crate) kind: ControlKind,
-    pub(crate) name: String,
+    surface: ClientSurface,
+    confidence: ClientSelectionConfidence,
+    kind: ControlKind,
+    role: SelectorRole,
+    name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,13 +127,10 @@ const PROVIDER_FINGERPRINTS_V1: &[ProviderFingerprint] = &[
 ];
 
 pub(crate) fn preliminary_provider(identity: &WindowIdentity) -> Option<ProviderFamily> {
-    if let Some(package_family) = identity.package_family.as_deref() {
-        if let Some(provider) = provider_from_package_family(package_family) {
-            return Some(provider);
-        }
+    match identity.package_family.as_deref() {
+        Some(package_family) => provider_from_package_family(package_family),
+        None => claude_unpacked_identity(identity).then_some(ProviderFamily::Anthropic),
     }
-
-    claude_unpacked_identity(identity).then_some(ProviderFamily::Anthropic)
 }
 
 fn provider_from_package_family(package_family: &str) -> Option<ProviderFamily> {
@@ -170,20 +169,46 @@ fn claude_unpacked_identity(identity: &WindowIdentity) -> bool {
 }
 
 fn is_absolute_non_temporary_claude_path(value: &str) -> bool {
-    windows_path_is_absolute(value)
-        && windows_basename(value).eq_ignore_ascii_case("Claude.exe")
-        && !value
-            .split(['\\', '/'])
+    let Some(components) = validated_windows_file_components(value) else {
+        return false;
+    };
+    components
+        .last()
+        .is_some_and(|name| name.eq_ignore_ascii_case("Claude.exe"))
+        && !components
+            .iter()
             .any(|component| matches!(component.to_ascii_lowercase().as_str(), "temp" | "tmp"))
 }
 
-fn windows_path_is_absolute(value: &str) -> bool {
+fn validated_windows_file_components(value: &str) -> Option<Vec<&str>> {
     let bytes = value.as_bytes();
-    (bytes.len() >= 3
+    let tail = if bytes.len() >= 3
         && bytes[0].is_ascii_alphabetic()
         && bytes[1] == b':'
-        && matches!(bytes[2], b'\\' | b'/'))
-        || value.starts_with(r"\\")
+        && matches!(bytes[2], b'\\' | b'/')
+    {
+        &value[3..]
+    } else if bytes.len() >= 2
+        && matches!(bytes[0], b'\\' | b'/')
+        && matches!(bytes[1], b'\\' | b'/')
+    {
+        &value[2..]
+    } else {
+        return None;
+    };
+
+    let components = tail.split(['\\', '/']).collect::<Vec<_>>();
+    let is_unc = matches!(bytes.first(), Some(b'\\' | b'/'));
+    if (is_unc && components.len() < 3)
+        || (is_unc && matches!(components.first(), Some(&"." | &"?")))
+        || components.is_empty()
+        || components
+            .iter()
+            .any(|component| component.is_empty() || matches!(*component, "." | ".."))
+    {
+        return None;
+    }
+    Some(components)
 }
 
 fn windows_basename(value: &str) -> &str {
@@ -205,7 +230,7 @@ pub(crate) fn classify_surface(
     title_hint: &str,
 ) -> Option<(ClientSurface, ClientSelectionConfidence)> {
     if provider == ProviderFamily::Anthropic {
-        return Some((
+        return confirm_provider(provider, controls).then_some((
             ClientSurface::Claude,
             ClientSelectionConfidence::VisibleSelector,
         ));
@@ -261,6 +286,34 @@ fn title_contains_token(value: &str, expected: &str) -> bool {
     value
         .split(|character: char| !character.is_ascii_alphanumeric())
         .any(|token| token.eq_ignore_ascii_case(expected))
+}
+
+pub(crate) fn observe_window_controls(
+    provider: ProviderFamily,
+    controls: &[RawControl],
+    title_hint: &str,
+) -> Option<Vec<ObservedControl>> {
+    let (surface, confidence) = classify_surface(provider, controls, title_hint)?;
+    let target = match provider {
+        ProviderFamily::OpenAi => TargetKind::ChatGptClient,
+        ProviderFamily::Anthropic => TargetKind::ClaudeClient,
+    };
+    Some(
+        controls
+            .iter()
+            .filter(|control| allowed_selector(control.kind))
+            .filter_map(|control| {
+                let (role, name) = selector_role(target, &control.name)?;
+                Some(ObservedControl {
+                    surface,
+                    confidence,
+                    kind: control.kind,
+                    role,
+                    name,
+                })
+            })
+            .collect(),
+    )
 }
 
 fn allowed_selector(kind: ControlKind) -> bool {
@@ -324,6 +377,29 @@ fn looks_like_model(target: TargetKind, value: &str) -> bool {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectorRole {
+    Model,
+    Effort,
+}
+
+fn selector_role(target: TargetKind, value: &str) -> Option<(SelectorRole, String)> {
+    let trimmed = value.trim();
+    if is_reserved_anchor(trimmed) {
+        return None;
+    }
+    if looks_like_model(target, trimmed) && is_valid_reported_model(trimmed) {
+        return Some((SelectorRole::Model, trimmed.to_owned()));
+    }
+    normalized_effort(trimmed).map(|effort| (SelectorRole::Effort, effort))
+}
+
+fn is_reserved_anchor(value: &str) -> bool {
+    ["claude", "chatgpt", "chat", "work", "codex"]
+        .iter()
+        .any(|anchor| value.eq_ignore_ascii_case(anchor))
+}
+
 fn surface_matches_target(target: TargetKind, surface: ClientSurface) -> bool {
     match target {
         TargetKind::ChatGptClient => {
@@ -335,6 +411,12 @@ fn surface_matches_target(target: TargetKind, surface: ClientSurface) -> bool {
         TargetKind::ClaudeClient => surface == ClientSurface::Claude,
         _ => false,
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ObservedValue {
+    value: String,
+    confidence: ClientSelectionConfidence,
 }
 
 pub(crate) fn extract_candidates(
@@ -355,23 +437,20 @@ pub(crate) fn extract_candidates(
             continue;
         }
 
-        let mut models = Vec::new();
-        let mut efforts = Vec::new();
+        let mut models: Vec<ObservedValue> = Vec::new();
+        let mut efforts: Vec<ObservedValue> = Vec::new();
         for control in controls
             .iter()
             .filter(|control| control.surface == surface && allowed_selector(control.kind))
         {
-            let trimmed = control.name.trim();
-            if looks_like_model(target, trimmed)
-                && is_valid_reported_model(trimmed)
-                && !models.iter().any(|model| model == trimmed)
-            {
-                models.push(trimmed.to_owned());
-            }
-            if let Some(effort) = normalized_effort(trimmed) {
-                if !efforts.contains(&effort) {
-                    efforts.push(effort);
+            match validated_observed_value(target, control) {
+                Some((SelectorRole::Model, model)) => {
+                    insert_observed_value(&mut models, model, control.confidence);
                 }
+                Some((SelectorRole::Effort, effort)) => {
+                    insert_observed_value(&mut efforts, effort, control.confidence);
+                }
+                _ => {}
             }
         }
 
@@ -379,12 +458,24 @@ pub(crate) fn extract_candidates(
             (true, true) => {}
             (false, true) => {
                 for model in models {
-                    push_unique_candidate(&mut candidates, surface, Some(model), None);
+                    push_unique_candidate(
+                        &mut candidates,
+                        surface,
+                        Some(model.value),
+                        None,
+                        model.confidence,
+                    );
                 }
             }
             (true, false) => {
                 for effort in efforts {
-                    push_unique_candidate(&mut candidates, surface, None, Some(effort));
+                    push_unique_candidate(
+                        &mut candidates,
+                        surface,
+                        None,
+                        Some(effort.value),
+                        effort.confidence,
+                    );
                 }
             }
             (false, false) => {
@@ -393,8 +484,9 @@ pub(crate) fn extract_candidates(
                         push_unique_candidate(
                             &mut candidates,
                             surface,
-                            Some(model.clone()),
-                            Some(effort.clone()),
+                            Some(model.value.clone()),
+                            Some(effort.value.clone()),
+                            weakest_confidence(model.confidence, effort.confidence),
                         );
                     }
                 }
@@ -410,17 +502,52 @@ pub(crate) fn extract_candidates(
     ClientSelectionDetection { status, candidates }
 }
 
+fn validated_observed_value(
+    target: TargetKind,
+    control: &ObservedControl,
+) -> Option<(SelectorRole, String)> {
+    let (role, value) = selector_role(target, &control.name)?;
+    (role == control.role).then_some((role, value))
+}
+
+fn insert_observed_value(
+    values: &mut Vec<ObservedValue>,
+    value: String,
+    confidence: ClientSelectionConfidence,
+) {
+    if let Some(existing) = values.iter_mut().find(|existing| existing.value == value) {
+        existing.confidence = weakest_confidence(existing.confidence, confidence);
+    } else {
+        values.push(ObservedValue { value, confidence });
+    }
+}
+
+fn weakest_confidence(
+    left: ClientSelectionConfidence,
+    right: ClientSelectionConfidence,
+) -> ClientSelectionConfidence {
+    if matches!(left, ClientSelectionConfidence::BestEffort)
+        || matches!(right, ClientSelectionConfidence::BestEffort)
+    {
+        ClientSelectionConfidence::BestEffort
+    } else {
+        ClientSelectionConfidence::VisibleSelector
+    }
+}
+
 fn push_unique_candidate(
     candidates: &mut Vec<ClientSelectionCandidate>,
     surface: ClientSurface,
     model: Option<String>,
     reasoning_effort: Option<String>,
+    confidence: ClientSelectionConfidence,
 ) {
-    if candidates.iter().any(|candidate| {
+    if let Some(existing) = candidates.iter_mut().find(|candidate| {
         candidate.surface == surface
             && candidate.model == model
             && candidate.reasoning_effort == reasoning_effort
     }) {
+        existing.confidence = weakest_confidence(existing.confidence, confidence);
         return;
     }
     candidates.push(ClientSelectionCandidate {
@@ -428,7 +555,7 @@ fn push_unique_candidate(
         reasoning_effort,
         surface,
         source: ModelSource::WindowsAccessibility,
-        confidence: ClientSelectionConfidence::VisibleSelector,
+        confidence,
     });
 }
 
@@ -445,9 +572,18 @@ mod tests {
     }
 
     fn control_for(surface: ClientSurface, kind: ControlKind, name: &str) -> ObservedControl {
+        let target = match surface {
+            ClientSurface::ChatGpt | ClientSurface::CodexDesktop => TargetKind::ChatGptClient,
+            ClientSurface::Claude => TargetKind::ClaudeClient,
+        };
+        let role = selector_role(target, name)
+            .map(|(role, _)| role)
+            .unwrap_or(SelectorRole::Model);
         ObservedControl {
             surface,
+            confidence: ClientSelectionConfidence::VisibleSelector,
             kind,
+            role,
             name: name.to_owned(),
         }
     }
@@ -531,6 +667,76 @@ mod tests {
 
         assert_eq!(result.status, ClientSelectionStatus::Multiple);
         assert_eq!(result.candidates.len(), 2);
+    }
+
+    #[test]
+    fn exact_claude_header_anchor_is_not_a_model_candidate() {
+        let controls = vec![control_for(
+            ClientSurface::Claude,
+            ControlKind::Button,
+            "Claude",
+        )];
+
+        let result = extract_candidates(TargetKind::ClaudeClient, &controls);
+
+        assert_eq!(result.status, ClientSelectionStatus::NotExposed);
+        assert!(result.candidates.is_empty());
+    }
+
+    #[test]
+    fn exact_openai_surface_anchors_are_not_model_candidates() {
+        for anchor in ["ChatGPT", "Chat", "Work", "Codex"] {
+            let result = extract_candidates(
+                TargetKind::ChatGptClient,
+                &[control(ControlKind::Button, anchor)],
+            );
+
+            assert_eq!(result.status, ClientSelectionStatus::NotExposed, "{anchor}");
+            assert!(result.candidates.is_empty(), "{anchor}");
+        }
+    }
+
+    #[test]
+    fn surface_anchor_plus_real_model_returns_only_the_real_model() {
+        let controls = vec![
+            control(ControlKind::Button, "ChatGPT"),
+            control(ControlKind::Button, "GPT-5.6"),
+        ];
+
+        let result = extract_candidates(TargetKind::ChatGptClient, &controls);
+
+        assert_eq!(result.status, ClientSelectionStatus::Detected);
+        assert_eq!(result.candidates.len(), 1);
+        assert_eq!(result.candidates[0].model.as_deref(), Some("GPT-5.6"));
+    }
+
+    #[test]
+    fn model_like_thinking_label_is_not_reused_as_effort() {
+        let model_only = extract_candidates(
+            TargetKind::ChatGptClient,
+            &[control(ControlKind::Button, "GPT-5 Thinking")],
+        );
+        assert_eq!(model_only.status, ClientSelectionStatus::Detected);
+        assert_eq!(model_only.candidates.len(), 1);
+        assert_eq!(
+            model_only.candidates[0].model.as_deref(),
+            Some("GPT-5 Thinking")
+        );
+        assert_eq!(model_only.candidates[0].reasoning_effort, None);
+
+        let with_effort = extract_candidates(
+            TargetKind::ChatGptClient,
+            &[
+                control(ControlKind::Button, "GPT-5 Thinking"),
+                control(ControlKind::ComboBox, "high"),
+            ],
+        );
+        assert_eq!(with_effort.status, ClientSelectionStatus::Detected);
+        assert_eq!(with_effort.candidates.len(), 1);
+        assert_eq!(
+            with_effort.candidates[0].reasoning_effort.as_deref(),
+            Some("high")
+        );
     }
 
     #[test]
@@ -686,6 +892,126 @@ mod tests {
     }
 
     #[test]
+    fn title_fallback_confidence_reaches_the_candidate() {
+        let observed = observe_window_controls(
+            ProviderFamily::OpenAi,
+            &[raw_control(ControlKind::Button, "GPT-5.6")],
+            "Codex",
+        )
+        .unwrap();
+
+        let result = extract_candidates(TargetKind::ChatGptClient, &observed);
+
+        assert_eq!(result.status, ClientSelectionStatus::Detected);
+        assert_eq!(
+            result.candidates[0].confidence,
+            ClientSelectionConfidence::BestEffort
+        );
+        assert_eq!(result.candidates[0].surface, ClientSurface::CodexDesktop);
+    }
+
+    #[test]
+    fn visible_surface_anchor_confidence_reaches_the_candidate() {
+        let observed = observe_window_controls(
+            ProviderFamily::OpenAi,
+            &[
+                raw_control(ControlKind::Button, "Codex"),
+                raw_control(ControlKind::Button, "GPT-5.6"),
+            ],
+            "ChatGPT",
+        )
+        .unwrap();
+
+        let result = extract_candidates(TargetKind::ChatGptClient, &observed);
+
+        assert_eq!(result.status, ClientSelectionStatus::Detected);
+        assert_eq!(
+            result.candidates[0].confidence,
+            ClientSelectionConfidence::VisibleSelector
+        );
+        assert_eq!(result.candidates.len(), 1);
+        assert_eq!(result.candidates[0].model.as_deref(), Some("GPT-5.6"));
+    }
+
+    #[test]
+    fn conflicting_title_surface_produces_no_observations_or_candidates() {
+        let observed = observe_window_controls(
+            ProviderFamily::OpenAi,
+            &[raw_control(ControlKind::Button, "GPT-5.6")],
+            "ChatGPT Codex",
+        );
+
+        assert_eq!(observed, None);
+        let result = extract_candidates(TargetKind::ChatGptClient, &[]);
+        assert_eq!(result.status, ClientSelectionStatus::NotExposed);
+        assert!(result.candidates.is_empty());
+    }
+
+    #[test]
+    fn model_effort_pair_uses_the_weaker_observation_confidence() {
+        let mut observed = observe_window_controls(
+            ProviderFamily::OpenAi,
+            &[raw_control(ControlKind::Button, "GPT-5.6")],
+            "Codex",
+        )
+        .unwrap();
+        observed.extend(
+            observe_window_controls(
+                ProviderFamily::OpenAi,
+                &[
+                    raw_control(ControlKind::Button, "Codex"),
+                    raw_control(ControlKind::ComboBox, "high"),
+                ],
+                "ChatGPT",
+            )
+            .unwrap(),
+        );
+
+        let result = extract_candidates(TargetKind::ChatGptClient, &observed);
+
+        assert_eq!(result.status, ClientSelectionStatus::Detected);
+        assert_eq!(
+            result.candidates[0].reasoning_effort.as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            result.candidates[0].confidence,
+            ClientSelectionConfidence::BestEffort
+        );
+    }
+
+    #[test]
+    fn claude_observation_factory_enforces_confirmation_and_removes_anchor_role() {
+        for controls in [
+            vec![],
+            vec![raw_control(ControlKind::Document, "Claude")],
+            vec![raw_control(ControlKind::Button, "Claude Sonnet 4")],
+        ] {
+            assert_eq!(
+                observe_window_controls(ProviderFamily::Anthropic, &controls, "Claude"),
+                None
+            );
+        }
+
+        let observed = observe_window_controls(
+            ProviderFamily::Anthropic,
+            &[
+                raw_control(ControlKind::Button, "Claude"),
+                raw_control(ControlKind::Button, "Claude Sonnet 4"),
+            ],
+            "Claude",
+        )
+        .unwrap();
+        let result = extract_candidates(TargetKind::ClaudeClient, &observed);
+        assert_eq!(result.status, ClientSelectionStatus::Detected);
+        assert_eq!(result.candidates.len(), 1);
+        assert_eq!(
+            result.candidates[0].model.as_deref(),
+            Some("Claude Sonnet 4")
+        );
+    }
+
+    #[test]
     fn claude_unpackaged_identity_requires_path_process_and_title_then_header_confirmation() {
         let mut valid = identity("Claude.exe", None, "Claude");
         valid.executable_path = Some(r"C:\Program Files\Claude\Claude.exe".to_owned());
@@ -716,6 +1042,71 @@ mod tests {
     }
 
     #[test]
+    fn unknown_package_family_never_falls_back_to_unpackaged_claude_signals() {
+        let mut identity = identity("Claude.exe", Some("Other.App_publisher"), "Claude");
+        identity.executable_path = Some(r"C:\Program Files\Claude\Claude.exe".to_owned());
+
+        assert_eq!(preliminary_provider(&identity), None);
+    }
+
+    #[test]
+    fn unpackaged_claude_rejects_non_install_path_syntax() {
+        for path in [
+            r"Claude.exe",
+            r"C:\Program Files\Claude\NotClaude.exe",
+            r"\\.\Claude.exe",
+            r"\\?\C:\Program Files\Claude\Claude.exe",
+            r"\\server\Claude.exe",
+            r"\\server\\Claude.exe",
+            r"C:\Program Files\.\Claude.exe",
+            r"C:\Program Files\Claude\..\Claude.exe",
+        ] {
+            let mut identity = identity("Claude.exe", None, "Claude");
+            identity.executable_path = Some(path.to_owned());
+
+            assert_eq!(preliminary_provider(&identity), None, "{path}");
+        }
+    }
+
+    #[test]
+    fn unpackaged_claude_rejects_temp_components_but_not_template() {
+        for path in [
+            r"C:\Temp\Claude.exe",
+            r"C:\TMP\Claude.exe",
+            r"C:\Program Files/TeMp\Claude.exe",
+        ] {
+            let mut identity = identity("Claude.exe", None, "Claude");
+            identity.executable_path = Some(path.to_owned());
+
+            assert_eq!(preliminary_provider(&identity), None, "{path}");
+        }
+
+        let mut template = identity("Claude.exe", None, "Claude");
+        template.executable_path = Some(r"C:\Program Files\Template\Claude\Claude.exe".to_owned());
+        assert_eq!(
+            preliminary_provider(&template),
+            Some(ProviderFamily::Anthropic)
+        );
+    }
+
+    #[test]
+    fn unpackaged_claude_accepts_drive_rooted_and_complete_unc_file_paths() {
+        for path in [
+            r"C:\Program Files\Claude\Claude.exe",
+            r"\\server\share\Claude\Claude.exe",
+        ] {
+            let mut identity = identity("Claude.exe", None, "Claude");
+            identity.executable_path = Some(path.to_owned());
+
+            assert_eq!(
+                preliminary_provider(&identity),
+                Some(ProviderFamily::Anthropic),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
     fn claude_package_identity_still_requires_visible_header_confirmation() {
         let packaged = identity("host.exe", Some("Anthropic.Claude_publisher"), "Messages");
         assert_eq!(
@@ -734,12 +1125,32 @@ mod tests {
             ProviderFamily::Anthropic,
             &[raw_control(ControlKind::Document, "Claude")]
         ));
-        assert_eq!(
-            classify_surface(ProviderFamily::Anthropic, &[], "anything"),
-            Some((
-                ClientSurface::Claude,
-                ClientSelectionConfidence::VisibleSelector,
-            ))
-        );
+        for controls in [
+            vec![],
+            vec![raw_control(ControlKind::Document, "Claude")],
+            vec![raw_control(ControlKind::Button, "Claude Sonnet 4")],
+        ] {
+            assert_eq!(
+                classify_surface(ProviderFamily::Anthropic, &controls, "Claude"),
+                None
+            );
+        }
+        for kind in [
+            ControlKind::Button,
+            ControlKind::ComboBox,
+            ControlKind::MenuItem,
+        ] {
+            assert_eq!(
+                classify_surface(
+                    ProviderFamily::Anthropic,
+                    &[raw_control(kind, "Claude")],
+                    "anything",
+                ),
+                Some((
+                    ClientSurface::Claude,
+                    ClientSelectionConfidence::VisibleSelector,
+                ))
+            );
+        }
     }
 }
