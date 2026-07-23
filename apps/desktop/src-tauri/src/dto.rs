@@ -213,20 +213,20 @@ mod tests {
     fn start_run_input_uses_the_expected_camel_case_wire_shape() {
         let input: StartRunInput = serde_json::from_value(json!({
             "target": {
-                "kind": "codex_cli",
-                "reportedModel": "gpt-5.1-codex",
+                "kind": "chat_gpt_client",
+                "reportedModel": "GPT-5",
                 "reasoningEffort": "high",
-                "modelSource": "cli_requested",
+                "modelSource": "windows_accessibility",
                 "modelVerification": "user_confirmed"
             },
             "mode": "quick"
         }))
         .unwrap();
 
-        assert_eq!(input.target.kind, TargetKind::CodexCli);
-        assert_eq!(input.target.reported_model, "gpt-5.1-codex");
+        assert_eq!(input.target.kind, TargetKind::ChatGptClient);
+        assert_eq!(input.target.reported_model, "GPT-5");
         assert_eq!(input.target.reasoning_effort.as_deref(), Some("high"));
-        assert_eq!(input.target.model_source, ModelSource::CliRequested);
+        assert_eq!(input.target.model_source, ModelSource::WindowsAccessibility);
         assert_eq!(
             input.target.model_verification,
             ModelVerification::UserConfirmed

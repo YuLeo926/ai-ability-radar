@@ -14,11 +14,9 @@ use ability_adapters::{
 };
 use ability_core::{
     contains_forbidden_display_character, is_valid_reported_model, ArtifactStore,
-    EnvironmentFingerprint, LoadedPack, ManualRunService, ManualStep, RunMode, RunRecord,
-    RunRepository, RunStatus, TargetKind, TargetSelection,
+    EnvironmentFingerprint, LoadedPack, ManualRunService, ManualStep, ModelSource,
+    ModelVerification, RunMode, RunRecord, RunRepository, RunStatus, TargetKind, TargetSelection,
 };
-#[cfg(test)]
-use ability_core::{ModelSource, ModelVerification};
 use std::collections::BTreeMap;
 use std::fs;
 #[cfg(windows)]
@@ -36,6 +34,12 @@ use uuid::Uuid;
 enum StartFamily {
     Manual,
     Cli,
+}
+
+#[derive(Clone, Copy)]
+enum ProvenanceContext {
+    NewRun,
+    Resume,
 }
 
 struct ValidatedStart {
@@ -117,6 +121,47 @@ fn validate_stored_reasoning_effort(
     Ok(normalized)
 }
 
+fn validate_provenance(
+    target: &TargetSelection,
+    family: StartFamily,
+    context: ProvenanceContext,
+) -> Result<(), String> {
+    let accepted_new = match family {
+        StartFamily::Manual => matches!(
+            (target.model_source, target.model_verification),
+            (ModelSource::Manual, ModelVerification::UserConfirmed)
+                | (
+                    ModelSource::WindowsAccessibility,
+                    ModelVerification::UserConfirmed
+                )
+        ),
+        StartFamily::Cli if target.reported_model == "default" => matches!(
+            (target.model_source, target.model_verification),
+            (ModelSource::DefaultRoute, ModelVerification::Unverified)
+        ),
+        StartFamily::Cli => matches!(
+            (target.model_source, target.model_verification),
+            (ModelSource::CliRequested, ModelVerification::UserConfirmed)
+        ),
+    };
+    let accepted_resume_only = matches!(context, ProvenanceContext::Resume)
+        && (matches!(
+            (target.model_source, target.model_verification),
+            (ModelSource::LegacyUnknown, ModelVerification::LegacyUnknown)
+        ) || (family == StartFamily::Cli
+            && matches!(
+                (target.model_source, target.model_verification),
+                (
+                    ModelSource::CliReported,
+                    ModelVerification::ProviderReported
+                )
+            )));
+
+    (accepted_new || accepted_resume_only)
+        .then_some(())
+        .ok_or_else(|| "模型来源与所选体检方式不一致。".into())
+}
+
 fn validate_start(input: StartRunInput, family: StartFamily) -> Result<ValidatedStart, String> {
     if input.mode != RunMode::Quick {
         return Err("当前版本只支持快速体检；深度体检尚未实现".into());
@@ -155,14 +200,17 @@ fn validate_start(input: StartRunInput, family: StartFamily) -> Result<Validated
 
     let reasoning_effort = normalize_reasoning_effort(input.target.reasoning_effort, family)?;
 
+    let target = TargetSelection {
+        kind: input.target.kind,
+        reported_model,
+        reasoning_effort,
+        model_source: input.target.model_source,
+        model_verification: input.target.model_verification,
+    };
+    validate_provenance(&target, family, ProvenanceContext::NewRun)?;
+
     Ok(ValidatedStart {
-        target: TargetSelection {
-            kind: input.target.kind,
-            reported_model,
-            reasoning_effort,
-            model_source: input.target.model_source,
-            model_verification: input.target.model_verification,
-        },
+        target,
         mode: input.mode,
     })
 }
@@ -200,13 +248,15 @@ fn validate_resume_target(
         return Err("恢复目标包含无效的 CLI 模型名称。".into());
     }
     let reasoning_effort = validate_stored_reasoning_effort(input.reasoning_effort, family)?;
-    Ok(TargetSelection {
+    let target = TargetSelection {
         kind: input.kind,
         reported_model: input.reported_model,
         reasoning_effort,
         model_source: input.model_source,
         model_verification: input.model_verification,
-    })
+    };
+    validate_provenance(&target, family, ProvenanceContext::Resume)?;
+    Ok(target)
 }
 
 fn load_matching_resume_run(
@@ -2483,6 +2533,66 @@ mod tests {
     }
 
     #[test]
+    fn provenance_is_limited_to_its_start_or_resume_context() {
+        let inferred = start_input_with_provenance(
+            TargetKind::ChatGptClient,
+            "GPT-5",
+            None,
+            ModelSource::CliReported,
+            ModelVerification::ProviderReported,
+            RunMode::Quick,
+        );
+        assert!(validate_start(inferred, StartFamily::Manual).is_err());
+
+        let guessed_default = start_input_with_provenance(
+            TargetKind::CodexCli,
+            "default",
+            None,
+            ModelSource::CliRequested,
+            ModelVerification::UserConfirmed,
+            RunMode::Quick,
+        );
+        assert!(validate_start(guessed_default, StartFamily::Cli).is_err());
+
+        let provider_reported_start = start_input_with_provenance(
+            TargetKind::CodexCli,
+            "gpt-5.1-codex",
+            Some("high"),
+            ModelSource::CliReported,
+            ModelVerification::ProviderReported,
+            RunMode::Quick,
+        );
+        assert!(validate_start(provider_reported_start, StartFamily::Cli).is_err());
+
+        let legacy = ResumeTargetSelectionInput {
+            kind: TargetKind::ChatGptClient,
+            reported_model: "GPT-5".into(),
+            reasoning_effort: Some("high".into()),
+            model_source: ModelSource::LegacyUnknown,
+            model_verification: ModelVerification::LegacyUnknown,
+        };
+        assert!(validate_resume_target(legacy, StartFamily::Manual).is_ok());
+
+        let cli_reported = ResumeTargetSelectionInput {
+            kind: TargetKind::CodexCli,
+            reported_model: "gpt-5.1-codex".into(),
+            reasoning_effort: Some("high".into()),
+            model_source: ModelSource::CliReported,
+            model_verification: ModelVerification::ProviderReported,
+        };
+        assert!(validate_resume_target(cli_reported, StartFamily::Cli).is_ok());
+
+        let manual_cli_reported = ResumeTargetSelectionInput {
+            kind: TargetKind::ChatGptClient,
+            reported_model: "GPT-5".into(),
+            reasoning_effort: Some("high".into()),
+            model_source: ModelSource::CliReported,
+            model_verification: ModelVerification::ProviderReported,
+        };
+        assert!(validate_resume_target(manual_cli_reported, StartFamily::Manual).is_err());
+    }
+
+    #[test]
     fn reported_model_requires_visible_unicode_for_start_and_resume() {
         let invalid_models = [
             "\u{200b}",
@@ -2634,10 +2744,12 @@ mod tests {
 
     #[tokio::test]
     async fn cli_resume_target_mismatches_call_no_adapter_probe_spawn_or_registration() {
-        let mismatches: [fn(&mut TargetSelection); 3] = [
+        let mismatches: [fn(&mut TargetSelection); 5] = [
             |target| target.kind = TargetKind::ClaudeCode,
             |target| target.reported_model = "changed-model".into(),
             |target| target.reasoning_effort = Some("high".into()),
+            |target| target.model_source = ModelSource::CliReported,
+            |target| target.model_verification = ModelVerification::ProviderReported,
         ];
 
         for mutate in mismatches {
@@ -4008,13 +4120,36 @@ mod tests {
         effort: Option<&str>,
         mode: RunMode,
     ) -> StartRunInput {
+        let (model_source, model_verification) = match kind {
+            TargetKind::ChatGptClient | TargetKind::ClaudeClient => (
+                ModelSource::WindowsAccessibility,
+                ModelVerification::UserConfirmed,
+            ),
+            TargetKind::CodexCli | TargetKind::ClaudeCode if model == "default" => {
+                (ModelSource::DefaultRoute, ModelVerification::Unverified)
+            }
+            TargetKind::CodexCli | TargetKind::ClaudeCode => {
+                (ModelSource::CliRequested, ModelVerification::UserConfirmed)
+            }
+        };
+        start_input_with_provenance(kind, model, effort, model_source, model_verification, mode)
+    }
+
+    fn start_input_with_provenance(
+        kind: TargetKind,
+        model: &str,
+        effort: Option<&str>,
+        model_source: ModelSource,
+        model_verification: ModelVerification,
+        mode: RunMode,
+    ) -> StartRunInput {
         StartRunInput {
             target: TargetSelectionInput {
                 kind,
                 reported_model: model.into(),
                 reasoning_effort: effort.map(str::to_owned),
-                model_source: ModelSource::LegacyUnknown,
-                model_verification: ModelVerification::LegacyUnknown,
+                model_source,
+                model_verification,
             },
             mode,
         }
