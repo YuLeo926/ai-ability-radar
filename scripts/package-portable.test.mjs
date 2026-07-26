@@ -144,7 +144,7 @@ function escapeRegExp(value) {
 function portableArchivePath(fixture) {
   return join(
     fixture.bundleDir,
-    "ability-radar_0.2.1_windows-x64-portable.zip",
+    "ability-radar_0.2.2_windows-x64-portable.zip",
   );
 }
 
@@ -192,7 +192,7 @@ async function createFixture({ cli = false } = {}) {
     );
     await writeFile(
       join(repoRoot, "package.json"),
-      '{"name":"portable-fixture","version":"0.2.1","private":true}\n',
+      '{"name":"portable-fixture","version":"0.2.2","private":true}\n',
     );
   }
   return { root, repoRoot, targetDir, bundleDir };
@@ -380,7 +380,7 @@ async function installResealedClientManifest(fixture, contents) {
 test("stages the exact rooted tree and complete deterministic checksums", async () => {
   const fixture = await createFixture();
   try {
-    const first = await stagePortable({ ...fixture, version: "0.2.1" });
+    const first = await stagePortable({ ...fixture, version: "0.2.2" });
     assert.deepEqual(await entriesUnder(first.stageRoot), [
       "README.txt",
       "SHA256SUMS.txt",
@@ -415,7 +415,7 @@ test("stages the exact rooted tree and complete deterministic checksums", async 
     assert.equal(firstChecksums, expectedChecksums);
     assert.doesNotMatch(firstChecksums, /SHA256SUMS\.txt/);
 
-    const second = await stagePortable({ ...fixture, version: "0.2.1" });
+    const second = await stagePortable({ ...fixture, version: "0.2.2" });
     assert.equal(
       await readFile(join(second.stageRoot, "SHA256SUMS.txt"), "utf8"),
       firstChecksums,
@@ -438,7 +438,7 @@ test("rejects a corrupt portable registry schema before staging", async () => {
     await writeFile(registryPath, `${JSON.stringify(changed)}\n`);
 
     await assert.rejects(
-      stagePortable({ ...fixture, version: "0.2.1" }),
+      stagePortable({ ...fixture, version: "0.2.2" }),
       /registry schema|portable pack registry/i,
     );
   } finally {
@@ -460,7 +460,7 @@ test("rejects manifest identity mismatches before staging", async () => {
     await writeFile(manifestPath, `${JSON.stringify(changed)}\n`);
 
     await assert.rejects(
-      stagePortable({ ...fixture, version: "0.2.1" }),
+      stagePortable({ ...fixture, version: "0.2.2" }),
       /manifest.*identity|registry.*mismatch/i,
     );
   } finally {
@@ -483,7 +483,7 @@ test("rejects portable pack content that mismatches the registry seal", async ()
     );
 
     await assert.rejects(
-      stagePortable({ ...fixture, version: "0.2.1" }),
+      stagePortable({ ...fixture, version: "0.2.2" }),
       /content.*hash|registry.*seal/i,
     );
   } finally {
@@ -514,7 +514,7 @@ test("rejects missing and extra portable pack entries", async () => {
     try {
       await mutate(fixture);
       await assert.rejects(
-        stagePortable({ ...fixture, version: "0.2.1" }),
+        stagePortable({ ...fixture, version: "0.2.2" }),
         /missing|exact.*pack|unexpected.*pack|content.*hash/i,
       );
     } finally {
@@ -551,7 +551,7 @@ test("rejects traversal-shaped registry and manifest entries", async () => {
     try {
       await mutate(fixture);
       await assert.rejects(
-        stagePortable({ ...fixture, version: "0.2.1" }),
+        stagePortable({ ...fixture, version: "0.2.2" }),
         /unsafe.*path|traversal|registry.*path/i,
       );
     } finally {
@@ -589,7 +589,7 @@ for (const [name, manifest] of [
       await installResealedClientManifest(fixture, manifest);
 
       await assert.rejects(
-        stagePortable({ ...fixture, version: "0.2.1" }),
+        stagePortable({ ...fixture, version: "0.2.2" }),
         /runtime pack parser|portable pack|manifest|JSON/i,
       );
     } finally {
@@ -606,7 +606,7 @@ test("accepts the inclusive runtime task range endpoints", async () => {
       rawClientManifest({ timeBudget: "7200", maxTurns: "100" }),
     );
 
-    const staged = await stagePortable({ ...fixture, version: "0.2.1" });
+    const staged = await stagePortable({ ...fixture, version: "0.2.2" });
     assert.equal((await lstat(staged.stageRoot)).isDirectory(), true);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
@@ -623,7 +623,7 @@ test("fails closed when the runtime pack validator is missing or cannot execute"
       const validatorPath = join(fixture.targetDir, validatorLeaf);
       await mutate(validatorPath);
       await assert.rejects(
-        stagePortable({ ...fixture, version: "0.2.1" }),
+        stagePortable({ ...fixture, version: "0.2.2" }),
         /runtime pack validator|runtime pack parser/i,
       );
     } finally {
@@ -652,7 +652,7 @@ test("refuses an output directory outside the selected target tree", async () =>
       repoRoot: "C:\\repo",
       targetDir: "C:\\repo\\target\\release",
       bundleDir: "C:\\outside",
-      version: "0.2.1",
+      version: "0.2.2",
     }),
     /inside target directory/,
   );
@@ -662,13 +662,13 @@ test("rejects invalid or path-shaped versions inside stagePortable", async () =>
   const fixture = await createFixture();
   try {
     for (const version of [
-      "../0.2.1",
-      "0.2.1/escape",
-      "0.2.1\\escape",
-      "v0.2.1",
+      "../0.2.2",
+      "0.2.2/escape",
+      "0.2.2\\escape",
+      "v0.2.2",
       "01.2.3",
       "0.2",
-      "0.2.1-beta",
+      "0.2.2-beta",
       "",
     ]) {
       await assert.rejects(
@@ -689,7 +689,7 @@ test("rejects a junction in the selected target path before reading inputs", asy
     await rename(fixture.targetDir, realTarget);
     await symlink(realTarget, fixture.targetDir, "junction");
     await assert.rejects(
-      stagePortable({ ...fixture, version: "0.2.1" }),
+      stagePortable({ ...fixture, version: "0.2.2" }),
       /indirection|reparse|symbolic link|exact two portable pack/i,
     );
   } finally {
@@ -709,7 +709,7 @@ test("rejects a junction in the README input path", async () => {
     await rename(readmeParent, realReadmeParent);
     await symlink(realReadmeParent, readmeParent, "junction");
     await assert.rejects(
-      stagePortable({ ...fixture, version: "0.2.1" }),
+      stagePortable({ ...fixture, version: "0.2.2" }),
       /indirection|reparse|symbolic link|exact two portable pack/i,
     );
   } finally {
@@ -729,7 +729,7 @@ test("rejects a recursive benchmark-pack junction", async () => {
       "junction",
     );
     await assert.rejects(
-      stagePortable({ ...fixture, version: "0.2.1" }),
+      stagePortable({ ...fixture, version: "0.2.2" }),
       /indirection|reparse|symbolic link|exact two portable pack/i,
     );
   } finally {
@@ -745,7 +745,7 @@ test("rejects a junctioned bundle root before staging", async () => {
     await mkdir(dirname(fixture.bundleDir), { recursive: true });
     await symlink(outside, fixture.bundleDir, "junction");
     await assert.rejects(
-      stagePortable({ ...fixture, version: "0.2.1" }),
+      stagePortable({ ...fixture, version: "0.2.2" }),
       /indirection|reparse|symbolic link|ownership/i,
     );
     assert.deepEqual(await readdir(outside), []);
@@ -764,7 +764,7 @@ test("leaves an unknown fixed .stage junction untouched", async () => {
     const fixedStage = join(fixture.bundleDir, ".stage");
     await symlink(outside, fixedStage, "junction");
 
-    const staged = await stagePortable({ ...fixture, version: "0.2.1" });
+    const staged = await stagePortable({ ...fixture, version: "0.2.2" });
 
     assert.notEqual(staged.stageParent, fixedStage);
     assert.equal((await lstat(fixedStage)).isSymbolicLink(), true);
@@ -781,7 +781,7 @@ test("preserves an unknown pre-existing fixed .stage directory", async () => {
     await mkdir(fixedStage, { recursive: true });
     await writeFile(join(fixedStage, "owner.txt"), "preserve\n");
 
-    const staged = await stagePortable({ ...fixture, version: "0.2.1" });
+    const staged = await stagePortable({ ...fixture, version: "0.2.2" });
 
     assert.notEqual(staged.stageParent, fixedStage);
     assert.equal(await readFile(join(fixedStage, "owner.txt"), "utf8"), "preserve\n");
@@ -795,8 +795,8 @@ test("concurrent staging invocations use isolated owned directories", async () =
   const fixture = await createFixture();
   try {
     const [first, second] = await Promise.all([
-      stagePortable({ ...fixture, version: "0.2.1" }),
-      stagePortable({ ...fixture, version: "0.2.1" }),
+      stagePortable({ ...fixture, version: "0.2.2" }),
+      stagePortable({ ...fixture, version: "0.2.2" }),
     ]);
 
     assert.notEqual(first.stageParent, second.stageParent);
@@ -818,7 +818,7 @@ test(
       assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
       const archivePath = join(
         fixture.bundleDir,
-        "ability-radar_0.2.1_windows-x64-portable.zip",
+        "ability-radar_0.2.2_windows-x64-portable.zip",
       );
       const listing = spawnSync("tar.exe", ["-tf", archivePath], {
         encoding: "utf8",
@@ -844,7 +844,7 @@ test(
       });
       assert.deepEqual(
         (await readdir(fixture.bundleDir)).filter((name) => name !==
-          "ability-radar_0.2.1_windows-x64-portable.zip"),
+          "ability-radar_0.2.2_windows-x64-portable.zip"),
         [],
       );
     } finally {
@@ -1130,14 +1130,14 @@ test(
       await mkdir(fixture.bundleDir, { recursive: true });
       const archivePath = join(
         fixture.bundleDir,
-        "ability-radar_0.2.1_windows-x64-portable.zip",
+        "ability-radar_0.2.2_windows-x64-portable.zip",
       );
       await writeFile(archivePath, "existing-final");
       const result = runCli(fixture.repoRoot);
       assert.notEqual(result.status, 0);
       assert.equal(await readFile(archivePath, "utf8"), "existing-final");
       assert.deepEqual(await readdir(fixture.bundleDir), [
-        "ability-radar_0.2.1_windows-x64-portable.zip",
+        "ability-radar_0.2.2_windows-x64-portable.zip",
       ]);
     } finally {
       await rm(fixture.root, { recursive: true, force: true });
@@ -1171,7 +1171,7 @@ test(
       );
       const archivePath = join(
         fixture.bundleDir,
-        "ability-radar_0.2.1_windows-x64-portable.zip",
+        "ability-radar_0.2.2_windows-x64-portable.zip",
       );
       assert.equal(await readFile(archivePath, "utf8"), "racing-final");
       await assert.rejects(lstat(temporaryArchive), { code: "ENOENT" });
@@ -1236,7 +1236,7 @@ test(
       );
       const archivePath = join(
         fixture.bundleDir,
-        "ability-radar_0.2.1_windows-x64-portable.zip",
+        "ability-radar_0.2.2_windows-x64-portable.zip",
       );
       const signature = (await readFile(archivePath)).subarray(0, 2);
       assert.deepEqual([...signature], [0x50, 0x4b]);
@@ -1275,7 +1275,7 @@ test(
       assert.doesNotMatch(caught.message, new RegExp(escapeRegExp(fixture.root)));
       const archivePath = join(
         fixture.bundleDir,
-        "ability-radar_0.2.1_windows-x64-portable.zip",
+        "ability-radar_0.2.2_windows-x64-portable.zip",
       );
       assert.deepEqual(
         [...(await readFile(archivePath)).subarray(0, 2)],
@@ -1317,7 +1317,7 @@ test(
       assert.doesNotMatch(caught.message, new RegExp(escapeRegExp(fixture.root)));
       const archivePath = join(
         fixture.bundleDir,
-        "ability-radar_0.2.1_windows-x64-portable.zip",
+        "ability-radar_0.2.2_windows-x64-portable.zip",
       );
       assert.deepEqual(
         [...(await readFile(archivePath)).subarray(0, 2)],
@@ -1359,7 +1359,7 @@ test(
       assert.match(caught.cause?.message ?? "", /primary publication-boundary failure/i);
       const archivePath = join(
         fixture.bundleDir,
-        "ability-radar_0.2.1_windows-x64-portable.zip",
+        "ability-radar_0.2.2_windows-x64-portable.zip",
       );
       await assert.rejects(lstat(archivePath), { code: "ENOENT" });
     } finally {

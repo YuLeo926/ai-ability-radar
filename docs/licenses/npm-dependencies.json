@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "generatedFrom": "package-lock.json",
-  "lockfileSha256": "f8468c524dc3db1f8113c8b29816aa042f064a5ff5b4a7463eebb5dd844a0820",
+  "lockfileSha256": "234963c84f2144a9208054b729c24c90d3dd48b85f9ee025aaa528e68d7f6348",
   "hashNormalization": "UTF-8 text with CRLF and CR normalized to LF",
   "note": "Metadata inventory only; dependency license texts are not bundled here.",
   "packages": [

@@ -64,7 +64,7 @@ turn 上限或输出预算耗尽属于 agent-budget failure，会按既定预算
 
 ## SmartScreen 提示
 
-v0.2.1 目前是候选/待发布构建，公开下载尚未开放。只有 clean Windows 10/11 x64 验收通过并创建
+v0.2.2 目前是候选/待发布构建，公开下载尚未开放。只有 clean Windows 10/11 x64 验收通过并创建
 公开发布后，才从仓库 Releases 下载；届时应在继续前用 `Get-FileHash -Algorithm SHA256` 对照
 `SHA256SUMS.txt`。安装程序和免安装 ZIP 均未签名，SmartScreen 可能显示“未知发布者”；如果校验值
 不同，不要运行该文件。

@@ -69,7 +69,7 @@ jobs:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: AI 能力雷达 ${{ env.RELEASE_TAG }}
           releaseBody: |
-            Windows 10/11 x64 v0.2.1 预览版。
+            Windows 10/11 x64 v0.2.2 预览版。
 
             **警告：安装程序和免安装 ZIP 均未签名。** Windows SmartScreen 可能显示风险提示。
             核心数据默认只保存在本机；真实 CLI 测试消耗运行者自己的订阅用量。

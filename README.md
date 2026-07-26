@@ -1,6 +1,6 @@
 # AI 能力雷达
 
-> 当前状态：v0.2.1 Windows 候选/待发布构建。支持 Windows 10/11 x64；公开下载尚未开放，安装程序尚未签名，也没有自动更新。
+> 当前状态：v0.2.2 Windows 候选/待发布构建。支持 Windows 10/11 x64；公开下载尚未开放，安装程序尚未签名，也没有自动更新。
 
 本项目把“感觉表现变差了”变成条件明确、可以复核的本地测试记录。它对固定题包做客观评分，
 不测量 IQ，不推断服务端发生了什么，v0.2 也不生成“降智”或退化裁决。
@@ -28,13 +28,13 @@
 
 ## 候选构建与校验
 
-v0.2.1 目前是候选/待发布构建，没有公开下载链接。只有 clean Windows 10/11 x64 验收通过并创建
+v0.2.2 目前是候选/待发布构建，没有公开下载链接。只有 clean Windows 10/11 x64 验收通过并创建
 公开发布后，才会开放下载：安装程序、免安装 ZIP 和 `SHA256SUMS.txt`。
 
 公开下载开放后，可在 PowerShell 中计算下载文件的 SHA-256：
 
    ```powershell
-   Get-FileHash -Algorithm SHA256 -LiteralPath .\ability-radar_0.2.1_x64-setup.exe
+   Get-FileHash -Algorithm SHA256 -LiteralPath .\ability-radar_0.2.2_x64-setup.exe
    ```
 
 将输出与 `SHA256SUMS.txt` 中同名文件的值逐字符比较。下载多个文件时逐一校验。

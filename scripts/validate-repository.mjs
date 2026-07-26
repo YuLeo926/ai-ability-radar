@@ -397,7 +397,7 @@ const requiredFiles = [
 ];
 for (const path of requiredFiles) read(path);
 
-const expectedVersion = "0.2.1";
+const expectedVersion = "0.2.2";
 const rootPackage = json("package.json");
 const desktopPackage = json("apps/desktop/package.json");
 const tauriConfig = json("apps/desktop/src-tauri/tauri.conf.json");
@@ -2124,7 +2124,7 @@ const workflowPaths = [
 const publicationWorkflowSeals = new Map([
   [
     ".github/workflows/release.yml",
-    "a22609db904a231afb1522369d3141b1551c9595189d0a93e277062f4b3d89fb",
+    "99ab201c4b6572b998feeaba9ffdc5e734601323207898830e720ef183132364",
   ],
   [
     ".github/workflows/pages.yml",
@@ -2483,7 +2483,7 @@ const ciArtifact = actionSteps(ciWorkflow, "actions/upload-artifact")[0];
 requireExactStepFields(ciPath, ciArtifact, [], "CI artifact owner");
 const expectedCiArtifactInputs = {
   name: "ability-radar-windows-debug-nsis",
-  path: "target/debug/bundle/nsis/ability-radar_0.2.1_x64-setup.exe",
+  path: "target/debug/bundle/nsis/ability-radar_0.2.2_x64-setup.exe",
   "if-no-files-found": "error",
   "retention-days": "7",
 };
@@ -2537,7 +2537,7 @@ $config = Get-Content apps/desktop/src-tauri/tauri.conf.json -Raw | ConvertFrom-
 if ("v$($config.version)" -cne $tag) {
   throw "Release tag does not exactly match the Tauri application version."
 }`;
-const exactReleaseBody = `Windows 10/11 x64 v0.2.1 预览版。
+const exactReleaseBody = `Windows 10/11 x64 v0.2.2 预览版。
 
 **警告：安装程序和免安装 ZIP 均未签名。** Windows SmartScreen 可能显示风险提示。
 核心数据默认只保存在本机；真实 CLI 测试消耗运行者自己的订阅用量。
@@ -2889,18 +2889,18 @@ const site = requireText("site/index.html", [
   ["methodology link", /href="docs\/methodology\.md"/],
   ["privacy link", /href="docs\/privacy\.md"/],
   ["security link", /href="docs\/security\.md"/],
-  ["v0.2.1 candidate/pending status", /v0\.2\.1.*候选\/待发布/si],
-  ["inactive v0.2.1 CTA", /<span[^>]*id="release-link"[^>]*aria-disabled="true"[^>]*>v0\.2\.1 下载待开放<\/span>/],
+  ["v0.2.2 candidate/pending status", /v0\.2\.2.*候选\/待发布/si],
+  ["inactive v0.2.2 CTA", /<span[^>]*id="release-link"[^>]*aria-disabled="true"[^>]*>v0\.2\.2 下载待开放<\/span>/],
   ["clean Windows public-release download gate", /clean Windows 10\/11 x64.*公开发布.*开放下载/si],
 ]);
-if (/\/releases\/(?:latest|tag\/v0\.2\.1)/.test(site)) {
-  fail("site/index.html must not expose a release URL while v0.2.1 is pending");
+if (/\/releases\/(?:latest|tag\/v0\.2\.2)/.test(site)) {
+  fail("site/index.html must not expose a release URL while v0.2.2 is pending");
 }
-if (/<a\b[^>]*id="(?:release-link|footer-release)"|releaseUrl\s*=|下载 v0\.2\.1 安装程序/si.test(site)) {
-  fail("site/index.html must keep every v0.2.1 public download CTA inactive while pending");
+if (/<a\b[^>]*id="(?:release-link|footer-release)"|releaseUrl\s*=|下载 v0\.2\.2 安装程序/si.test(site)) {
+  fail("site/index.html must keep every v0.2.2 public download CTA inactive while pending");
 }
-if (/v0\.2\.1\s*(?:公开预览|当前发布|正式发布).*?(?:提供|开放).*?下载/si.test(site)) {
-  fail("site/index.html must not claim that pending v0.2.1 is a current public release");
+if (/v0\.2\.2\s*(?:公开预览|当前发布|正式发布).*?(?:提供|开放).*?下载/si.test(site)) {
+  fail("site/index.html must not claim that pending v0.2.2 is a current public release");
 }
 const forbiddenSitePatterns = [
   ["external resource URL", /(?:src|action)=["']https?:/i],
@@ -2916,7 +2916,7 @@ for (const [label, pattern] of forbiddenSitePatterns) {
 }
 
 const readme = requireText("README.md", [
-  ["exact v0.2.1 pending-status banner", /^> 当前状态：v0\.2\.1 Windows 候选\/待发布构建。支持 Windows 10\/11 x64；公开下载尚未开放，安装程序尚未签名，也没有自动更新。$/m],
+  ["exact v0.2.2 pending-status banner", /^> 当前状态：v0\.2\.2 Windows 候选\/待发布构建。支持 Windows 10\/11 x64；公开下载尚未开放，安装程序尚未签名，也没有自动更新。$/m],
   ["exact client task count", /8\s*道/],
   ["exact CLI task count", /2\s*(?:个|项)/],
   ["fake CI cost boundary", /GitHub CI.*(?:假|fake).*CLI/si],
@@ -2935,8 +2935,8 @@ const readme = requireText("README.md", [
 if (/normal browser is the complete product/i.test(readme)) {
   fail("README.md must not describe localhost:1420 in a normal browser as the complete product");
 }
-if (/从仓库的\s*\*\*Releases\*\*\s*页面下载 v0\.2\.1|v0\.2\.1\s*(?:公开预览|当前发布|正式发布).*?(?:提供|开放).*?下载/si.test(readme)) {
-  fail("README.md must not claim that pending v0.2.1 is currently downloadable");
+if (/从仓库的\s*\*\*Releases\*\*\s*页面下载 v0\.2\.2|v0\.2\.2\s*(?:公开预览|当前发布|正式发布).*?(?:提供|开放).*?下载/si.test(readme)) {
+  fail("README.md must not claim that pending v0.2.2 is currently downloadable");
 }
 requireText("docs/methodology.md", [
   ["category-equal weighting", /类别等权/],
@@ -3042,7 +3042,7 @@ requireText(".github/ISSUE_TEMPLATE/bug.yml", [
   ["task pack version", /题包版本/],
   ["redacted category", /脱敏.*错误类别/],
   ["raw log warning", /不要.*原始日志.*(?:令牌|token)/si],
-  ["v0.2.1 app version example", /placeholder:\s*例如 0\.2\.1/],
+  ["v0.2.2 app version example", /placeholder:\s*例如 0\.2\.2/],
 ]);
 requireText(".github/pull_request_template.md", [
   ["tests checklist", /测试.*(?:新增|更新)/],

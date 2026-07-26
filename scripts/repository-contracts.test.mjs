@@ -137,15 +137,15 @@ function runPortableMutation(path, transform) {
   );
 }
 
-test("all first-party manifests require version 0.2.1", () => {
+test("all first-party manifests require version 0.2.2", () => {
   const result = runNegativeFixture((fixture) => {
     replace(join(fixture, "package.json"), (source) => {
       const manifest = JSON.parse(source);
-      manifest.version = "0.2.0";
+      manifest.version = "0.2.1";
       return `${JSON.stringify(manifest, null, 2)}\n`;
     });
   });
-  assertRejected(result, /package\.json version must be 0\.2\.1/i);
+  assertRejected(result, /package\.json version must be 0\.2\.2/i);
 });
 
 test("source start command cannot point to Vite", () => {
@@ -624,7 +624,7 @@ for (const indicator of ["|-", "|+", ">", ">-", ">+", "|2-", ">+2"]) {
   });
 }
 
-test("pending v0.2.1 copy keeps every public download CTA inactive", () => {
+test("pending v0.2.2 copy keeps every public download CTA inactive", () => {
   const site = readFileSync(join(root, "site", "index.html"), "utf8");
   const readme = readFileSync(join(root, "README.md"), "utf8");
 
@@ -797,12 +797,12 @@ test("Windows acceptance matrix requires portable launch rows", () => {
   assertRejected(result, /test-matrix\.md.*Portable ZIP launch/i);
 });
 
-test("site rejects an active exact-tag v0.2.1 download link while pending", () => {
+test("site rejects an active exact-tag v0.2.2 download link while pending", () => {
   const result = runNegativeFixture((fixture) => {
     replace(join(fixture, "site", "index.html"), (source) => {
       const changed = source.replace(
-        '<span class="button disabled" id="release-link" aria-disabled="true">v0.2.1 下载待开放</span>',
-        '<a class="button" id="release-link" href="https://github.invalid/example/releases/tag/v0.2.1">下载 v0.2.1 安装程序或免安装 ZIP</a>',
+        '<span class="button disabled" id="release-link" aria-disabled="true">v0.2.2 下载待开放</span>',
+        '<a class="button" id="release-link" href="https://github.invalid/example/releases/tag/v0.2.2">下载 v0.2.2 安装程序或免安装 ZIP</a>',
       );
       assert.notEqual(changed, source, "active release-link mutation must change the fixture");
       return changed;
@@ -819,20 +819,20 @@ test("site rejects a dead latest-release CTA while pending", () => {
   assertRejected(result, /site\/index\.html.*release URL/i);
 });
 
-test("README rejects a current-release claim while v0.2.1 is pending", () => {
+test("README rejects a current-release claim while v0.2.2 is pending", () => {
   const result = runNegativeFixture((fixture) => {
     replace(join(fixture, "README.md"), (source) =>
-      `${source}\n\nv0.2.1 公开预览当前提供安装程序和免安装 ZIP 下载。\n`);
+      `${source}\n\nv0.2.2 公开预览当前提供安装程序和免安装 ZIP 下载。\n`);
   });
   assertRejected(result, /README\.md.*currently downloadable|公开.*下载/i);
 });
 
-test("bug report example requires version 0.2.1", () => {
+test("bug report example requires version 0.2.2", () => {
   const result = runNegativeFixture((fixture) => {
     replace(join(fixture, ".github", "ISSUE_TEMPLATE", "bug.yml"), (source) =>
-      source.replace("例如 0.2.1", "例如 0.2.0"));
+      source.replace("例如 0.2.2", "例如 0.2.0"));
   });
-  assertRejected(result, /bug\.yml.*0\.2\.1/i);
+  assertRejected(result, /bug\.yml.*0\.2\.2/i);
 });
 
 test("npm license metadata rejects missing resolved and integrity lock provenance", () => {
@@ -1939,7 +1939,7 @@ test("CI debug installer path rejects the previous 0.2.0 version", () => {
   const result = runNegativeFixture((fixture) => {
     replace(join(fixture, ".github", "workflows", "ci.yml"), (source) =>
       source.replace(
-        "target/debug/bundle/nsis/ability-radar_0.2.1_x64-setup.exe",
+        "target/debug/bundle/nsis/ability-radar_0.2.2_x64-setup.exe",
         "target/debug/bundle/nsis/ability-radar_0.2.0_x64-setup.exe",
       ));
   });

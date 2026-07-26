@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "generatedFrom": "Cargo.lock",
-  "lockfileSha256": "e0654d537eca2d958188570755531b30701dbcb06f5b7f2f3cf0bb4eaecd59bf",
+  "lockfileSha256": "e4b33aa804dca59604275c3010375aeb62d8f000afcff5c9fa0f5c4c5f740eca",
   "hashNormalization": "UTF-8 text with CRLF and CR normalized to LF",
   "note": "Metadata inventory only; dependency license texts are not bundled here.",
   "packages": [
