@@ -982,6 +982,16 @@ button:disabled,
   }
 }
 
+@media (max-width: 64rem) {
+  .app-shell main {
+    width: min(100% - 2rem, 68rem);
+  }
+
+  .app-shell main.manual-setup-page {
+    width: min(100% - 2rem, 58rem);
+  }
+}
+
 .reasoning-effort-field,
 .reasoning-custom {
   display: grid;
@@ -989,6 +999,12 @@ button:disabled,
 }
 
 @media (max-width: 30rem) {
+  .topbar-inner,
+  .app-shell main,
+  .app-shell main.manual-setup-page {
+    width: calc(100% - 1.25rem);
+  }
+
   .brand-mark {
     display: none;
   }
