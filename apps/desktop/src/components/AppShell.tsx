@@ -1,9 +1,34 @@
-import { Link, Outlet, useLocation } from "react-router-dom";
+import { useEffect, useRef } from "react";
+import {
+  Link,
+  Outlet,
+  useLocation,
+  useNavigationType,
+} from "react-router-dom";
 import { useT } from "../i18n/I18nContext";
 import { ThemeToggle } from "./ThemeToggle";
 
 function navClassName(isActive: boolean): string {
   return isActive ? "nav-link nav-link-active" : "nav-link";
+}
+
+function RouteScrollReset() {
+  const { pathname } = useLocation();
+  const navigationType = useNavigationType();
+  const isInitialLocation = useRef(true);
+
+  useEffect(() => {
+    if (isInitialLocation.current) {
+      isInitialLocation.current = false;
+      return;
+    }
+
+    if (navigationType !== "POP") {
+      window.scrollTo(0, 0);
+    }
+  }, [navigationType, pathname]);
+
+  return null;
 }
 
 export function AppShell() {
@@ -18,6 +43,7 @@ export function AppShell() {
 
   return (
     <div className="app-shell">
+      <RouteScrollReset />
       <a
         className="skip-link button"
         href="#page-content"

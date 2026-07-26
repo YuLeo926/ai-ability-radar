@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import RootApp from "../App";
 import { BackendProvider } from "../api/BackendContext";
 import type { Backend } from "../api/backend";
@@ -112,6 +112,23 @@ test("main navigation marks the current page and reaches history", async () => {
     "aria-current",
     "page",
   );
+});
+
+test("a pushed route resets document scroll without resetting the initial location", async () => {
+  const user = userEvent.setup();
+  const scrollTo = vi
+    .spyOn(window, "scrollTo")
+    .mockImplementation(() => undefined);
+
+  renderRoute("/");
+  await screen.findByRole("heading", { name: "选择要体检的 AI" });
+  expect(scrollTo).not.toHaveBeenCalled();
+
+  await user.click(screen.getByRole("link", { name: "历史记录" }));
+  await screen.findByRole("heading", { name: "还没有体检记录" });
+  expect(scrollTo).toHaveBeenCalledWith(0, 0);
+
+  scrollTo.mockRestore();
 });
 
 test("the topbar constrains shared navigation inside its grid wrapper", async () => {
