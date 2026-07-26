@@ -697,7 +697,7 @@ test("README current-status banner rejects v0.2", () => {
       return changed;
     });
   });
-  assertRejected(result, /README\.md.*v0\.2\.1.*pending-status|当前状态/i);
+  assertRejected(result, /README\.md.*v0\.2\.2.*pending-status|当前状态/i);
 });
 
 test("README rejects treating the Vite URL as the complete product", () => {
