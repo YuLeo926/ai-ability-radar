@@ -796,6 +796,14 @@ describe("Task 21 accessibility baseline", () => {
       expect(source, file).toMatch(/var\(--text-primary\)/);
       expect(source, file).toMatch(/var\(--border\)/);
     }
+
+    const resultsHistory = readFileSync(
+      join(sourceRoot, "pages", "ResultsHistory.css"),
+      "utf8",
+    );
+    expect(resultsHistory).not.toMatch(
+      /\b(?:gap|padding(?:-(?:top|right|bottom|left))?)\s*:\s*[^;]*\b\d+(?:\.\d+)?rem\b/,
+    );
   });
 
   test("page focus rules use the semantic focus token and preserve forced colors", () => {
