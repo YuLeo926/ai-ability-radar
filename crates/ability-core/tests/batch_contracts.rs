@@ -1,9 +1,10 @@
 use ability_core::{
     AdapterLaunchKind, BatchCostPolicy, BatchExecutionSurface, BatchMode, EnvironmentFingerprint,
-    ExecutionAdapterIdentity, ModelSource, ModelVerification, ScanBatchPlan, ScanBatchTarget,
-    SealedTaskBudget, TargetKind, TargetRouteIdentity, TargetSelection,
+    ExecutionAdapterIdentity, LoadedPack, ModelSource, ModelVerification, PackLoader,
+    ScanBatchPlan, ScanBatchTarget, TargetKind, TargetRouteIdentity, TargetSelection,
 };
 use chrono::{Duration, TimeZone, Utc};
+use std::path::PathBuf;
 
 fn issued_at() -> chrono::DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 7, 23, 10, 0, 0)
@@ -11,33 +12,24 @@ fn issued_at() -> chrono::DateTime<Utc> {
         .unwrap()
 }
 
-fn guided_tasks() -> Vec<SealedTaskBudget> {
-    (0..6)
-        .map(|_| SealedTaskBudget {
-            max_turns: 1,
-            time_budget_secs: 120,
-        })
-        .chain((0..2).map(|_| SealedTaskBudget {
-            max_turns: 1,
-            time_budget_secs: 180,
-        }))
-        .collect()
-}
-
 const CLIENT_PACK_HASH: &str = "cfd2b36af1688432626ee80e453d60cd1d8cb4f87371df5f53def6b551e06f8f";
 const CLI_PACK_HASH: &str = "c52c76d1b562812909e88dd71a2f3c70ef874fd795f84c91017b94ad3bb01fea";
 
-fn cli_tasks() -> Vec<SealedTaskBudget> {
-    vec![
-        SealedTaskBudget {
-            max_turns: 20,
-            time_budget_secs: 1_800,
-        },
-        SealedTaskBudget {
-            max_turns: 20,
-            time_budget_secs: 1_800,
-        },
-    ]
+fn official_pack(directory: &str) -> LoadedPack {
+    PackLoader::load(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../benchmark-packs")
+            .join(directory),
+    )
+    .unwrap()
+}
+
+fn guided_pack() -> LoadedPack {
+    official_pack("client-quick-v1")
+}
+
+fn cli_pack() -> LoadedPack {
+    official_pack("cli-quick-v1")
 }
 
 fn target(
@@ -113,10 +105,10 @@ fn cost_policy_v1_exact_boundaries() {
     let policy = BatchCostPolicy::v1();
     let guided = policy
         .estimate(
+            &guided_pack(),
             BatchExecutionSurface::GuidedClient,
             BatchMode::QuickComparison,
             4,
-            &guided_tasks(),
             issued_at(),
         )
         .unwrap();
@@ -136,10 +128,10 @@ fn cost_policy_v1_exact_boundaries() {
     for (mode, targets, members, launches, turns, seconds, hours) in rows {
         let estimate = policy
             .estimate(
+                &cli_pack(),
                 BatchExecutionSurface::AutomatedCli,
                 mode,
                 targets,
-                &cli_tasks(),
                 issued_at(),
             )
             .unwrap();
@@ -159,10 +151,10 @@ fn cost_policy_rejects_unsupported_modes_counts_caps_and_overflow() {
         assert!(
             policy
                 .estimate(
+                    &guided_pack(),
                     BatchExecutionSurface::GuidedClient,
                     mode,
                     2,
-                    &guided_tasks(),
                     issued_at(),
                 )
                 .is_err()
@@ -171,24 +163,23 @@ fn cost_policy_rejects_unsupported_modes_counts_caps_and_overflow() {
     assert!(
         policy
             .estimate(
+                &cli_pack(),
                 BatchExecutionSurface::AutomatedCli,
                 BatchMode::Full,
                 6,
-                &cli_tasks(),
                 issued_at(),
             )
             .is_err()
     );
+    let mut forged = cli_pack();
+    forged.tasks[0].definition.time_budget_secs = u64::MAX;
     assert!(
         policy
             .estimate(
+                &forged,
                 BatchExecutionSurface::AutomatedCli,
                 BatchMode::QuickComparison,
                 2,
-                &[SealedTaskBudget {
-                    max_turns: 1,
-                    time_budget_secs: u64::MAX,
-                }],
                 issued_at(),
             )
             .is_err()
@@ -199,10 +190,10 @@ fn cost_policy_rejects_unsupported_modes_counts_caps_and_overflow() {
 fn estimates_use_exact_checked_formulas_and_unknown_quota() {
     let estimate = BatchCostPolicy::v1()
         .estimate(
+            &cli_pack(),
             BatchExecutionSurface::AutomatedCli,
             BatchMode::Standard,
             2,
-            &cli_tasks(),
             issued_at(),
         )
         .unwrap();
@@ -222,10 +213,10 @@ fn estimates_use_exact_checked_formulas_and_unknown_quota() {
 fn acknowledgement_and_execution_expiry_use_distinct_clocks() {
     let estimate = BatchCostPolicy::v1()
         .estimate(
+            &cli_pack(),
             BatchExecutionSurface::AutomatedCli,
             BatchMode::QuickComparison,
             2,
-            &cli_tasks(),
             issued_at(),
         )
         .unwrap();
@@ -235,7 +226,9 @@ fn acknowledgement_and_execution_expiry_use_distinct_clocks() {
     );
     let started_at = issued_at() + Duration::minutes(10);
     assert_eq!(
-        estimate.execution_authorization_expires_at(started_at),
+        estimate
+            .execution_authorization_expires_at(started_at)
+            .unwrap(),
         started_at + Duration::hours(8),
         "pauses do not move the persisted execution deadline"
     );
@@ -244,14 +237,11 @@ fn acknowledgement_and_execution_expiry_use_distinct_clocks() {
 #[test]
 fn rejects_mixed_surface_cohort() {
     let error = ScanBatchPlan::new(
-        "mixed",
-        "1.0.0",
-        &"a".repeat(64),
+        &cli_pack(),
         "ability-v1",
         BatchMode::QuickComparison,
         7,
         vec![guided_target("gpt-5"), cli_target("gpt-5")],
-        &cli_tasks(),
         issued_at(),
     )
     .unwrap_err();
@@ -260,40 +250,158 @@ fn rejects_mixed_surface_cohort() {
 
 #[test]
 fn cost_policy_v1_is_bound_to_the_shipped_sealed_packs() {
+    assert_eq!(cli_pack().content_sha256, CLI_PACK_HASH);
     assert!(
         ScanBatchPlan::new(
-            "cli-quick",
-            "1.0.0",
-            CLI_PACK_HASH,
+            &cli_pack(),
             "ability-v1",
             BatchMode::QuickComparison,
             7,
             vec![cli_target("gpt-5"), cli_target("gpt-5-mini")],
-            &cli_tasks(),
             issued_at(),
         )
         .is_ok()
     );
-    for (id, version, hash) in [
-        ("other-pack", "1.0.0", CLI_PACK_HASH),
-        ("cli-quick", "1.0.1", CLI_PACK_HASH),
-        ("cli-quick", "1.0.0", CLIENT_PACK_HASH),
-    ] {
+    let mut wrong_id = cli_pack();
+    wrong_id.manifest.id = "other-pack".into();
+    let mut wrong_version = cli_pack();
+    wrong_version.manifest.version = "1.0.1".into();
+    let mut wrong_hash = cli_pack();
+    wrong_hash.content_sha256 = CLIENT_PACK_HASH.into();
+    for pack in [wrong_id, wrong_version, wrong_hash] {
         assert!(
             ScanBatchPlan::new(
-                id,
-                version,
-                hash,
+                &pack,
                 "ability-v1",
                 BatchMode::QuickComparison,
                 7,
                 vec![cli_target("gpt-5"), cli_target("gpt-5-mini")],
-                &cli_tasks(),
                 issued_at(),
             )
             .is_err()
         );
     }
+}
+
+#[test]
+fn plans_derive_budgets_from_verified_client_and_cli_packs() {
+    let guided = ScanBatchPlan::new(
+        &guided_pack(),
+        "ability-v1",
+        BatchMode::QuickComparison,
+        7,
+        vec![guided_target("gpt-5"), guided_target("gpt-5-mini")],
+        issued_at(),
+    )
+    .unwrap();
+    assert_eq!(guided.cost_estimate.task_launches, 16);
+    assert_eq!(guided.cost_estimate.max_provider_turns, 16);
+    assert_eq!(guided.cost_estimate.summed_task_budget_secs, 2_160);
+
+    let cli = ScanBatchPlan::new(
+        &cli_pack(),
+        "ability-v1",
+        BatchMode::QuickComparison,
+        7,
+        vec![cli_target("gpt-5"), cli_target("gpt-5-mini")],
+        issued_at(),
+    )
+    .unwrap();
+    assert_eq!(cli.cost_estimate.task_launches, 4);
+    assert_eq!(cli.cost_estimate.max_provider_turns, 80);
+    assert_eq!(cli.cost_estimate.summed_task_budget_secs, 7_200);
+}
+
+#[test]
+fn rejects_understated_and_overstated_budgets_for_both_shipped_hashes() {
+    for (task_index, time_budget, max_turns) in [(0, 119, 1), (0, 121, 1), (0, 120, 0), (0, 120, 2)]
+    {
+        let mut pack = guided_pack();
+        assert_eq!(pack.content_sha256, CLIENT_PACK_HASH);
+        pack.tasks[task_index].definition.time_budget_secs = time_budget;
+        pack.tasks[task_index].definition.max_turns = max_turns;
+        assert!(
+            ScanBatchPlan::new(
+                &pack,
+                "ability-v1",
+                BatchMode::QuickComparison,
+                7,
+                vec![guided_target("gpt-5"), guided_target("gpt-5-mini")],
+                issued_at(),
+            )
+            .is_err()
+        );
+    }
+
+    for (time_budget, max_turns) in [(1_799, 20), (1_801, 20), (1_800, 19), (1_800, 21)] {
+        let mut pack = cli_pack();
+        assert_eq!(pack.content_sha256, CLI_PACK_HASH);
+        pack.tasks[0].definition.time_budget_secs = time_budget;
+        pack.tasks[0].definition.max_turns = max_turns;
+        assert!(
+            ScanBatchPlan::new(
+                &pack,
+                "ability-v1",
+                BatchMode::QuickComparison,
+                7,
+                vec![cli_target("gpt-5"), cli_target("gpt-5-mini")],
+                issued_at(),
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn forged_batch_target_fields_fail_reconstruction_validation() {
+    let canonical = cli_target("gpt-5");
+    let mut forgeries = Vec::new();
+
+    let mut value = canonical.clone();
+    value.route_identity.model_or_route = "gpt-5-mini".into();
+    forgeries.push(value);
+
+    let mut value = canonical.clone();
+    value.route_identity.reasoning_effort = Some("low".into());
+    forgeries.push(value);
+
+    let mut value = canonical.clone();
+    value.route_identity.is_default_route = true;
+    forgeries.push(value);
+
+    let mut value = canonical.clone();
+    value.execution_adapter_identity.provider_family = "anthropic".into();
+    forgeries.push(value);
+
+    let mut value = canonical.clone();
+    value.execution_adapter_identity.launch_kind = AdapterLaunchKind::GuidedClient;
+    forgeries.push(value);
+
+    let mut value = canonical.clone();
+    value.execution_adapter_identity.adapter_contract_version = "CLI-Adapter-V1".into();
+    forgeries.push(value);
+
+    let mut value = canonical.clone();
+    value.execution_adapter_identity.public_version = Some(" Codex 1.2.3 ".into());
+    forgeries.push(value);
+
+    let mut value = canonical.clone();
+    value.target.kind = TargetKind::ChatGptClient;
+    forgeries.push(value);
+
+    for forged in forgeries {
+        assert!(forged.validate_for_new_batch().is_err());
+    }
+}
+
+#[test]
+fn forged_batch_target_json_fails_closed() {
+    let mut json = serde_json::to_value(cli_target("gpt-5")).unwrap();
+    json["routeIdentity"]["modelOrRoute"] = serde_json::json!("gpt-5-mini");
+    json["executionAdapterIdentity"]["adapterContractVersion"] =
+        serde_json::json!("cli-adapter-v2");
+    let forged: ScanBatchTarget = serde_json::from_value(json).unwrap();
+    assert!(forged.validate_for_new_batch().is_err());
 }
 
 #[test]
@@ -338,6 +446,78 @@ fn route_identity_is_normalized_path_free_and_distinguishes_default_route() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn identities_reject_edge_controls_and_local_paths_before_trimming() {
+    for model in [
+        "\ngpt-5",
+        "gpt-5\r",
+        "\tgpt-5",
+        r"C:\Users\alice\model",
+        r"\\server\share\model",
+        "/home/alice/model",
+        "/Users/alice/model",
+        "~/private/model",
+    ] {
+        assert!(
+            TargetRouteIdentity::new(
+                TargetKind::CodexCli,
+                model,
+                Some("high"),
+                BatchExecutionSurface::AutomatedCli,
+                false,
+            )
+            .is_err(),
+            "identity accepted unsafe model {model:?}"
+        );
+    }
+    for reasoning in ["\nhigh", "high\r", "\thigh", r"C:\Users\alice", "~/high"] {
+        assert!(
+            TargetRouteIdentity::new(
+                TargetKind::CodexCli,
+                "gpt-5",
+                Some(reasoning),
+                BatchExecutionSurface::AutomatedCli,
+                false,
+            )
+            .is_err(),
+            "identity accepted unsafe reasoning {reasoning:?}"
+        );
+    }
+    assert!(
+        TargetRouteIdentity::new(
+            TargetKind::CodexCli,
+            "model with spaces",
+            Some("high"),
+            BatchExecutionSurface::AutomatedCli,
+            false,
+        )
+        .is_err()
+    );
+    assert!(
+        TargetRouteIdentity::new(
+            TargetKind::ChatGptClient,
+            "模型 五",
+            Some("深度思考"),
+            BatchExecutionSurface::GuidedClient,
+            false,
+        )
+        .is_ok()
+    );
+
+    for original in ["\nopenai", "openai\r", "\topenai"] {
+        assert!(
+            ExecutionAdapterIdentity::new(
+                BatchExecutionSurface::AutomatedCli,
+                original,
+                AdapterLaunchKind::NativeExe,
+                Some("codex 1.2.3"),
+                "cli-adapter-v1",
+            )
+            .is_err()
+        );
+    }
 }
 
 #[test]
@@ -446,6 +626,46 @@ fn adapter_identity_is_path_free() {
 }
 
 #[test]
+fn decoded_estimates_are_validated_and_authorization_expiry_is_checked() {
+    let pack = cli_pack();
+    let estimate = BatchCostPolicy::v1()
+        .estimate(
+            &pack,
+            BatchExecutionSurface::AutomatedCli,
+            BatchMode::QuickComparison,
+            2,
+            issued_at(),
+        )
+        .unwrap();
+    assert!(estimate.validate_against_pack(&pack).is_ok());
+    assert!(
+        estimate
+            .execution_authorization_expires_at(chrono::DateTime::<Utc>::MAX_UTC)
+            .is_err()
+    );
+
+    let mut json = serde_json::to_value(&estimate).unwrap();
+    json["taskLaunches"] = serde_json::json!(0);
+    let understated: ability_core::BatchCostEstimate = serde_json::from_value(json).unwrap();
+    assert!(understated.validate_against_pack(&pack).is_err());
+    assert!(
+        understated
+            .execution_authorization_expires_at(issued_at())
+            .is_err()
+    );
+
+    let mut json = serde_json::to_value(&estimate).unwrap();
+    json["authorizationWallClockSecs"] = serde_json::json!(u64::MAX);
+    let out_of_range: ability_core::BatchCostEstimate = serde_json::from_value(json).unwrap();
+    assert!(out_of_range.validate_against_pack(&pack).is_err());
+    assert!(
+        out_of_range
+            .execution_authorization_expires_at(issued_at())
+            .is_err()
+    );
+}
+
+#[test]
 fn legacy_environment_defaults_adapter_to_absent_and_batch_requires_it() {
     let legacy = r#"{
         "osFamily":"Windows","osVersion":"11","appVersion":"0.2.2",
@@ -486,14 +706,11 @@ fn batch_resume_rejects_incompatible_adapter_contract() {
 #[test]
 fn duplicate_route_identities_are_rejected() {
     let error = ScanBatchPlan::new(
-        "cli-quick",
-        "1.0.0",
-        CLI_PACK_HASH,
+        &cli_pack(),
         "ability-v1",
         BatchMode::QuickComparison,
         1,
         vec![cli_target("GPT-5"), cli_target(" gpt-5 ")],
-        &cli_tasks(),
         issued_at(),
     )
     .unwrap_err();
@@ -503,63 +720,48 @@ fn duplicate_route_identities_are_rejected() {
 #[test]
 fn every_plan_mutation_changes_the_acknowledgement_hash() {
     let plan = ScanBatchPlan::new(
-        "cli-quick",
-        "1.0.0",
-        CLI_PACK_HASH,
+        &cli_pack(),
         "ability-v1",
         BatchMode::QuickComparison,
         42,
         vec![cli_target("gpt-5"), cli_target("gpt-5-mini")],
-        &cli_tasks(),
         issued_at(),
     )
     .unwrap();
     let mutations = [
         ScanBatchPlan::new(
-            "cli-quick",
-            "1.0.0",
-            CLI_PACK_HASH,
+            &cli_pack(),
             "ability-v2",
             BatchMode::QuickComparison,
             42,
             plan.targets.clone(),
-            &cli_tasks(),
             issued_at(),
         )
         .unwrap(),
         ScanBatchPlan::new(
-            "cli-quick",
-            "1.0.0",
-            CLI_PACK_HASH,
+            &cli_pack(),
             "ability-v1",
             BatchMode::QuickComparison,
             43,
             plan.targets.clone(),
-            &cli_tasks(),
             issued_at(),
         )
         .unwrap(),
         ScanBatchPlan::new(
-            "cli-quick",
-            "1.0.0",
-            CLI_PACK_HASH,
+            &cli_pack(),
             "ability-v1",
             BatchMode::QuickComparison,
             42,
             plan.targets.iter().cloned().rev().collect(),
-            &cli_tasks(),
             issued_at(),
         )
         .unwrap(),
         ScanBatchPlan::new(
-            "cli-quick",
-            "1.0.0",
-            CLI_PACK_HASH,
+            &cli_pack(),
             "ability-v1",
             BatchMode::Standard,
             42,
             plan.targets.clone(),
-            &cli_tasks(),
             issued_at(),
         )
         .unwrap(),

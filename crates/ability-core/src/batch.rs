@@ -1,6 +1,6 @@
 use crate::{
-    EnvironmentFingerprint, ModelSource, ModelVerification, TargetKind, TargetSelection,
-    contains_forbidden_display_character, is_valid_reported_model,
+    EnvironmentFingerprint, LoadedPack, ModelSource, ModelVerification, TargetKind,
+    TargetSelection, contains_forbidden_display_character, is_valid_reported_model,
 };
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -77,8 +77,10 @@ impl TargetRouteIdentity {
         is_default_route: bool,
     ) -> Result<Self, BatchContractError> {
         ensure_kind_surface(kind, execution_surface)?;
-        let model_or_route = normalize_model(model_or_route)?;
-        let reasoning_effort = reasoning_effort.map(normalize_reasoning).transpose()?;
+        let model_or_route = normalize_model(model_or_route, execution_surface)?;
+        let reasoning_effort = reasoning_effort
+            .map(|value| normalize_reasoning(value, execution_surface))
+            .transpose()?;
         if is_default_route {
             if execution_surface != BatchExecutionSurface::AutomatedCli
                 || !matches!(model_or_route.as_str(), "default" | "default_route")
@@ -121,6 +123,14 @@ impl ExecutionAdapterIdentity {
         public_version: Option<&str>,
         adapter_contract_version: &str,
     ) -> Result<Self, BatchContractError> {
+        reject_forbidden_original(provider_family, BatchContractError::InvalidAdapterIdentity)?;
+        reject_forbidden_original(
+            adapter_contract_version,
+            BatchContractError::InvalidAdapterIdentity,
+        )?;
+        if let Some(public_version) = public_version {
+            reject_forbidden_original(public_version, BatchContractError::InvalidAdapterIdentity)?;
+        }
         let provider_family = normalize_identifier(provider_family, 32)?;
         let adapter_contract_version = normalize_identifier(adapter_contract_version, 64)?;
         let public_version = public_version.map(normalize_public_version).transpose()?;
@@ -161,14 +171,29 @@ pub struct ScanBatchTarget {
 
 impl ScanBatchTarget {
     pub fn new(
-        target: TargetSelection,
+        mut target: TargetSelection,
         execution_surface: BatchExecutionSurface,
         execution_adapter_identity: ExecutionAdapterIdentity,
     ) -> Result<Self, BatchContractError> {
         ensure_kind_surface(target.kind, execution_surface)?;
-        if execution_adapter_identity.execution_surface != execution_surface {
+        let canonical_adapter = ExecutionAdapterIdentity::new(
+            execution_adapter_identity.execution_surface,
+            &execution_adapter_identity.provider_family,
+            execution_adapter_identity.launch_kind,
+            execution_adapter_identity.public_version.as_deref(),
+            &execution_adapter_identity.adapter_contract_version,
+        )?;
+        if canonical_adapter != execution_adapter_identity
+            || execution_adapter_identity.execution_surface != execution_surface
+        {
             return Err(BatchContractError::MixedExecutionSurface);
         }
+        target.reported_model = canonical_target_model(&target.reported_model, execution_surface)?;
+        target.reasoning_effort = target
+            .reasoning_effort
+            .as_deref()
+            .map(|value| normalize_reasoning(value, execution_surface))
+            .transpose()?;
         validate_provenance(&target, execution_surface)?;
         let expected_provider = match target.kind {
             TargetKind::ChatGptClient | TargetKind::CodexCli => "openai",
@@ -192,13 +217,24 @@ impl ScanBatchTarget {
     }
 
     pub fn validate_for_new_batch(&self) -> Result<(), BatchContractError> {
-        validate_provenance(&self.target, self.route_identity.execution_surface)?;
-        if self.execution_adapter_identity.execution_surface
-            != self.route_identity.execution_surface
-        {
-            return Err(BatchContractError::MixedExecutionSurface);
+        let canonical_adapter = ExecutionAdapterIdentity::new(
+            self.execution_adapter_identity.execution_surface,
+            &self.execution_adapter_identity.provider_family,
+            self.execution_adapter_identity.launch_kind,
+            self.execution_adapter_identity.public_version.as_deref(),
+            &self.execution_adapter_identity.adapter_contract_version,
+        )?;
+        if canonical_adapter != self.execution_adapter_identity {
+            return Err(BatchContractError::InvalidAdapterIdentity);
         }
-        Ok(())
+        let reconstructed = Self::new(
+            self.target.clone(),
+            self.route_identity.execution_surface,
+            canonical_adapter,
+        )?;
+        (reconstructed == *self)
+            .then_some(())
+            .ok_or(BatchContractError::InvalidRouteIdentity)
     }
 }
 
@@ -227,14 +263,102 @@ pub struct BatchCostEstimate {
     pub expected_elapsed_secs_max: u64,
     pub provider_execution_ceiling_secs: u64,
     pub authorization_wall_clock_secs: u64,
+    pub issued_at: DateTime<Utc>,
     pub initial_acknowledgement_expires_at: DateTime<Utc>,
     pub token_quota_amount: Option<u64>,
     pub automatic_retry_budget: u64,
 }
 
 impl BatchCostEstimate {
-    pub fn execution_authorization_expires_at(&self, started_at: DateTime<Utc>) -> DateTime<Utc> {
-        started_at + Duration::seconds(self.authorization_wall_clock_secs as i64)
+    pub fn execution_authorization_expires_at(
+        &self,
+        started_at: DateTime<Utc>,
+    ) -> Result<DateTime<Utc>, BatchContractError> {
+        self.validate_intrinsic_v1()?;
+        let seconds = i64::try_from(self.authorization_wall_clock_secs)
+            .map_err(|_| BatchContractError::ArithmeticOverflow)?;
+        started_at
+            .checked_add_signed(Duration::seconds(seconds))
+            .ok_or(BatchContractError::ArithmeticOverflow)
+    }
+
+    pub fn validate_against_pack(&self, pack: &LoadedPack) -> Result<(), BatchContractError> {
+        self.validate_intrinsic_v1()?;
+        let expected = BatchCostPolicy::v1().estimate(
+            pack,
+            self.execution_surface,
+            self.mode,
+            self.target_count,
+            self.issued_at,
+        )?;
+        (expected == *self)
+            .then_some(())
+            .ok_or(BatchContractError::InvalidCostEstimate)
+    }
+
+    fn validate_intrinsic_v1(&self) -> Result<(), BatchContractError> {
+        if self.policy_version != POLICY_VERSION
+            || self.tasks_per_member_run == 0
+            || self.token_quota_amount.is_some()
+            || self.automatic_retry_budget != 0
+        {
+            return Err(BatchContractError::InvalidCostEstimate);
+        }
+        let limits = PolicyLimits::for_row(self.execution_surface, self.mode)?;
+        let members = self
+            .target_count
+            .checked_mul(limits.repetitions)
+            .ok_or(BatchContractError::ArithmeticOverflow)?;
+        let launches = members
+            .checked_mul(self.tasks_per_member_run)
+            .ok_or(BatchContractError::ArithmeticOverflow)?;
+        let guided = if self.execution_surface == BatchExecutionSurface::GuidedClient {
+            launches
+        } else {
+            0
+        };
+        let expected_band = match self.execution_surface {
+            BatchExecutionSurface::GuidedClient => (10 * 60_u64, 15 * 60_u64),
+            BatchExecutionSurface::AutomatedCli => (30 * 60_u64, 60 * 60_u64),
+        };
+        let expected_min = members
+            .checked_mul(expected_band.0)
+            .ok_or(BatchContractError::ArithmeticOverflow)?;
+        let expected_max = members
+            .checked_mul(expected_band.1)
+            .ok_or(BatchContractError::ArithmeticOverflow)?;
+        let ceiling = self
+            .summed_task_budget_secs
+            .checked_add(
+                members
+                    .checked_mul(MEMBER_OVERHEAD_SECS)
+                    .ok_or(BatchContractError::ArithmeticOverflow)?,
+            )
+            .ok_or(BatchContractError::ArithmeticOverflow)?;
+        let acknowledgement_expiry = self
+            .issued_at
+            .checked_add_signed(Duration::minutes(INITIAL_ACKNOWLEDGEMENT_MINUTES))
+            .ok_or(BatchContractError::ArithmeticOverflow)?;
+        let within_limits = (2..=limits.max_targets).contains(&self.target_count)
+            && members <= limits.member_cap
+            && launches <= limits.launch_or_interaction_cap
+            && guided <= limits.launch_or_interaction_cap
+            && self.max_provider_turns <= limits.turn_cap
+            && self.summed_task_budget_secs <= limits.task_budget_cap_secs;
+        if !within_limits
+            || self.repetitions_per_target != limits.repetitions
+            || self.planned_member_runs != members
+            || self.task_launches != launches
+            || self.guided_interactions != guided
+            || self.expected_elapsed_secs_min != expected_min
+            || self.expected_elapsed_secs_max != expected_max
+            || self.provider_execution_ceiling_secs != ceiling
+            || self.authorization_wall_clock_secs != limits.window_hours * 60 * 60
+            || self.initial_acknowledgement_expires_at != acknowledgement_expiry
+        {
+            return Err(BatchContractError::InvalidCostEstimate);
+        }
+        Ok(())
     }
 }
 
@@ -253,15 +377,16 @@ impl BatchCostPolicy {
 
     pub fn estimate(
         &self,
+        pack: &LoadedPack,
         execution_surface: BatchExecutionSurface,
         mode: BatchMode,
         target_count: u64,
-        task_budgets: &[SealedTaskBudget],
         issued_at: DateTime<Utc>,
     ) -> Result<BatchCostEstimate, BatchContractError> {
-        if self.version != POLICY_VERSION || task_budgets.is_empty() {
+        if self.version != POLICY_VERSION {
             return Err(BatchContractError::UnsupportedCostPolicy);
         }
+        let task_budgets = verified_pack_budgets(pack, execution_surface)?;
         let limits = PolicyLimits::for_row(execution_surface, mode)?;
         if !(2..=limits.max_targets).contains(&target_count) {
             return Err(BatchContractError::CohortLimitExceeded);
@@ -339,6 +464,7 @@ impl BatchCostPolicy {
             expected_elapsed_secs_max,
             provider_execution_ceiling_secs,
             authorization_wall_clock_secs: limits.window_hours * 60 * 60,
+            issued_at,
             initial_acknowledgement_expires_at,
             token_quota_amount: None,
             automatic_retry_budget: 0,
@@ -363,20 +489,17 @@ pub struct ScanBatchPlan {
 }
 
 impl ScanBatchPlan {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        suite_id: &str,
-        suite_version: &str,
-        suite_content_sha256: &str,
+        pack: &LoadedPack,
         scoring_rule_version: &str,
         mode: BatchMode,
         seed: u64,
         targets: Vec<ScanBatchTarget>,
-        sealed_task_budgets: &[SealedTaskBudget],
         issued_at: DateTime<Utc>,
     ) -> Result<Self, BatchContractError> {
-        let suite_id = validated_plan_text(suite_id, 128)?;
-        let suite_version = validated_plan_text(suite_version, 64)?;
+        let suite_id = validated_plan_text(&pack.manifest.id, 128)?;
+        let suite_version = validated_plan_text(&pack.manifest.version, 64)?;
+        let suite_content_sha256 = pack.content_sha256.as_str();
         let scoring_rule_version = validated_plan_text(scoring_rule_version, 64)?;
         if suite_content_sha256.len() != 64
             || !suite_content_sha256
@@ -400,29 +523,16 @@ impl ScanBatchPlan {
                 return Err(BatchContractError::DuplicateRouteIdentity);
             }
         }
-        let expected_pack = match surface {
-            BatchExecutionSurface::GuidedClient => {
-                ("client-quick", "1.0.0", CLIENT_QUICK_V1_SHA256)
+        for target in &targets {
+            if !pack.manifest.target_kinds.contains(&target.target.kind) {
+                return Err(BatchContractError::UnsupportedCostPolicy);
             }
-            BatchExecutionSurface::AutomatedCli => ("cli-quick", "1.0.0", CLI_QUICK_V1_SHA256),
-        };
-        if (
-            suite_id.as_str(),
-            suite_version.as_str(),
-            suite_content_sha256,
-        ) != expected_pack
-        {
-            return Err(BatchContractError::UnsupportedCostPolicy);
         }
+        let sealed_task_budgets = verified_pack_budgets(pack, surface)?;
         let target_count =
             u64::try_from(targets.len()).map_err(|_| BatchContractError::ArithmeticOverflow)?;
-        let cost_estimate = BatchCostPolicy::v1().estimate(
-            surface,
-            mode,
-            target_count,
-            sealed_task_budgets,
-            issued_at,
-        )?;
+        let cost_estimate =
+            BatchCostPolicy::v1().estimate(pack, surface, mode, target_count, issued_at)?;
         let hash_payload = PlanHashPayload {
             suite_id: &suite_id,
             suite_version: &suite_version,
@@ -431,7 +541,7 @@ impl ScanBatchPlan {
             mode,
             seed,
             targets: &targets,
-            sealed_task_budgets,
+            sealed_task_budgets: &sealed_task_budgets,
             cost_estimate: &cost_estimate,
         };
         let bytes = serde_json::to_vec(&hash_payload)
@@ -446,7 +556,7 @@ impl ScanBatchPlan {
             seed,
             status: BatchStatus::Created,
             targets,
-            sealed_task_budgets: sealed_task_budgets.to_vec(),
+            sealed_task_budgets,
             cost_estimate,
             acknowledgement_hash,
         })
@@ -564,6 +674,8 @@ pub enum BatchContractError {
     DuplicateRouteIdentity,
     #[error("batch plan identity is invalid")]
     InvalidPlanIdentity,
+    #[error("decoded batch cost estimate does not match cost policy v1")]
+    InvalidCostEstimate,
     #[error("batch environment is missing execution adapter identity")]
     MissingAdapterIdentity,
     #[error("batch execution adapter identity is incompatible")]
@@ -616,23 +728,56 @@ fn validate_provenance(
         .ok_or(BatchContractError::InvalidProvenance)
 }
 
-fn normalize_model(value: &str) -> Result<String, BatchContractError> {
+fn canonical_target_model(
+    value: &str,
+    surface: BatchExecutionSurface,
+) -> Result<String, BatchContractError> {
+    reject_forbidden_original(value, BatchContractError::InvalidRouteIdentity)?;
     let trimmed = value.trim();
-    if !is_valid_reported_model(trimmed) {
+    if !is_valid_reported_model(trimmed) || looks_like_local_path(trimmed) {
         return Err(BatchContractError::InvalidRouteIdentity);
     }
-    Ok(trimmed.to_lowercase())
+    if surface == BatchExecutionSurface::AutomatedCli && !safe_cli_model(trimmed) {
+        return Err(BatchContractError::InvalidRouteIdentity);
+    }
+    Ok(trimmed.to_owned())
 }
 
-fn normalize_reasoning(value: &str) -> Result<String, BatchContractError> {
+fn normalize_model(
+    value: &str,
+    surface: BatchExecutionSurface,
+) -> Result<String, BatchContractError> {
+    Ok(canonical_target_model(value, surface)?.to_lowercase())
+}
+
+fn normalize_reasoning(
+    value: &str,
+    surface: BatchExecutionSurface,
+) -> Result<String, BatchContractError> {
+    reject_forbidden_original(value, BatchContractError::InvalidRouteIdentity)?;
     let trimmed = value.trim();
-    if trimmed.is_empty()
-        || trimmed.chars().count() > 40
-        || contains_forbidden_display_character(trimmed)
-    {
+    if trimmed.is_empty() || trimmed.chars().count() > 40 || looks_like_local_path(trimmed) {
         return Err(BatchContractError::InvalidRouteIdentity);
     }
-    Ok(trimmed.to_lowercase())
+    let canonical = trimmed.to_ascii_lowercase();
+    const KNOWN: &[&str] = &[
+        "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+    ];
+    if KNOWN.contains(&canonical.as_str()) {
+        return Ok(canonical);
+    }
+    match surface {
+        BatchExecutionSurface::GuidedClient => Ok(trimmed.to_owned()),
+        BatchExecutionSurface::AutomatedCli
+            if canonical.len() <= 32
+                && canonical
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')) =>
+        {
+            Ok(canonical)
+        }
+        BatchExecutionSurface::AutomatedCli => Err(BatchContractError::InvalidRouteIdentity),
+    }
 }
 
 fn normalize_identifier(value: &str, max_len: usize) -> Result<String, BatchContractError> {
@@ -664,6 +809,114 @@ fn normalize_public_version(value: &str) -> Result<String, BatchContractError> {
     Ok(normalized)
 }
 
+fn safe_cli_model(value: &str) -> bool {
+    let mut characters = value.chars();
+    characters
+        .next()
+        .is_some_and(|character| character.is_ascii_alphanumeric())
+        && characters.all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | ':' | '/' | '-')
+        })
+}
+
+fn looks_like_local_path(value: &str) -> bool {
+    let normalized = value.replace('\\', "/");
+    let lower = normalized.to_ascii_lowercase();
+    let bytes = value.as_bytes();
+    value.contains('\\')
+        || lower.starts_with('/')
+        || lower.starts_with("~/")
+        || lower.starts_with("./")
+        || lower.starts_with("../")
+        || lower.contains("/home/")
+        || lower.contains("/users/")
+        || lower.contains("/appdata/")
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\'))
+}
+
+fn reject_forbidden_original(
+    value: &str,
+    error: BatchContractError,
+) -> Result<(), BatchContractError> {
+    if contains_forbidden_display_character(value) {
+        Err(error)
+    } else {
+        Ok(())
+    }
+}
+
+struct CostPolicyPackSpec {
+    id: &'static str,
+    content_sha256: &'static str,
+    target_kinds: &'static [TargetKind],
+    tasks: &'static [(&'static str, u64, u64)],
+}
+
+fn verified_pack_budgets(
+    pack: &LoadedPack,
+    surface: BatchExecutionSurface,
+) -> Result<Vec<SealedTaskBudget>, BatchContractError> {
+    let expected = match surface {
+        BatchExecutionSurface::GuidedClient => CostPolicyPackSpec {
+            id: "client-quick",
+            content_sha256: CLIENT_QUICK_V1_SHA256,
+            target_kinds: &[TargetKind::ChatGptClient, TargetKind::ClaudeClient],
+            tasks: &[
+                ("instruction-filter", 1, 120),
+                ("instruction-csv", 1, 120),
+                ("instruction-inventory", 1, 120),
+                ("logic-schedule", 1, 120),
+                ("logic-truth", 1, 120),
+                ("logic-capacity", 1, 120),
+                ("review-python", 1, 180),
+                ("review-typescript", 1, 180),
+            ],
+        },
+        BatchExecutionSurface::AutomatedCli => CostPolicyPackSpec {
+            id: "cli-quick",
+            content_sha256: CLI_QUICK_V1_SHA256,
+            target_kinds: &[TargetKind::CodexCli, TargetKind::ClaudeCode],
+            tasks: &[("dedupe-events", 20, 1_800), ("retry-schedule", 20, 1_800)],
+        },
+    };
+    if pack.manifest.id != expected.id
+        || pack.manifest.version != "1.0.0"
+        || pack.content_sha256 != expected.content_sha256
+        || pack.manifest.target_kinds != expected.target_kinds
+        || pack.manifest.tasks.len() != expected.tasks.len()
+        || pack.tasks.len() != expected.tasks.len()
+    {
+        return Err(BatchContractError::UnsupportedCostPolicy);
+    }
+
+    let mut budgets = Vec::with_capacity(expected.tasks.len());
+    for ((manifest_task, loaded_task), (id, max_turns, time_budget_secs)) in pack
+        .manifest
+        .tasks
+        .iter()
+        .zip(&pack.tasks)
+        .zip(expected.tasks)
+    {
+        if manifest_task.id != *id
+            || loaded_task.definition.id != *id
+            || u64::from(manifest_task.max_turns) != *max_turns
+            || u64::from(loaded_task.definition.max_turns) != *max_turns
+            || manifest_task.time_budget_secs != *time_budget_secs
+            || loaded_task.definition.time_budget_secs != *time_budget_secs
+        {
+            return Err(BatchContractError::InvalidTaskBudget);
+        }
+        budgets.push(SealedTaskBudget {
+            max_turns: *max_turns,
+            time_budget_secs: *time_budget_secs,
+        });
+    }
+    Ok(budgets)
+}
+
 fn checked_sum(mut values: impl Iterator<Item = u64>) -> Result<u64, BatchContractError> {
     values.try_fold(0_u64, |sum, value| {
         sum.checked_add(value)
@@ -672,6 +925,7 @@ fn checked_sum(mut values: impl Iterator<Item = u64>) -> Result<u64, BatchContra
 }
 
 fn validated_plan_text(value: &str, max_chars: usize) -> Result<String, BatchContractError> {
+    reject_forbidden_original(value, BatchContractError::InvalidPlanIdentity)?;
     let trimmed = value.trim();
     if trimmed.is_empty()
         || trimmed.chars().count() > max_chars
