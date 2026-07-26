@@ -617,10 +617,14 @@ button:disabled,
   margin-block: 0;
 }
 
-.app-shell .run-page,
 .app-shell .cli-run-page,
 .app-shell .evidence-page {
   width: min(68rem, calc(100% - clamp(1.5rem, 5vw, 4rem)));
+}
+
+.app-shell .run-page,
+.app-shell .cli-run-page,
+.app-shell .evidence-page {
   color: var(--text-primary);
   font-family: var(--font-body);
 }

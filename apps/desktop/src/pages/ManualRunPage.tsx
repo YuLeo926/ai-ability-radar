@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Link,
   useNavigate,
@@ -24,7 +24,6 @@ import {
 } from "../domain/reportedModel";
 import { useT } from "../i18n/I18nContext";
 import type {
-  Backend,
   ManualStep,
   RunRecord,
   TargetKind,
@@ -107,14 +106,10 @@ function SetupPage({
   onModelChange,
   onReasoningEffortChange,
   onReasoningValidationChange,
-  onSelectionApply,
   onStart,
-  selectionEdited,
-  selectionFormDirty,
-  detectClientSelection,
+  selectionPanel,
 }: {
   busy: boolean;
-  detectClientSelection: Backend["detectClientSelection"];
   error: string;
   freshChat: boolean;
   kind: ClientTargetKind;
@@ -126,13 +121,8 @@ function SetupPage({
   onModelChange(value: string): void;
   onReasoningEffortChange(value: string): void;
   onReasoningValidationChange(error: string | null): void;
-  onSelectionApply(value: {
-    model?: string;
-    reasoningEffort?: string;
-  }): void;
   onStart(): void;
-  selectionEdited: boolean;
-  selectionFormDirty: boolean;
+  selectionPanel: ReactNode;
 }) {
   const modelError = reportedModelError(model);
   const showModelError = modelTouched && modelError;
@@ -144,54 +134,53 @@ function SetupPage({
       id="page-content"
       tabIndex={-1}
     >
-      <section aria-labelledby="manual-setup-title" className="manual-setup">
+      <header className="manual-setup-hero" data-testid="manual-setup-hero">
         <p className="eyebrow">客户端 · 快速体检 · 约 10–15 分钟</p>
         <h1 id="manual-setup-title">{label}快速体检</h1>
         <p className="hero-summary">
           一次只处理一道题：复制题目到客户端的新空白对话，再把完整回答原样粘贴回来。
         </p>
+      </header>
 
-        <aside aria-labelledby="manual-boundary-title" className="notice">
-          <h2 id="manual-boundary-title">开始前请确认</h2>
-          <p>客户端使用可能消耗你自己的订阅额度。</p>
-          <p>维护者不会承担费用，也不会接收你的登录凭据。</p>
-          <p>这里测量端到端客户端表现，不是底层模型的“智商”。</p>
-          <p>原始回答只保存在本机，不会自动上传。</p>
+      <section
+        aria-labelledby="manual-setup-title"
+        className="manual-setup-panel"
+        data-testid="manual-setup-panel"
+      >
+        <aside aria-labelledby="manual-boundary-title" className="manual-boundary">
+          <div>
+            <p className="section-kicker">费用与隐私</p>
+            <h2 id="manual-boundary-title">开始前请确认</h2>
+          </div>
+          <ul>
+            <li>客户端使用可能消耗你自己的订阅额度。</li>
+            <li>登录凭据不会交给本工具，原始回答仅保存在本机。</li>
+            <li>这里测量端到端客户端表现，不是底层模型的“智商”。</li>
+          </ul>
         </aside>
 
-        {!busy ? (
-          <ClientSelectionPanel
-            detect={detectClientSelection}
-            edited={selectionEdited}
-            enabled
-            formDirty={selectionFormDirty}
-            onApply={onSelectionApply}
-            target={kind}
-          />
-        ) : null}
+        {selectionPanel}
 
         <div className="manual-fields">
-          <label className="field">
-            <span>当前显示的模型</span>
-            <input
-              aria-describedby={showModelError ? "model-error" : undefined}
-              aria-invalid={showModelError ? "true" : undefined}
-              autoComplete="off"
-              onChange={(event) => onModelChange(event.target.value)}
-              placeholder="例如 GPT-5、Claude Sonnet"
-              value={model}
-            />
-          </label>
-          {showModelError ? (
-            <p
-              aria-label={showModelError}
-              className="form-error"
-              id="model-error"
-              role="alert"
-            >
-              {showModelError}
-            </p>
-          ) : null}
+          <div className="field-stack">
+            <label className="field" htmlFor="manual-model">
+              <span>当前显示的模型</span>
+              <input
+                id="manual-model"
+                aria-describedby={showModelError ? "model-error" : undefined}
+                aria-invalid={showModelError ? "true" : undefined}
+                autoComplete="off"
+                onChange={(event) => onModelChange(event.target.value)}
+                placeholder="例如 GPT-5、Claude Sonnet"
+                value={model}
+              />
+            </label>
+            {showModelError ? (
+              <p className="form-error" id="model-error" role="alert">
+                {showModelError}
+              </p>
+            ) : null}
+          </div>
 
           <ReasoningEffortField
             emptyLabel="未显示 / 不适用"
@@ -203,15 +192,16 @@ function SetupPage({
             value={reasoningEffort}
           />
 
-          <label className="check-row">
-            <input
-              checked={freshChat}
-              onChange={(event) => onFreshChatChange(event.target.checked)}
-              type="checkbox"
-            />
-            <span>我会为每道题新建空白对话</span>
-          </label>
         </div>
+
+        <label className="check-row">
+          <input
+            checked={freshChat}
+            onChange={(event) => onFreshChatChange(event.target.checked)}
+            type="checkbox"
+          />
+          <span>我会为每道题新建空白对话</span>
+        </label>
 
         <p className="hint">
           除非题目明确允许，否则关闭联网搜索、工具和连接器；不要追加解释性提示，
@@ -227,15 +217,20 @@ function SetupPage({
             正在创建本地体检…
           </p>
         ) : null}
-        <button
-          disabled={
-            busy || !freshChat || Boolean(modelError) || Boolean(reasoningError)
-          }
-          onClick={onStart}
-          type="button"
-        >
-          开始快速体检
-        </button>
+        <div className="manual-actions">
+          <button
+            disabled={
+              Boolean(busy) ||
+              !freshChat ||
+              Boolean(modelError) ||
+              Boolean(reasoningError)
+            }
+            onClick={onStart}
+            type="button"
+          >
+            开始快速体检
+          </button>
+        </div>
       </section>
     </main>
   );
@@ -1076,7 +1071,6 @@ function ManualWizard({
     return (
       <SetupPage
         busy={state.kind === "starting"}
-        detectClientSelection={backend.detectClientSelection}
         error={state.kind === "setup" ? state.error : ""}
         freshChat={freshChat}
         kind={kind}
@@ -1095,12 +1089,21 @@ function ManualWizard({
           setModelSource("manual");
         }}
         onReasoningValidationChange={setReasoningError}
-        onSelectionApply={applyClientSelection}
         onStart={() => void start()}
         reasoningError={reasoningError}
         reasoningEffort={reasoningEffort}
-        selectionEdited={selectionWasApplied && formDirty}
-        selectionFormDirty={formDirty}
+        selectionPanel={
+          state.kind === "setup" ? (
+            <ClientSelectionPanel
+              detect={backend.detectClientSelection}
+              edited={selectionWasApplied && formDirty}
+              enabled
+              formDirty={formDirty}
+              onApply={applyClientSelection}
+              target={kind}
+            />
+          ) : null
+        }
       />
     );
   }

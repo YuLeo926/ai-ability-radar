@@ -93,6 +93,28 @@ test("auto-runs once and applies one detected candidate", async () => {
   expect(detect).toHaveBeenCalledTimes(1);
 });
 
+test("uses the compact selection panel layout without changing its controls", async () => {
+  const detect = vi.fn(async () => ({
+    status: "multiple" as const,
+    candidates: [candidate(), candidate({ model: "GPT-5.6 Codex" })],
+  }));
+
+  const { container } = render(panel(detect));
+
+  await screen.findByRole("radiogroup");
+  const root = container.querySelector(".selection-panel");
+  expect(root).not.toBeNull();
+  expect(root?.querySelector(".selection-panel-header")).not.toBeNull();
+  expect(root?.querySelector(".selection-status")).toHaveAttribute(
+    "role",
+    "status",
+  );
+  expect(root?.querySelector(".selection-candidates")).toHaveAttribute(
+    "role",
+    "radiogroup",
+  );
+});
+
 test("StrictMode mount reuses the same in-flight automatic request", async () => {
   const pending = deferred<ClientSelectionDetection>();
   const detect = vi.fn(() => pending.promise);

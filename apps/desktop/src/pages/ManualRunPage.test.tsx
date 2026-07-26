@@ -535,6 +535,25 @@ test("setup mode exposes the precision hero, panel, model field, and start actio
     expect
       .soft(childOrder.indexOf(hero))
       .toBeLessThan(childOrder.indexOf(panel));
+    expect.soft(panel.querySelector(".manual-boundary")).not.toBeNull();
+    expect.soft(panel.querySelector(".selection-panel")).not.toBeNull();
+    const fields = panel.querySelector(".manual-fields");
+    expect.soft(fields).not.toBeNull();
+    expect.soft(fields?.children).toHaveLength(2);
+    expect.soft(fields?.firstElementChild).toHaveClass("field-stack");
+    expect.soft(fields?.lastElementChild).toHaveClass("reasoning-effort-field");
+    expect.soft(panel.querySelector(".check-row")?.parentElement).toBe(panel);
+    expect.soft(panel.querySelector(".manual-actions")?.parentElement).toBe(
+      panel,
+    );
+    expect(Array.from(panel.children).map((child) => child.className)).toEqual([
+      "manual-boundary",
+      "selection-panel",
+      "manual-fields",
+      "check-row",
+      "hint",
+      "manual-actions",
+    ]);
   }
   expect(screen.getByLabelText("当前显示的模型")).toHaveAttribute(
     "autocomplete",
@@ -564,7 +583,7 @@ test.each([
       screen.getByText("客户端使用可能消耗你自己的订阅额度。"),
     ).toBeInTheDocument();
     expect(
-      screen.getByText("维护者不会承担费用，也不会接收你的登录凭据。"),
+      screen.getByText("登录凭据不会交给本工具，原始回答仅保存在本机。"),
     ).toBeInTheDocument();
     expect(
       screen.getByText(
@@ -927,19 +946,15 @@ test("validates the model locally and preserves setup after a start failure", as
 
   const modelInput = screen.getByLabelText("当前显示的模型");
   fireEvent.change(modelInput, { target: { value: "GPT-5\u0001" } });
-  expect(
-    screen.getByRole("alert", {
-      name: "模型名称不能包含控制字符",
-    }),
-  ).toBeInTheDocument();
+  expect(screen.getByRole("alert")).toHaveTextContent(
+    "模型名称不能包含控制字符",
+  );
   await user.clear(modelInput);
   await user.type(modelInput, "a".repeat(121));
   expect(modelInput).toHaveAttribute("aria-invalid", "true");
-  expect(
-    screen.getByRole("alert", {
-      name: "模型名称必须是 1–120 个可见字符",
-    }),
-  ).toBeInTheDocument();
+  expect(screen.getByRole("alert")).toHaveTextContent(
+    "模型名称必须是 1–120 个可见字符",
+  );
   expect(screen.getByRole("button", { name: "开始快速体检" })).toBeDisabled();
 
   await user.clear(modelInput);

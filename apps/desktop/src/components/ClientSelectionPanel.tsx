@@ -315,9 +315,9 @@ export function ClientSelectionPanel({
   return (
     <section
       aria-labelledby={titleId}
-      className="client-selection-panel"
+      className="selection-panel"
     >
-      <div className="selection-heading">
+      <div className="selection-panel-header">
         <div>
           <p className="section-kicker">本地辅助识别</p>
           <h2 id={titleId}>确认客户端当前选择</h2>
@@ -354,7 +354,7 @@ export function ClientSelectionPanel({
       {state.kind === "multiple" ? (
         <fieldset
           aria-label="客户端识别结果"
-          className="selection-options"
+          className="selection-candidates"
           role="radiogroup"
         >
           <legend className="sr-only">客户端识别结果</legend>
