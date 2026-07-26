@@ -17,6 +17,51 @@ import test from "node:test";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const validator = join(root, "scripts", "validate-repository.mjs");
+const fixtureRootControlDirectories = new Set([
+  ".git",
+  ".playwright-cli",
+  ".superpowers",
+  "output",
+]);
+const fixtureGeneratedDirectories = new Set(["node_modules", "target", "dist"]);
+
+function shouldCopyFixtureRelativePath(relative) {
+  const segments = relative.split("/").filter(Boolean);
+  if (segments.length === 0) {
+    return true;
+  }
+  if (fixtureRootControlDirectories.has(segments[0])) {
+    return false;
+  }
+  return !segments.some((segment) => fixtureGeneratedDirectories.has(segment));
+}
+
+test("negative fixtures skip generated trees without dropping source paths", () => {
+  for (const path of [
+    "/.git",
+    "/.playwright-cli/session.json",
+    "/.superpowers/plans/phase.md",
+    "/node_modules",
+    "/output/report.json",
+    "/apps/desktop/node_modules/vite/package.json",
+    "/target/debug/ability-radar.exe",
+    "/apps/desktop/src-tauri/target/debug/app.exe",
+    "/apps/desktop/dist/index.html",
+  ]) {
+    assert.equal(shouldCopyFixtureRelativePath(path), false, path);
+  }
+
+  for (const path of [
+    "",
+    "/.github/workflows/ci.yml",
+    "/apps/desktop/src/main.tsx",
+    "/apps/desktop/src/distribution-card.tsx",
+    "/apps/desktop/src/output/index.ts",
+    "/scripts/validate-repository.mjs",
+  ]) {
+    assert.equal(shouldCopyFixtureRelativePath(path), true, path);
+  }
+});
 
 function replace(path, transform) {
   const source = readFileSync(path, "utf8");
@@ -74,14 +119,7 @@ function runNegativeFixture(mutate, { fixtureValidator = false } = {}) {
       recursive: true,
       filter(source) {
         const relative = source.slice(root.length).replaceAll("\\", "/");
-        return ![
-          "/.git",
-          "/.playwright-cli",
-          "/.superpowers",
-          "/node_modules",
-          "/output",
-          "/target",
-        ].some((excluded) => relative === excluded || relative.startsWith(`${excluded}/`));
+        return shouldCopyFixtureRelativePath(relative);
       },
     });
     mutate(fixture);
