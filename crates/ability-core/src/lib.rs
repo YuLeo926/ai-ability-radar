@@ -1,4 +1,5 @@
 mod artifact_store;
+mod batch;
 mod display_text;
 mod domain;
 mod grading;
@@ -8,6 +9,7 @@ mod report;
 mod storage;
 
 pub use artifact_store::*;
+pub use batch::*;
 pub use display_text::*;
 pub use domain::*;
 pub use grading::*;

@@ -1,3 +1,4 @@
+use crate::ExecutionAdapterIdentity;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -122,6 +123,8 @@ pub struct EnvironmentFingerprint {
     pub suite_version: String,
     pub suite_content_sha256: String,
     pub scoring_rule_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_adapter_identity: Option<ExecutionAdapterIdentity>,
     pub resumed: bool,
 }
 

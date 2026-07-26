@@ -31,6 +31,7 @@ fn sample_run() -> RunRecord {
             suite_version: "1.0.0".into(),
             suite_content_sha256: "b".repeat(64),
             scoring_rule_version: "ability-v1".into(),
+            execution_adapter_identity: None,
             resumed: false,
         },
     );

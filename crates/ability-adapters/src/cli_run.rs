@@ -1391,6 +1391,7 @@ mod cancellation_copy_tests {
                     suite_version: pack.manifest.version.clone(),
                     suite_content_sha256: pack.content_sha256.clone(),
                     scoring_rule_version: "ability-v1".into(),
+                    execution_adapter_identity: None,
                     resumed: false,
                 },
             )
