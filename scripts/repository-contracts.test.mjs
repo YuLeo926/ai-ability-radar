@@ -628,13 +628,13 @@ test("pending v0.2.2 copy keeps every public download CTA inactive", () => {
   const site = readFileSync(join(root, "site", "index.html"), "utf8");
   const readme = readFileSync(join(root, "README.md"), "utf8");
 
-  assert.match(site, /v0\.2\.1.*(?:候选|待发布)/s);
+  assert.match(site, /v0\.2\.2.*(?:候选|待发布)/s);
   assert.match(site, /clean Windows 10\/11.*公开发布.*开放下载/s);
-  assert.doesNotMatch(site, /\/releases\/(?:tag\/v0\.2\.1|latest)/);
+  assert.doesNotMatch(site, /\/releases\/(?:tag\/v0\.2\.2|latest)/);
   assert.doesNotMatch(site, /id="release-link"[^>]*href=/);
-  assert.match(readme, /v0\.2\.1.*(?:候选|待发布)/s);
+  assert.match(readme, /v0\.2\.2.*(?:候选|待发布)/s);
   assert.match(readme, /clean Windows 10\/11.*公开发布.*开放下载/s);
-  assert.doesNotMatch(readme, /从.*Releases.*下载 v0\.2\.1/s);
+  assert.doesNotMatch(readme, /从.*Releases.*下载 v0\.2\.2/s);
 });
 
 test("README requires the exact Tauri source start commands", () => {
@@ -1943,5 +1943,5 @@ test("CI debug installer path rejects the previous 0.2.0 version", () => {
         "target/debug/bundle/nsis/ability-radar_0.2.0_x64-setup.exe",
       ));
   });
-  assertRejected(result, /CI artifact.*0\.2\.1|exact debug NSIS installer/i);
+  assertRejected(result, /CI artifact.*0\.2\.2|exact debug NSIS installer/i);
 });
