@@ -188,7 +188,11 @@ test("uses the precision-radar Home structure and separates CLI guidance", async
   expect.soft(guidance, "CLI guidance contract").not.toBeNull();
   if (guidance) {
     expect.soft(guidance).toHaveClass("cli-guidance");
-    expect.soft(guidance).toHaveTextContent("新增 PATH 目录后请重启应用");
+    expect
+      .soft(guidance)
+      .toHaveTextContent(
+        "已继承 PATH 目录内的变化可以立即重新检测；如果安装程序新增 PATH 目录，请重启应用后再重新检测。",
+      );
     expect
       .soft(guidance.closest(".section-heading-actions, .section-action"))
       .toBeNull();
@@ -554,7 +558,7 @@ test("re-detects CLI availability and explains inherited PATH limits", async () 
   expect(await screen.findByText("未检测到受支持入口")).toBeInTheDocument();
   expect(
     screen.getByText(
-      /已继承 PATH 目录内的变化可以立即刷新.*新增 PATH 目录.*重启应用.*重新检测/,
+      "已继承 PATH 目录内的变化可以立即重新检测；如果安装程序新增 PATH 目录，请重启应用后再重新检测。",
     ),
   ).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "重新检测 CLI" }));

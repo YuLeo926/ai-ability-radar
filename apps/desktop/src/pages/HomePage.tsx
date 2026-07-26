@@ -360,8 +360,8 @@ export function HomePage() {
           }
           guidance={
             <p className="cli-guidance" data-testid="cli-guidance">
-              已继承 PATH 目录内的变化可以立即刷新；安装程序新增 PATH
-              目录后请重启应用，再重新检测。
+              已继承 PATH 目录内的变化可以立即重新检测；如果安装程序新增 PATH
+              目录，请重启应用后再重新检测。
             </p>
           }
         />

@@ -2998,7 +2998,7 @@ for (const path of ["docs/privacy.md", "docs/security.md"]) {
   ]);
 }
 requireText("apps/desktop/src/pages/HomePage.tsx", [
-  ["inherited PATH immediate recheck", /已继承 PATH 目录内的变化可立即重新检测/],
+  ["inherited PATH immediate recheck", /已继承 PATH 目录内的变化可以立即重新检测/],
   ["new PATH directory restart boundary", /新增 PATH\s*目录，请重启应用后再重新检测/],
 ]);
 requireText("docs/troubleshooting.md", [
