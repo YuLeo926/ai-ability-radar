@@ -1118,3 +1118,43 @@ fn publication_rows_accept_only_canonical_safe_fixed_metadata() {
     assert_eq!(row.4, "local_html");
     assert!(!row.4.contains(['\\', '/']));
 }
+
+#[test]
+fn opening_repository_applies_v3_without_changing_legacy_defaults() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("ability.db");
+    let repository = RunRepository::open(&database).unwrap();
+    assert_eq!(repository.raw_retention_days().unwrap(), None);
+    drop(repository);
+
+    let connection = rusqlite::Connection::open(database).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        3
+    );
+    for table in [
+        "scan_batches",
+        "scan_batch_targets",
+        "scan_batch_members",
+        "scan_batch_task_isolation",
+        "scan_execution_authorizations",
+        "baseline_snapshots",
+        "scan_deletion_intents",
+    ] {
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1,
+            "missing v3 table {table}"
+        );
+    }
+}
