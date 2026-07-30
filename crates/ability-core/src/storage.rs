@@ -231,20 +231,6 @@ struct StoredBatchIdentityRow {
     acknowledgement_expires_at: String,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct StoredPlanHashPayload<'a> {
-    suite_id: &'a str,
-    suite_version: &'a str,
-    suite_content_sha256: &'a str,
-    scoring_rule_version: &'a str,
-    mode: crate::BatchMode,
-    seed: u64,
-    targets: &'a [crate::ScanBatchTarget],
-    sealed_task_budgets: &'a [crate::SealedTaskBudget],
-    cost_estimate: &'a crate::BatchCostEstimate,
-}
-
 impl RunRepository {
     pub fn open(path: &Path) -> Result<Self, StorageError> {
         let connection = Connection::open(path)?;
@@ -2071,6 +2057,9 @@ fn validate_new_batch_plan(
     plan: &ScanBatchPlan,
     members: &[BatchMemberSeed],
 ) -> Result<(), StorageError> {
+    let (validated_repetitions, _) = plan
+        .validated_schedule_contract()
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
     if plan.status != BatchStatus::Created
         || plan.targets.is_empty()
         || plan.cost_estimate.target_count
@@ -2099,8 +2088,7 @@ fn validate_new_batch_plan(
             "batch target or member count exceeds the hard policy cap".into(),
         ));
     }
-    let repetitions = u32::try_from(plan.cost_estimate.repetitions_per_target)
-        .map_err(|_| StorageError::InvalidData("batch repetition count is out of range".into()))?;
+    let repetitions = validated_repetitions;
     let mut pairs = std::collections::BTreeSet::new();
     for (expected_ordinal, member) in members.iter().enumerate() {
         if usize::try_from(member.ordinal).ok() != Some(expected_ordinal)
@@ -2137,25 +2125,8 @@ fn validate_new_batch_plan(
 }
 
 fn validate_plan_acknowledgement_hash(plan: &ScanBatchPlan) -> Result<(), StorageError> {
-    let payload = StoredPlanHashPayload {
-        suite_id: &plan.suite_id,
-        suite_version: &plan.suite_version,
-        suite_content_sha256: &plan.suite_content_sha256,
-        scoring_rule_version: &plan.scoring_rule_version,
-        mode: plan.mode,
-        seed: plan.seed,
-        targets: &plan.targets,
-        sealed_task_budgets: &plan.sealed_task_budgets,
-        cost_estimate: &plan.cost_estimate,
-    };
-    let bytes = serde_json::to_vec(&payload)?;
-    let actual = format!("{:x}", Sha256::digest(bytes));
-    if actual != plan.acknowledgement_hash {
-        return Err(StorageError::InvalidData(
-            "batch plan acknowledgement hash does not match immutable plan content".into(),
-        ));
-    }
-    Ok(())
+    plan.validate_acknowledgement_hash()
+        .map_err(|error| StorageError::InvalidData(error.to_string()))
 }
 
 fn validate_batch_plan_against_pack(

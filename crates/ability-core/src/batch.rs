@@ -9,6 +9,8 @@ use std::collections::BTreeSet;
 use thiserror::Error;
 
 const POLICY_VERSION: u32 = 1;
+const SESSION_POLICY_VERSION: u32 = 1;
+pub(crate) const BATCH_SCHEDULE_POLICY_VERSION: u32 = 1;
 const INITIAL_ACKNOWLEDGEMENT_MINUTES: i64 = 15;
 const MEMBER_OVERHEAD_SECS: u64 = 300;
 const CLIENT_QUICK_V1_SHA256: &str =
@@ -40,6 +42,24 @@ pub enum BatchStatus {
 pub enum BatchExecutionSurface {
     GuidedClient,
     AutomatedCli,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionIsolationPolicy {
+    UserAttestedFreshConversationPerTask,
+    MachineEnforcedFreshSessionAndWorkspacePerTask,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BatchTaskSessionBinding {
+    pub policy_version: u32,
+    pub suite_id: String,
+    pub suite_version: String,
+    pub suite_content_sha256: String,
+    pub task_count: u32,
+    pub isolation_policy: SessionIsolationPolicy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -482,6 +502,9 @@ pub struct ScanBatchPlan {
     pub mode: BatchMode,
     pub seed: u64,
     pub status: BatchStatus,
+    pub schedule_policy_version: u32,
+    pub task_session_policy_version: u32,
+    pub session_isolation_policy: SessionIsolationPolicy,
     pub targets: Vec<ScanBatchTarget>,
     pub sealed_task_budgets: Vec<SealedTaskBudget>,
     pub cost_estimate: BatchCostEstimate,
@@ -533,21 +556,15 @@ impl ScanBatchPlan {
             u64::try_from(targets.len()).map_err(|_| BatchContractError::ArithmeticOverflow)?;
         let cost_estimate =
             BatchCostPolicy::v1().estimate(pack, surface, mode, target_count, issued_at)?;
-        let hash_payload = PlanHashPayload {
-            suite_id: &suite_id,
-            suite_version: &suite_version,
-            suite_content_sha256,
-            scoring_rule_version: &scoring_rule_version,
-            mode,
-            seed,
-            targets: &targets,
-            sealed_task_budgets: &sealed_task_budgets,
-            cost_estimate: &cost_estimate,
+        let session_isolation_policy = match surface {
+            BatchExecutionSurface::GuidedClient => {
+                SessionIsolationPolicy::UserAttestedFreshConversationPerTask
+            }
+            BatchExecutionSurface::AutomatedCli => {
+                SessionIsolationPolicy::MachineEnforcedFreshSessionAndWorkspacePerTask
+            }
         };
-        let bytes = serde_json::to_vec(&hash_payload)
-            .map_err(|_| BatchContractError::InvalidPlanIdentity)?;
-        let acknowledgement_hash = format!("{:x}", Sha256::digest(bytes));
-        Ok(Self {
+        let mut plan = Self {
             suite_id,
             suite_version,
             suite_content_sha256: suite_content_sha256.into(),
@@ -555,11 +572,134 @@ impl ScanBatchPlan {
             mode,
             seed,
             status: BatchStatus::Created,
+            schedule_policy_version: BATCH_SCHEDULE_POLICY_VERSION,
+            task_session_policy_version: SESSION_POLICY_VERSION,
+            session_isolation_policy,
             targets,
             sealed_task_budgets,
             cost_estimate,
-            acknowledgement_hash,
-        })
+            acknowledgement_hash: String::new(),
+        };
+        plan.acknowledgement_hash = plan.calculated_acknowledgement_hash()?;
+        Ok(plan)
+    }
+
+    pub fn validate_acknowledgement_hash(&self) -> Result<(), BatchContractError> {
+        if self.acknowledgement_hash == self.calculated_acknowledgement_hash()? {
+            Ok(())
+        } else {
+            Err(BatchContractError::InvalidPlanIdentity)
+        }
+    }
+
+    pub(crate) fn validated_schedule_contract(
+        &self,
+    ) -> Result<(u32, BatchTaskSessionBinding), BatchContractError> {
+        self.validate_acknowledgement_hash()?;
+        self.cost_estimate.validate_intrinsic_v1()?;
+        if self.status != BatchStatus::Created
+            || self.schedule_policy_version != BATCH_SCHEDULE_POLICY_VERSION
+        {
+            return Err(BatchContractError::InvalidPlanIdentity);
+        }
+        let surface = self
+            .targets
+            .first()
+            .ok_or(BatchContractError::CohortLimitExceeded)?
+            .route_identity
+            .execution_surface;
+        let mut route_identities = BTreeSet::new();
+        for target in &self.targets {
+            target.validate_for_new_batch()?;
+            if target.route_identity.execution_surface != surface {
+                return Err(BatchContractError::MixedExecutionSurface);
+            }
+            if !route_identities.insert(target.route_identity.clone()) {
+                return Err(BatchContractError::DuplicateRouteIdentity);
+            }
+        }
+        let expected_isolation_policy = match surface {
+            BatchExecutionSurface::GuidedClient => {
+                SessionIsolationPolicy::UserAttestedFreshConversationPerTask
+            }
+            BatchExecutionSurface::AutomatedCli => {
+                SessionIsolationPolicy::MachineEnforcedFreshSessionAndWorkspacePerTask
+            }
+        };
+        if self.task_session_policy_version != SESSION_POLICY_VERSION
+            || self.session_isolation_policy != expected_isolation_policy
+        {
+            return Err(BatchContractError::InvalidPlanIdentity);
+        }
+        let target_count = u64::try_from(self.targets.len())
+            .map_err(|_| BatchContractError::ArithmeticOverflow)?;
+        let task_count = u64::try_from(self.sealed_task_budgets.len())
+            .map_err(|_| BatchContractError::ArithmeticOverflow)?;
+        if self
+            .sealed_task_budgets
+            .iter()
+            .any(|task| task.max_turns == 0 || task.time_budget_secs == 0)
+        {
+            return Err(BatchContractError::InvalidTaskBudget);
+        }
+        let per_member_turns =
+            checked_sum(self.sealed_task_budgets.iter().map(|task| task.max_turns))?;
+        let per_member_secs = checked_sum(
+            self.sealed_task_budgets
+                .iter()
+                .map(|task| task.time_budget_secs),
+        )?;
+        let expected_turns = self
+            .cost_estimate
+            .planned_member_runs
+            .checked_mul(per_member_turns)
+            .ok_or(BatchContractError::ArithmeticOverflow)?;
+        let expected_secs = self
+            .cost_estimate
+            .planned_member_runs
+            .checked_mul(per_member_secs)
+            .ok_or(BatchContractError::ArithmeticOverflow)?;
+        if self.cost_estimate.execution_surface != surface
+            || self.cost_estimate.target_count != target_count
+            || self.cost_estimate.tasks_per_member_run != task_count
+            || self.cost_estimate.max_provider_turns != expected_turns
+            || self.cost_estimate.summed_task_budget_secs != expected_secs
+        {
+            return Err(BatchContractError::InvalidCostEstimate);
+        }
+        let repetitions = u32::try_from(self.cost_estimate.repetitions_per_target)
+            .map_err(|_| BatchContractError::ArithmeticOverflow)?;
+        let task_count =
+            u32::try_from(task_count).map_err(|_| BatchContractError::ArithmeticOverflow)?;
+        let binding = BatchTaskSessionBinding {
+            policy_version: self.task_session_policy_version,
+            suite_id: self.suite_id.clone(),
+            suite_version: self.suite_version.clone(),
+            suite_content_sha256: self.suite_content_sha256.clone(),
+            task_count,
+            isolation_policy: self.session_isolation_policy,
+        };
+        Ok((repetitions, binding))
+    }
+
+    fn calculated_acknowledgement_hash(&self) -> Result<String, BatchContractError> {
+        let hash_payload = PlanHashPayload {
+            suite_id: &self.suite_id,
+            suite_version: &self.suite_version,
+            suite_content_sha256: &self.suite_content_sha256,
+            scoring_rule_version: &self.scoring_rule_version,
+            mode: self.mode,
+            seed: self.seed,
+            schedule_policy_version: self.schedule_policy_version,
+            task_session_policy_version: self.task_session_policy_version,
+            session_isolation_policy: self.session_isolation_policy,
+            targets: &self.targets,
+            sealed_task_budgets: &self.sealed_task_budgets,
+            cost_estimate: &self.cost_estimate,
+        };
+        let bytes = serde_json::to_vec(&hash_payload)
+            .map_err(|_| BatchContractError::InvalidPlanIdentity)?;
+        Ok(format!("{:x}", Sha256::digest(bytes)))
     }
 }
 
@@ -585,6 +725,9 @@ struct PlanHashPayload<'a> {
     scoring_rule_version: &'a str,
     mode: BatchMode,
     seed: u64,
+    schedule_policy_version: u32,
+    task_session_policy_version: u32,
+    session_isolation_policy: SessionIsolationPolicy,
     targets: &'a [ScanBatchTarget],
     sealed_task_budgets: &'a [SealedTaskBudget],
     cost_estimate: &'a BatchCostEstimate,
