@@ -6,10 +6,16 @@ import type {
   TaskResult,
 } from "./backend";
 import {
+  isSafeBatchEstimate,
+  isSafeBatchRecord,
+  isSafeBatchRecordList,
+  isSafeBatchRetryEstimate,
   isSafeClientSelectionDetection,
+  isSafeNextGuidedMember,
   isSafeRunDetail,
   isSafeRunRecord,
   isSafeRunRecordList,
+  isSafeScanExecutionAuthorization,
   scoreableResultScore,
 } from "./runtimeValidation";
 
@@ -838,5 +844,339 @@ describe("isSafeRunDetail", () => {
         ),
       ).toBe(true);
     }
+  });
+});
+
+const batchTarget = {
+  target: {
+    kind: "chat_gpt_client",
+    reportedModel: "GPT-5.6",
+    reasoningEffort: "high",
+    modelSource: "manual",
+    modelVerification: "user_confirmed",
+  },
+  routeIdentity: {
+    kind: "chat_gpt_client",
+    modelOrRoute: "gpt-5.6",
+    reasoningEffort: "high",
+    executionSurface: "guided_client",
+    isDefaultRoute: false,
+  },
+  executionAdapterIdentity: {
+    executionSurface: "guided_client",
+    providerFamily: "openai",
+    launchKind: "guided_client",
+    publicVersion: null,
+    adapterContractVersion: "guided-client-v1",
+  },
+} as const;
+
+function makeBatchEstimate() {
+  return {
+    plan: {
+      suiteId: "client-quick",
+      suiteVersion: "1.0.0",
+      suiteContentSha256: "a".repeat(64),
+      scoringRuleVersion: "ability-v1",
+      mode: "quick_comparison",
+      seed: 17,
+      status: "created",
+      schedulePolicyVersion: 1,
+      taskSessionPolicyVersion: 1,
+      sessionIsolationPolicy: "user_attested_fresh_conversation_per_task",
+      targets: [
+        batchTarget,
+        {
+          target: {
+            ...batchTarget.target,
+            kind: "claude_client",
+            reportedModel: "Claude Sonnet 4.5",
+          },
+          routeIdentity: {
+            ...batchTarget.routeIdentity,
+            kind: "claude_client",
+            modelOrRoute: "claude sonnet 4.5",
+          },
+          executionAdapterIdentity: {
+            ...batchTarget.executionAdapterIdentity,
+            providerFamily: "anthropic",
+          },
+        },
+      ],
+      sealedTaskBudgets: [
+        { maxTurns: 1, timeBudgetSecs: 100 },
+        { maxTurns: 1, timeBudgetSecs: 100 },
+      ],
+      costEstimate: {
+        policyVersion: 1,
+        executionSurface: "guided_client",
+        mode: "quick_comparison",
+        targetCount: 2,
+        repetitionsPerTarget: 1,
+        tasksPerMemberRun: 2,
+        plannedMemberRuns: 2,
+        taskLaunches: 4,
+        guidedInteractions: 4,
+        maxProviderTurns: 4,
+        summedTaskBudgetSecs: 400,
+        expectedElapsedSecsMin: 1_200,
+        expectedElapsedSecsMax: 1_800,
+        providerExecutionCeilingSecs: 1_000,
+        authorizationWallClockSecs: 14_400,
+        issuedAt: "2026-07-30T02:00:00Z",
+        initialAcknowledgementExpiresAt: "2026-07-30T02:15:00Z",
+        tokenQuotaAmount: null,
+        automaticRetryBudget: 0,
+      },
+      acknowledgementHash: "b".repeat(64),
+    },
+    capabilities: ["guided_quick_v1", "cli_standard_v1"],
+  };
+}
+
+function makeBatchRecord() {
+  const estimate = makeBatchEstimate();
+  return {
+    id: "39d9f772-2e12-4b2d-af13-94c32d36f2d3",
+    plan: estimate.plan,
+    status: "created",
+    cancelRequested: false,
+    plannedMemberCount: 2,
+    terminalMemberCount: 0,
+    createdAt: "2026-07-30T02:00:01Z",
+    updatedAt: "2026-07-30T02:00:01Z",
+    members: [
+      {
+        ordinal: 0,
+        targetPosition: 1,
+        repetitionIndex: 0,
+        runId: null,
+        status: "planned",
+        failureKind: null,
+        attemptNumber: 0,
+        updatedAt: "2026-07-30T02:00:01Z",
+      },
+      {
+        ordinal: 1,
+        targetPosition: 0,
+        repetitionIndex: 0,
+        runId: null,
+        status: "planned",
+        failureKind: null,
+        attemptNumber: 0,
+        updatedAt: "2026-07-30T02:00:01Z",
+      },
+    ],
+  };
+}
+
+function makeAuthorization() {
+  return {
+    batchId: "39d9f772-2e12-4b2d-af13-94c32d36f2d3",
+    memberOrdinal: null,
+    attemptNumber: 1,
+    maxTaskLaunches: 4,
+    maxProviderTurns: 4,
+    maxTaskBudgetSecs: 400,
+    maxGuidedInteractions: 4,
+    acknowledgementHash: "b".repeat(64),
+    allowedFailureKind: null,
+    expiresAt: "2026-07-30T06:00:02Z",
+    createdAt: "2026-07-30T02:00:02Z",
+  };
+}
+
+describe("strict batch runtime validation", () => {
+  test("accepts exact estimates, records, authorizations, retries, and guided decisions", () => {
+    const estimate = makeBatchEstimate();
+    const record = makeBatchRecord();
+    const authorization = makeAuthorization();
+    expect(isSafeBatchEstimate(estimate)).toBe(true);
+    expect(isSafeBatchRecord(record)).toBe(true);
+    expect(isSafeBatchRecordList([record])).toBe(true);
+    expect(isSafeScanExecutionAuthorization(authorization)).toBe(true);
+    expect(
+      isSafeBatchRetryEstimate({
+        authorization: {
+          ...authorization,
+          memberOrdinal: 0,
+          maxTaskLaunches: 2,
+          maxProviderTurns: 2,
+          maxTaskBudgetSecs: 200,
+          maxGuidedInteractions: 2,
+          allowedFailureKind: "network",
+        },
+      }),
+    ).toBe(true);
+    expect(
+      isSafeNextGuidedMember({
+        decision: "runnable",
+        member: record.members[0],
+        target: record.plan.targets[1],
+      }),
+    ).toBe(true);
+    expect(
+      isSafeNextGuidedMember({
+        decision: "exhausted",
+        member: null,
+        target: null,
+      }),
+    ).toBe(true);
+  });
+
+  test("fails closed for unknown nested fields, enum strings, non-finite values, and incoherence", () => {
+    const estimate = makeBatchEstimate();
+    expect(
+      isSafeBatchEstimate({
+        ...estimate,
+        plan: {
+          ...estimate.plan,
+          targets: [
+            {
+              ...estimate.plan.targets[0],
+              executionAdapterIdentity: {
+                ...estimate.plan.targets[0].executionAdapterIdentity,
+                program: "C:/private/codex.exe",
+              },
+            },
+            estimate.plan.targets[1],
+          ],
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isSafeBatchEstimate({
+        ...estimate,
+        plan: {
+          ...estimate.plan,
+          targets: [
+            {
+              ...estimate.plan.targets[0],
+              target: {
+                ...estimate.plan.targets[0].target,
+                reportedModel: "C:/private/model",
+              },
+              routeIdentity: {
+                ...estimate.plan.targets[0].routeIdentity,
+                modelOrRoute: "c:/private/model",
+              },
+            },
+            estimate.plan.targets[1],
+          ],
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isSafeBatchEstimate({
+        ...estimate,
+        plan: { ...estimate.plan, mode: "turbo" },
+      }),
+    ).toBe(false);
+    expect(
+      isSafeBatchEstimate({
+        ...estimate,
+        plan: {
+          ...estimate.plan,
+          costEstimate: {
+            ...estimate.plan.costEstimate,
+            expectedElapsedSecsMax: Number.POSITIVE_INFINITY,
+          },
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isSafeBatchRecord({
+        ...makeBatchRecord(),
+        terminalMemberCount: 1,
+      }),
+    ).toBe(false);
+    expect(
+      isSafeBatchRecord({
+        ...makeBatchRecord(),
+        plannedMemberCount: 1,
+        members: makeBatchRecord().members.slice(0, 1),
+      }),
+    ).toBe(false);
+    expect(
+      isSafeNextGuidedMember({
+        decision: "exhausted",
+        member: makeBatchRecord().members[0],
+        target: batchTarget,
+      }),
+    ).toBe(false);
+    expect(
+      isSafeScanExecutionAuthorization({
+        ...makeAuthorization(),
+        expiresAt: "2026-08-02T02:00:03Z",
+      }),
+    ).toBe(false);
+    expect(
+      isSafeScanExecutionAuthorization({
+        ...makeAuthorization(),
+        maxTaskLaunches: 51,
+      }),
+    ).toBe(false);
+    expect(
+      isSafeScanExecutionAuthorization({
+        ...makeAuthorization(),
+        maxGuidedInteractions: 3,
+      }),
+    ).toBe(false);
+    expect(
+      isSafeBatchEstimate({
+        ...estimate,
+        plan: {
+          ...estimate.plan,
+          sealedTaskBudgets: [
+            { maxTurns: 17, timeBudgetSecs: 100 },
+            { maxTurns: 1, timeBudgetSecs: 100 },
+          ],
+          costEstimate: {
+            ...estimate.plan.costEstimate,
+            maxProviderTurns: 36,
+          },
+        },
+      }),
+    ).toBe(false);
+  });
+
+  test("enforces hard bounds on nested and top-level response arrays", () => {
+    const estimate = makeBatchEstimate();
+    expect(
+      isSafeBatchEstimate({
+        ...estimate,
+        plan: {
+          ...estimate.plan,
+          targets: Array.from({ length: 6 }, () => estimate.plan.targets[0]),
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isSafeBatchEstimate({
+        ...estimate,
+        plan: {
+          ...estimate.plan,
+          sealedTaskBudgets: Array.from(
+            { length: 9 },
+            () => estimate.plan.sealedTaskBudgets[0],
+          ),
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isSafeBatchRecordList(
+        Array.from({ length: 257 }, () => makeBatchRecord()),
+      ),
+    ).toBe(false);
+    expect(
+      isSafeBatchRecord({
+        ...makeBatchRecord(),
+        plannedMemberCount: 26,
+        members: Array.from({ length: 26 }, (_, ordinal) => ({
+          ...makeBatchRecord().members[0],
+          ordinal,
+        })),
+      }),
+    ).toBe(false);
   });
 });

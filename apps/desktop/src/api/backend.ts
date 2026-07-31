@@ -1,3 +1,18 @@
+import type {
+  AuthorizeBatchExecutionInput,
+  AuthorizeBatchRetryInput,
+  BatchEstimate,
+  BatchFeatureLevel,
+  BatchPlanInput,
+  BatchRetryEstimate,
+  CreateAcknowledgedBatchInput,
+  EstimateBatchRetryInput,
+  ExecutionAdapterIdentity,
+  NextGuidedMember,
+  ScanBatchRecord,
+  ScanExecutionAuthorization,
+} from "../domain/batch";
+
 export type TargetKind =
   | "chat_gpt_client"
   | "claude_client"
@@ -110,6 +125,7 @@ export interface Bootstrap {
   targets: TargetAvailability[];
   clientPack: PackSummary;
   cliPack: PackSummary;
+  batchCapabilities: BatchFeatureLevel[];
 }
 
 export interface ScoreSummary {
@@ -130,6 +146,7 @@ export interface EnvironmentFingerprint {
   suiteVersion: string;
   suiteContentSha256: string;
   scoringRuleVersion: string;
+  executionAdapterIdentity?: ExecutionAdapterIdentity | null;
   resumed: boolean;
 }
 
@@ -243,6 +260,61 @@ export interface Backend {
   getDataSettings(): Promise<DataSettings>;
   setRawRetention(rawRetentionDays: number | null): Promise<number>;
   exportFullBackup(input: FullBackupInput): Promise<boolean>;
+  estimateBatch(input: BatchPlanInput): Promise<BatchEstimate>;
+  createAcknowledgedBatch(
+    input: CreateAcknowledgedBatchInput,
+  ): Promise<ScanBatchRecord>;
+  getBatch(batchId: string): Promise<ScanBatchRecord | null>;
+  listBatches(): Promise<ScanBatchRecord[]>;
+  authorizeBatchExecution(
+    input: AuthorizeBatchExecutionInput,
+  ): Promise<ScanExecutionAuthorization>;
+  estimateBatchRetry(
+    input: EstimateBatchRetryInput,
+  ): Promise<BatchRetryEstimate>;
+  authorizeBatchRetry(
+    input: AuthorizeBatchRetryInput,
+  ): Promise<ScanExecutionAuthorization>;
+  startBatch(batchId: string): Promise<ScanBatchRecord>;
+  resumeBatch(batchId: string): Promise<ScanBatchRecord>;
+  pauseBatch(batchId: string): Promise<ScanBatchRecord>;
+  cancelBatch(batchId: string): Promise<ScanBatchRecord>;
+  getNextGuidedMember(batchId: string): Promise<NextGuidedMember>;
   onRunEvent(listener: (event: RunEvent) => void): Promise<Unlisten>;
   onRunError(listener: (event: RunErrorEvent) => void): Promise<Unlisten>;
 }
+
+type BatchBackendMethods = Pick<
+  Backend,
+  | "estimateBatch"
+  | "createAcknowledgedBatch"
+  | "getBatch"
+  | "listBatches"
+  | "authorizeBatchExecution"
+  | "estimateBatchRetry"
+  | "authorizeBatchRetry"
+  | "startBatch"
+  | "resumeBatch"
+  | "pauseBatch"
+  | "cancelBatch"
+  | "getNextGuidedMember"
+>;
+
+async function unsupportedBatchCall(): Promise<never> {
+  throw new Error("batch backend is not configured in this test");
+}
+
+export const unsupportedBatchBackend: BatchBackendMethods = {
+  estimateBatch: unsupportedBatchCall,
+  createAcknowledgedBatch: unsupportedBatchCall,
+  getBatch: unsupportedBatchCall,
+  listBatches: unsupportedBatchCall,
+  authorizeBatchExecution: unsupportedBatchCall,
+  estimateBatchRetry: unsupportedBatchCall,
+  authorizeBatchRetry: unsupportedBatchCall,
+  startBatch: unsupportedBatchCall,
+  resumeBatch: unsupportedBatchCall,
+  pauseBatch: unsupportedBatchCall,
+  cancelBatch: unsupportedBatchCall,
+  getNextGuidedMember: unsupportedBatchCall,
+};

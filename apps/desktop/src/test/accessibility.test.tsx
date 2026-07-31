@@ -13,6 +13,7 @@ import type {
   RunRecord,
   TaskResult,
 } from "../api/backend";
+import { unsupportedBatchBackend } from "../api/backend";
 import { App } from "../app/App";
 import { AppRoutes } from "../app/routes";
 import {
@@ -167,6 +168,7 @@ function bootstrap(): Bootstrap {
       taskCount: 4,
       estimatedMinutes: "30–60",
     },
+    batchCapabilities: ["guided_quick_v1", "cli_standard_v1"],
     targets: [
       {
         kind: "chat_gpt_client",
@@ -260,6 +262,7 @@ function runDetail(): RunDetail {
 
 function fakeBackend(overrides: Partial<Backend> = {}): Backend {
   return {
+    ...unsupportedBatchBackend,
     getBootstrap: vi.fn(async () => bootstrap()),
     detectClientSelection: vi.fn<Backend["detectClientSelection"]>(
       async () => ({

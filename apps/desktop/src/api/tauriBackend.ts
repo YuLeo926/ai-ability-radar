@@ -11,7 +11,41 @@ import type {
   RunRecord,
   TaskResult,
 } from "./backend";
-import { isSafeClientSelectionDetection } from "./runtimeValidation";
+import type {
+  BatchEstimate,
+  BatchRetryEstimate,
+  NextGuidedMember,
+  ScanBatchRecord,
+  ScanExecutionAuthorization,
+} from "../domain/batch";
+import {
+  isSafeBatchEstimate,
+  isSafeBatchRecord,
+  isSafeBatchRecordList,
+  isSafeBatchRetryEstimate,
+  isSafeClientSelectionDetection,
+  isSafeNextGuidedMember,
+  isSafeScanExecutionAuthorization,
+} from "./runtimeValidation";
+
+async function invokeValidated<T>(
+  command: string,
+  args: Record<string, unknown> | undefined,
+  validator: (value: unknown) => value is T,
+): Promise<T> {
+  const value =
+    args === undefined
+      ? await invoke<unknown>(command)
+      : await invoke<unknown>(command, args);
+  if (!validator(value)) {
+    throw new Error(`Batch command ${command} returned invalid local data`);
+  }
+  return value;
+}
+
+function batchIdInput(batchId: string) {
+  return { input: { batchId } };
+}
 
 export const tauriBackend: Backend = {
   getBootstrap: () => invoke<Bootstrap>("get_bootstrap"),
@@ -56,6 +90,79 @@ export const tauriBackend: Backend = {
     invoke<number>("set_raw_retention", { input: { rawRetentionDays } }),
   exportFullBackup: (input) =>
     invoke<boolean>("export_full_backup", { input }),
+  estimateBatch: (input) =>
+    invokeValidated<BatchEstimate>(
+      "estimate_batch",
+      { input },
+      isSafeBatchEstimate,
+    ),
+  createAcknowledgedBatch: (input) =>
+    invokeValidated<ScanBatchRecord>(
+      "create_acknowledged_batch",
+      { input },
+      isSafeBatchRecord,
+    ),
+  getBatch: async (batchId) => {
+    const value = await invoke<unknown>("get_batch", batchIdInput(batchId));
+    if (value !== null && !isSafeBatchRecord(value)) {
+      throw new Error("Batch command get_batch returned invalid local data");
+    }
+    return value;
+  },
+  listBatches: () =>
+    invokeValidated<ScanBatchRecord[]>(
+      "list_batches",
+      undefined,
+      isSafeBatchRecordList,
+    ),
+  authorizeBatchExecution: (input) =>
+    invokeValidated<ScanExecutionAuthorization>(
+      "authorize_batch_execution",
+      { input },
+      isSafeScanExecutionAuthorization,
+    ),
+  estimateBatchRetry: (input) =>
+    invokeValidated<BatchRetryEstimate>(
+      "estimate_batch_retry",
+      { input },
+      isSafeBatchRetryEstimate,
+    ),
+  authorizeBatchRetry: (input) =>
+    invokeValidated<ScanExecutionAuthorization>(
+      "authorize_batch_retry",
+      { input },
+      isSafeScanExecutionAuthorization,
+    ),
+  startBatch: (batchId) =>
+    invokeValidated<ScanBatchRecord>(
+      "start_batch",
+      batchIdInput(batchId),
+      isSafeBatchRecord,
+    ),
+  resumeBatch: (batchId) =>
+    invokeValidated<ScanBatchRecord>(
+      "resume_batch",
+      batchIdInput(batchId),
+      isSafeBatchRecord,
+    ),
+  pauseBatch: (batchId) =>
+    invokeValidated<ScanBatchRecord>(
+      "pause_batch",
+      batchIdInput(batchId),
+      isSafeBatchRecord,
+    ),
+  cancelBatch: (batchId) =>
+    invokeValidated<ScanBatchRecord>(
+      "cancel_batch",
+      batchIdInput(batchId),
+      isSafeBatchRecord,
+    ),
+  getNextGuidedMember: (batchId) =>
+    invokeValidated<NextGuidedMember>(
+      "get_next_guided_member",
+      batchIdInput(batchId),
+      isSafeNextGuidedMember,
+    ),
   onRunEvent: async (listener) =>
     listen<RunEvent>("run://event", ({ payload }) => listener(payload)),
   onRunError: async (listener) =>

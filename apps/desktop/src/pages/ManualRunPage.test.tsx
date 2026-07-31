@@ -23,6 +23,7 @@ import type {
   TargetKind,
   TaskResult,
 } from "../api/backend";
+import { unsupportedBatchBackend } from "../api/backend";
 import {
   DEFAULT_MODEL_DISPLAY_CASES,
   INVALID_LEGACY_EFFORT_CASES,
@@ -98,6 +99,7 @@ function makeResult(taskId = "task-1"): TaskResult {
 
 function fakeBackend(overrides: Partial<Backend> = {}): Backend {
   return {
+    ...unsupportedBatchBackend,
     getBootstrap: vi.fn(async () => {
       throw new Error("unused fake getBootstrap");
     }),

@@ -5,11 +5,13 @@ import { expect, test, vi } from "vitest";
 import RootApp from "../App";
 import { BackendProvider } from "../api/BackendContext";
 import type { Backend } from "../api/backend";
+import { unsupportedBatchBackend } from "../api/backend";
 import { I18nProvider } from "../i18n/I18nContext";
 import { App } from "./App";
 import { AppRoutes } from "./routes";
 
 const backend: Backend = {
+  ...unsupportedBatchBackend,
   getBootstrap: async () => ({
     clientPack: {
       id: "client-quick-v1",
@@ -25,6 +27,7 @@ const backend: Backend = {
       taskCount: 2,
       estimatedMinutes: "30–60",
     },
+    batchCapabilities: ["guided_quick_v1", "cli_standard_v1"],
     targets: [],
   }),
   detectClientSelection: async () => ({

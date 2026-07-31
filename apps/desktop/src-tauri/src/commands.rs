@@ -335,6 +335,7 @@ fn environment(
         suite_version: pack.manifest.version.clone(),
         suite_content_sha256: pack.content_sha256.clone(),
         scoring_rule_version: "ability-v1".into(),
+        execution_adapter_identity: None,
         resumed: false,
     }
 }
@@ -408,6 +409,7 @@ pub async fn get_bootstrap(state: State<'_, AppState>) -> Result<BootstrapDto, S
         targets: state.target_availability().await,
         client_pack: pack_summary(&state.client_pack, "10–15")?,
         cli_pack: pack_summary(&state.cli_pack, "30–60")?,
+        batch_capabilities: crate::batch_commands::BATCH_CAPABILITIES.to_vec(),
     })
 }
 
@@ -4219,6 +4221,7 @@ mod tests {
                 suite_version: pack.manifest.version.clone(),
                 suite_content_sha256: pack.content_sha256.clone(),
                 scoring_rule_version: "ability-v1".into(),
+                execution_adapter_identity: None,
                 resumed: false,
             },
         );
@@ -4275,6 +4278,7 @@ mod tests {
                 suite_version: pack.manifest.version.clone(),
                 suite_content_sha256: pack.content_sha256.clone(),
                 scoring_rule_version: "ability-v1".into(),
+                execution_adapter_identity: None,
                 resumed: false,
             },
         );

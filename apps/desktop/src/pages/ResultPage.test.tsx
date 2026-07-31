@@ -17,6 +17,7 @@ import type {
   RunRecord,
   TaskResult,
 } from "../api/backend";
+import { unsupportedBatchBackend } from "../api/backend";
 import {
   CANONICAL_EFFORT_DISPLAY_CASES,
   DEFAULT_MODEL_DISPLAY_CASES,
@@ -158,6 +159,7 @@ function makeBackend(
   exportPublicReport: Backend["exportPublicReport"] = async () => null,
 ): Backend {
   return {
+    ...unsupportedBatchBackend,
     getBootstrap: async () => {
       throw new Error("unused fake getBootstrap");
     },

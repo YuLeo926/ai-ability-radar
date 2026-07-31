@@ -711,6 +711,7 @@ mod tests {
                 suite_version: client_pack.manifest.version.clone(),
                 suite_content_sha256: client_pack.content_sha256,
                 scoring_rule_version: "ability-v1".into(),
+                execution_adapter_identity: None,
                 resumed: false,
             },
         );
@@ -765,6 +766,7 @@ mod tests {
                 suite_version: client_pack.manifest.version.clone(),
                 suite_content_sha256: client_pack.content_sha256,
                 scoring_rule_version: "ability-v1".into(),
+                execution_adapter_identity: None,
                 resumed: false,
             },
         );

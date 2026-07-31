@@ -43,6 +43,7 @@ fn run(target: TargetKind) -> RunRecord {
             suite_version: "1.0.0".into(),
             suite_content_sha256: "a".repeat(64),
             scoring_rule_version: "ability-v1".into(),
+            execution_adapter_identity: None,
             resumed: false,
         },
     );

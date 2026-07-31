@@ -1,10 +1,26 @@
 use ability_adapters::{RunEvent, TargetAvailability};
 use ability_core::{
-    Category, FailureKind, ModelSource, ModelVerification, RunMode, RunRecord, TargetKind,
-    TaskOutcome, TaskResult,
+    BatchExecutionSurface, BatchFeatureLevel, BatchMode, Category, ExecutionAdapterIdentity,
+    FailureKind, ModelSource, ModelVerification, RunMode, RunRecord, ScanBatchMemberRecord,
+    ScanBatchPlan, ScanBatchTarget, TargetKind, TaskOutcome, TaskResult,
 };
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+fn deserialize_canonical_batch_uuid<'de, D>(deserializer: D) -> Result<Uuid, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    let parsed = Uuid::parse_str(&value).map_err(serde::de::Error::custom)?;
+    if parsed.is_nil() || !parsed.hyphenated().to_string().eq_ignore_ascii_case(&value) {
+        return Err(serde::de::Error::custom(
+            "batch id must be a non-nil canonical UUID",
+        ));
+    }
+    Ok(parsed)
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,6 +38,7 @@ pub struct BootstrapDto {
     pub targets: Vec<TargetAvailability>,
     pub client_pack: PackSummaryDto,
     pub cli_pack: PackSummaryDto,
+    pub batch_capabilities: Vec<BatchFeatureLevel>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,6 +49,110 @@ pub struct TargetSelectionInput {
     pub reasoning_effort: Option<String>,
     pub model_source: ModelSource,
     pub model_verification: ModelVerification,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BatchTargetInput {
+    pub target: TargetSelectionInput,
+    pub execution_surface: BatchExecutionSurface,
+    pub execution_adapter_identity: ExecutionAdapterIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BatchPlanInput {
+    pub mode: BatchMode,
+    pub seed: u64,
+    pub targets: Vec<BatchTargetInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateAcknowledgedBatchInput {
+    pub plan: BatchPlanInput,
+    pub estimate_issued_at: DateTime<Utc>,
+    pub acknowledgement_hash: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BatchIdInput {
+    #[serde(deserialize_with = "deserialize_canonical_batch_uuid")]
+    pub batch_id: Uuid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AuthorizeBatchExecutionInput {
+    #[serde(deserialize_with = "deserialize_canonical_batch_uuid")]
+    pub batch_id: Uuid,
+    pub acknowledgement_hash: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EstimateBatchRetryInput {
+    #[serde(deserialize_with = "deserialize_canonical_batch_uuid")]
+    pub batch_id: Uuid,
+    pub member_ordinal: u32,
+    pub expected_failure_kind: FailureKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AuthorizeBatchRetryInput {
+    #[serde(deserialize_with = "deserialize_canonical_batch_uuid")]
+    pub batch_id: Uuid,
+    pub member_ordinal: u32,
+    pub allowed_failure_kind: FailureKind,
+    pub estimate_created_at: DateTime<Utc>,
+    pub acknowledgement_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BatchEstimateDto {
+    pub plan: ScanBatchPlan,
+    pub capabilities: Vec<BatchFeatureLevel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BatchExecutionAuthorizationDto {
+    pub batch_id: Uuid,
+    pub member_ordinal: Option<u32>,
+    pub attempt_number: u32,
+    pub max_task_launches: u64,
+    pub max_provider_turns: u64,
+    pub max_task_budget_secs: u64,
+    pub max_guided_interactions: u64,
+    pub acknowledgement_hash: String,
+    pub allowed_failure_kind: Option<FailureKind>,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BatchRetryEstimateDto {
+    pub authorization: BatchExecutionAuthorizationDto,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuidedMemberDecision {
+    Runnable,
+    BlockedByActive,
+    Exhausted,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NextGuidedMemberDto {
+    pub decision: GuidedMemberDecision,
+    pub member: Option<ScanBatchMemberRecord>,
+    pub target: Option<ScanBatchTarget>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

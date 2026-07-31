@@ -1,13 +1,21 @@
 mod app_state;
+mod batch_commands;
 mod client_selection;
 mod commands;
 mod data_management;
 mod dto;
 
 #[cfg(test)]
+mod batch_tests;
+#[cfg(test)]
 mod data_management_tests;
 
 use app_state::AppState;
+use batch_commands::{
+    authorize_batch_execution, authorize_batch_retry, cancel_batch, create_acknowledged_batch,
+    estimate_batch, estimate_batch_retry, get_batch, get_next_guided_member, list_batches,
+    pause_batch, resume_batch, start_batch,
+};
 use commands::{
     cancel_run, delete_raw_artifacts, delete_run, delete_target_history, detect_client_selection,
     export_full_backup, export_public_report, get_bootstrap, get_data_settings, get_run_detail,
@@ -38,6 +46,18 @@ macro_rules! command_inventory {
             get_data_settings,
             set_raw_retention,
             export_full_backup,
+            estimate_batch,
+            create_acknowledged_batch,
+            get_batch,
+            list_batches,
+            authorize_batch_execution,
+            estimate_batch_retry,
+            authorize_batch_retry,
+            start_batch,
+            resume_batch,
+            pause_batch,
+            cancel_batch,
+            get_next_guided_member,
         )
     };
 }
@@ -101,6 +121,18 @@ mod tests {
                 "get_data_settings",
                 "set_raw_retention",
                 "export_full_backup",
+                "estimate_batch",
+                "create_acknowledged_batch",
+                "get_batch",
+                "list_batches",
+                "authorize_batch_execution",
+                "estimate_batch_retry",
+                "authorize_batch_retry",
+                "start_batch",
+                "resume_batch",
+                "pause_batch",
+                "cancel_batch",
+                "get_next_guided_member",
             ]
         );
     }

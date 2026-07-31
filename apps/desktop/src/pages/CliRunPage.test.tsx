@@ -23,6 +23,7 @@ import type {
   TargetKind,
   TargetSelection,
 } from "../api/backend";
+import { unsupportedBatchBackend } from "../api/backend";
 import {
   CLI_EFFORT_DISPLAY_CASES,
   DEFAULT_MODEL_DISPLAY_CASES,
@@ -51,6 +52,7 @@ function makeBootstrap(
       taskCount: 4,
       estimatedMinutes: "42–55",
     },
+    batchCapabilities: ["guided_quick_v1", "cli_standard_v1"],
     targets: [
       {
         kind,
@@ -115,6 +117,7 @@ function detail(run: RunRecord): RunDetail {
 
 function fakeBackend(overrides: Partial<Backend> = {}): Backend {
   return {
+    ...unsupportedBatchBackend,
     getBootstrap: vi.fn(async () => makeBootstrap()),
     detectClientSelection: vi.fn<Backend["detectClientSelection"]>(
       async () => ({

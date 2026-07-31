@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { describe, expect, test, vi } from "vitest";
 import { BackendProvider } from "../api/BackendContext";
 import type { Backend, RunRecord } from "../api/backend";
+import { unsupportedBatchBackend } from "../api/backend";
 import {
   CANONICAL_EFFORT_DISPLAY_CASES,
   DEFAULT_MODEL_DISPLAY_CASES,
@@ -58,6 +59,7 @@ function makeRun(overrides: Partial<RunRecord> = {}): RunRecord {
 
 function makeBackend(listRuns: Backend["listRuns"]): Backend {
   return {
+    ...unsupportedBatchBackend,
     getBootstrap: async () => {
       throw new Error("unused fake getBootstrap");
     },

@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { expect, test, vi } from "vitest";
 import { BackendProvider } from "../api/BackendContext";
 import type { Backend, Bootstrap, TargetKind } from "../api/backend";
+import { unsupportedBatchBackend } from "../api/backend";
 import { HomePage } from "./HomePage";
 
 const targetOrder: TargetKind[] = [
@@ -29,6 +30,7 @@ function readyBootstrap(): Bootstrap {
       taskCount: 2,
       estimatedMinutes: "30–60",
     },
+    batchCapabilities: ["guided_quick_v1", "cli_standard_v1"],
     targets: targetOrder.map((kind) => ({
       kind,
       installed: true,
@@ -56,6 +58,7 @@ function readyBootstrap(): Bootstrap {
 
 function backendFor(load: () => Promise<Bootstrap>): Backend {
   return {
+    ...unsupportedBatchBackend,
     getBootstrap: load,
     detectClientSelection: async () => ({
       status: "not_running",

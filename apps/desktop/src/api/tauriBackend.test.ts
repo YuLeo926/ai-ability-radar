@@ -1,5 +1,11 @@
 import { beforeEach, expect, test, vi } from "vitest";
 import type { RunErrorEvent, RunEvent, StartRunInput } from "./backend";
+import type {
+  AuthorizeBatchRetryInput,
+  BatchPlanInput,
+  CreateAcknowledgedBatchInput,
+  EstimateBatchRetryInput,
+} from "../domain/batch";
 
 const bridge = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -156,6 +162,281 @@ test("uses exactly the nineteen reviewed commands and narrow camelCase payloads"
   ]);
   expect(JSON.stringify(bridge.invoke.mock.calls)).not.toMatch(
     /destination|filePath|outputPath|artifactPath|program/i,
+  );
+});
+
+function batchPlanInput(): BatchPlanInput {
+  return {
+    mode: "quick_comparison",
+    seed: 17,
+    targets: [
+      {
+        target: {
+          kind: "chat_gpt_client",
+          reportedModel: "GPT-5.6",
+          reasoningEffort: "high",
+          modelSource: "manual",
+          modelVerification: "user_confirmed",
+        },
+        executionSurface: "guided_client",
+        executionAdapterIdentity: {
+          executionSurface: "guided_client",
+          providerFamily: "openai",
+          launchKind: "guided_client",
+          publicVersion: null,
+          adapterContractVersion: "guided-client-v1",
+        },
+      },
+      {
+        target: {
+          kind: "claude_client",
+          reportedModel: "Claude Sonnet 4.5",
+          reasoningEffort: "high",
+          modelSource: "manual",
+          modelVerification: "user_confirmed",
+        },
+        executionSurface: "guided_client",
+        executionAdapterIdentity: {
+          executionSurface: "guided_client",
+          providerFamily: "anthropic",
+          launchKind: "guided_client",
+          publicVersion: null,
+          adapterContractVersion: "guided-client-v1",
+        },
+      },
+    ],
+  };
+}
+
+function batchResponses() {
+  const planInput = batchPlanInput();
+  const targets = planInput.targets.map((target) => ({
+    target: target.target,
+    routeIdentity: {
+      kind: target.target.kind,
+      modelOrRoute: target.target.reportedModel.toLowerCase(),
+      reasoningEffort: target.target.reasoningEffort,
+      executionSurface: target.executionSurface,
+      isDefaultRoute: false,
+    },
+    executionAdapterIdentity: target.executionAdapterIdentity,
+  }));
+  const plan = {
+    suiteId: "client-quick",
+    suiteVersion: "1.0.0",
+    suiteContentSha256: "a".repeat(64),
+    scoringRuleVersion: "ability-v1",
+    mode: "quick_comparison",
+    seed: 17,
+    status: "created",
+    schedulePolicyVersion: 1,
+    taskSessionPolicyVersion: 1,
+    sessionIsolationPolicy: "user_attested_fresh_conversation_per_task",
+    targets,
+    sealedTaskBudgets: [
+      { maxTurns: 1, timeBudgetSecs: 100 },
+      { maxTurns: 1, timeBudgetSecs: 100 },
+    ],
+    costEstimate: {
+      policyVersion: 1,
+      executionSurface: "guided_client",
+      mode: "quick_comparison",
+      targetCount: 2,
+      repetitionsPerTarget: 1,
+      tasksPerMemberRun: 2,
+      plannedMemberRuns: 2,
+      taskLaunches: 4,
+      guidedInteractions: 4,
+      maxProviderTurns: 4,
+      summedTaskBudgetSecs: 400,
+      expectedElapsedSecsMin: 1_200,
+      expectedElapsedSecsMax: 1_800,
+      providerExecutionCeilingSecs: 1_000,
+      authorizationWallClockSecs: 14_400,
+      issuedAt: "2026-07-30T02:00:00Z",
+      initialAcknowledgementExpiresAt: "2026-07-30T02:15:00Z",
+      tokenQuotaAmount: null,
+      automaticRetryBudget: 0,
+    },
+    acknowledgementHash: "b".repeat(64),
+  };
+  const members = [
+    {
+      ordinal: 0,
+      targetPosition: 1,
+      repetitionIndex: 0,
+      runId: null,
+      status: "planned",
+      failureKind: null,
+      attemptNumber: 0,
+      updatedAt: "2026-07-30T02:00:01Z",
+    },
+    {
+      ordinal: 1,
+      targetPosition: 0,
+      repetitionIndex: 0,
+      runId: null,
+      status: "planned",
+      failureKind: null,
+      attemptNumber: 0,
+      updatedAt: "2026-07-30T02:00:01Z",
+    },
+  ];
+  const record = {
+    id: "39d9f772-2e12-4b2d-af13-94c32d36f2d3",
+    plan,
+    status: "created",
+    cancelRequested: false,
+    plannedMemberCount: 2,
+    terminalMemberCount: 0,
+    createdAt: "2026-07-30T02:00:01Z",
+    updatedAt: "2026-07-30T02:00:01Z",
+    members,
+  };
+  const authorization = {
+    batchId: record.id,
+    memberOrdinal: null,
+    attemptNumber: 1,
+    maxTaskLaunches: 4,
+    maxProviderTurns: 4,
+    maxTaskBudgetSecs: 400,
+    maxGuidedInteractions: 4,
+    acknowledgementHash: plan.acknowledgementHash,
+    allowedFailureKind: null,
+    expiresAt: "2026-07-30T06:00:02Z",
+    createdAt: "2026-07-30T02:00:02Z",
+  };
+  return {
+    estimate: {
+      plan,
+      capabilities: ["guided_quick_v1", "cli_standard_v1"],
+    },
+    record,
+    authorization,
+    retryEstimate: {
+      authorization: {
+        ...authorization,
+        memberOrdinal: 0,
+        maxTaskLaunches: 2,
+        maxProviderTurns: 2,
+        maxTaskBudgetSecs: 200,
+        maxGuidedInteractions: 2,
+        allowedFailureKind: "network",
+      },
+    },
+    next: {
+      decision: "runnable",
+      member: members[0],
+      target: targets[1],
+    },
+  };
+}
+
+test("uses the twelve reviewed batch commands with exact nested camelCase payloads", async () => {
+  const responses = batchResponses();
+  bridge.invoke.mockImplementation(async (command: string) => {
+    switch (command) {
+      case "estimate_batch":
+        return responses.estimate;
+      case "create_acknowledged_batch":
+      case "get_batch":
+      case "start_batch":
+      case "resume_batch":
+      case "pause_batch":
+      case "cancel_batch":
+        return responses.record;
+      case "list_batches":
+        return [responses.record];
+      case "authorize_batch_execution":
+      case "authorize_batch_retry":
+        return responses.authorization;
+      case "estimate_batch_retry":
+        return responses.retryEstimate;
+      case "get_next_guided_member":
+        return responses.next;
+      default:
+        throw new Error(`unexpected command ${command}`);
+    }
+  });
+  const plan = batchPlanInput();
+  const createInput: CreateAcknowledgedBatchInput = {
+    plan,
+    estimateIssuedAt: "2026-07-30T02:00:00Z",
+    acknowledgementHash: "b".repeat(64),
+  };
+  const batchId = responses.record.id;
+  const retryEstimateInput: EstimateBatchRetryInput = {
+    batchId,
+    memberOrdinal: 0,
+    expectedFailureKind: "network",
+  };
+  const retryInput: AuthorizeBatchRetryInput = {
+    batchId,
+    memberOrdinal: 0,
+    allowedFailureKind: "network",
+    estimateCreatedAt: "2026-07-30T02:00:02Z",
+    acknowledgementHash: "c".repeat(64),
+  };
+
+  await tauriBackend.estimateBatch(plan);
+  await tauriBackend.createAcknowledgedBatch(createInput);
+  await tauriBackend.getBatch(batchId);
+  await tauriBackend.listBatches();
+  await tauriBackend.authorizeBatchExecution({
+    batchId,
+    acknowledgementHash: "b".repeat(64),
+  });
+  await tauriBackend.estimateBatchRetry(retryEstimateInput);
+  await tauriBackend.authorizeBatchRetry(retryInput);
+  await tauriBackend.startBatch(batchId);
+  await tauriBackend.resumeBatch(batchId);
+  await tauriBackend.pauseBatch(batchId);
+  await tauriBackend.cancelBatch(batchId);
+  await tauriBackend.getNextGuidedMember(batchId);
+
+  expect(bridge.invoke.mock.calls).toEqual([
+    ["estimate_batch", { input: plan }],
+    ["create_acknowledged_batch", { input: createInput }],
+    ["get_batch", { input: { batchId } }],
+    ["list_batches"],
+    [
+      "authorize_batch_execution",
+      { input: { batchId, acknowledgementHash: "b".repeat(64) } },
+    ],
+    ["estimate_batch_retry", { input: retryEstimateInput }],
+    ["authorize_batch_retry", { input: retryInput }],
+    ["start_batch", { input: { batchId } }],
+    ["resume_batch", { input: { batchId } }],
+    ["pause_batch", { input: { batchId } }],
+    ["cancel_batch", { input: { batchId } }],
+    ["get_next_guided_member", { input: { batchId } }],
+  ]);
+  expect(JSON.stringify(bridge.invoke.mock.calls)).not.toMatch(
+    /program|arguments|destination|filePath|artifactPath/i,
+  );
+});
+
+test("rejects malformed nested batch responses with a stable local protocol error", async () => {
+  const response = batchResponses().estimate;
+  bridge.invoke.mockResolvedValue({
+    ...response,
+    plan: {
+      ...response.plan,
+      targets: [
+        {
+          ...response.plan.targets[0],
+          executionAdapterIdentity: {
+            ...response.plan.targets[0].executionAdapterIdentity,
+            program: "C:/private/codex.exe",
+          },
+        },
+        response.plan.targets[1],
+      ],
+    },
+  });
+
+  await expect(tauriBackend.estimateBatch(batchPlanInput())).rejects.toThrow(
+    "Batch command estimate_batch returned invalid local data",
   );
 });
 
