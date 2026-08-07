@@ -196,6 +196,22 @@ export interface NextGuidedMember {
   target: ScanBatchTarget | null;
 }
 
+export interface SubmitGuidedBatchAnswerInput {
+  batchId: string;
+  memberOrdinal: number;
+  runId: string;
+  taskId: string;
+  answer: string;
+  userAttestedNewConversation: true;
+}
+
+export interface DeclineGuidedBatchAttestationInput {
+  batchId: string;
+  memberOrdinal: number;
+  runId: string;
+  taskId: string;
+}
+
 export const BATCH_RESPONSE_LIMITS = Object.freeze({
   targets: 5,
   members: 25,

@@ -1,10 +1,16 @@
 use ability_core::{
-    EnvironmentFingerprint, ManualRunService, ModelSource, ModelVerification, PackLoader, RunMode,
-    RunRepository, RunServiceError, RunStatus, TargetKind, TargetSelection,
+    AdapterLaunchKind, BatchExecutionSurface, BatchMemberSeed, BatchMemberStatus, BatchMode,
+    EnvironmentFingerprint, ExecutionAdapterIdentity, FailureKind, IsolationAttestation,
+    IsolationEnforcement, ManualRunService, ModelSource, ModelVerification, PackLoader, RunMode,
+    RunRecord, RunRepository, RunServiceError, RunStatus, ScanBatchPlan, ScanBatchTarget,
+    ScanExecutionAuthorization, TargetKind, TargetSelection, build_batch_schedule,
 };
+use chrono::{Duration, Utc};
+use rusqlite::Connection;
 use std::fs;
 use std::sync::Arc;
 use tempfile::tempdir;
+use uuid::Uuid;
 
 fn write_pack(root: &std::path::Path, target_kinds: &str, grader: &str) {
     fs::create_dir_all(root).unwrap();
@@ -74,6 +80,342 @@ fn chatgpt_target() -> TargetSelection {
         model_source: ModelSource::Manual,
         model_verification: ModelVerification::UserConfirmed,
     }
+}
+
+fn guided_target(kind: TargetKind, model: &str) -> ScanBatchTarget {
+    let provider = match kind {
+        TargetKind::ChatGptClient => "openai",
+        TargetKind::ClaudeClient => "anthropic",
+        _ => panic!("guided client target required"),
+    };
+    ScanBatchTarget::new(
+        TargetSelection {
+            kind,
+            reported_model: model.into(),
+            reasoning_effort: Some("high".into()),
+            model_source: ModelSource::Manual,
+            model_verification: ModelVerification::UserConfirmed,
+        },
+        BatchExecutionSurface::GuidedClient,
+        ExecutionAdapterIdentity::new(
+            BatchExecutionSurface::GuidedClient,
+            provider,
+            AdapterLaunchKind::GuidedClient,
+            None,
+            "guided-client-v1",
+        )
+        .unwrap(),
+    )
+    .unwrap()
+}
+
+fn client_pack() -> Arc<ability_core::LoadedPack> {
+    Arc::new(
+        PackLoader::load(
+            &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("benchmark-packs/client-quick-v1"),
+        )
+        .unwrap(),
+    )
+}
+
+fn create_guided_batch(
+    repository: &RunRepository,
+    pack: &ability_core::LoadedPack,
+) -> (Uuid, ScanBatchPlan) {
+    let issued_at = Utc::now();
+    let plan = ScanBatchPlan::new(
+        pack,
+        "ability-v1",
+        BatchMode::QuickComparison,
+        17,
+        vec![
+            guided_target(TargetKind::ChatGptClient, "GPT-5.6"),
+            guided_target(TargetKind::ClaudeClient, "Claude Sonnet 4.5"),
+        ],
+        issued_at,
+    )
+    .unwrap();
+    let members = build_batch_schedule(&plan)
+        .unwrap()
+        .members
+        .into_iter()
+        .map(|member| BatchMemberSeed {
+            ordinal: member.ordinal,
+            target_position: member.target_position,
+            repetition_index: member.repetition_index,
+        })
+        .collect::<Vec<_>>();
+    let batch_id = Uuid::new_v4();
+    repository
+        .insert_batch_plan(batch_id, pack, &plan, &members, issued_at)
+        .unwrap();
+    repository
+        .append_execution_authorization(&ScanExecutionAuthorization {
+            batch_id,
+            member_ordinal: None,
+            attempt_number: 1,
+            max_provider_turns: plan.cost_estimate.max_provider_turns,
+            max_task_budget_secs: plan.cost_estimate.summed_task_budget_secs,
+            acknowledgement_hash: plan.acknowledgement_hash.clone(),
+            allowed_failure_kind: None,
+            expires_at: issued_at + Duration::hours(4),
+            created_at: issued_at,
+        })
+        .unwrap();
+    (batch_id, plan)
+}
+
+fn owned_run(plan: &ScanBatchPlan, target_position: usize, at: chrono::DateTime<Utc>) -> RunRecord {
+    let target = &plan.targets[target_position];
+    RunRecord {
+        id: Uuid::new_v4(),
+        target: target.target.clone(),
+        mode: RunMode::Quick,
+        suite_id: plan.suite_id.clone(),
+        suite_version: plan.suite_version.clone(),
+        status: RunStatus::Created,
+        started_at: at,
+        finished_at: None,
+        total_tasks: u32::try_from(plan.sealed_task_budgets.len()).unwrap(),
+        completed_tasks: 0,
+        environment: EnvironmentFingerprint {
+            os_family: "windows".into(),
+            os_version: "11".into(),
+            app_version: "0.3.0-test".into(),
+            cli_version: None,
+            verifier_runtime_version: None,
+            suite_id: plan.suite_id.clone(),
+            suite_version: plan.suite_version.clone(),
+            suite_content_sha256: plan.suite_content_sha256.clone(),
+            scoring_rule_version: plan.scoring_rule_version.clone(),
+            execution_adapter_identity: Some(target.execution_adapter_identity.clone()),
+            resumed: false,
+        },
+        score: None,
+    }
+}
+
+fn owned_run_for_ordinal(
+    plan: &ScanBatchPlan,
+    ordinal: usize,
+    at: chrono::DateTime<Utc>,
+) -> RunRecord {
+    let target_position =
+        usize::try_from(build_batch_schedule(plan).unwrap().members[ordinal].target_position)
+            .unwrap();
+    owned_run(plan, target_position, at)
+}
+
+fn attestation(at: chrono::DateTime<Utc>, accepted: bool) -> IsolationAttestation {
+    IsolationAttestation {
+        policy_version: 1,
+        enforcement: IsolationEnforcement::UserAttested,
+        user_attested: accepted,
+        recorded_at: at,
+    }
+}
+
+#[test]
+fn owned_guided_batch_run_reuses_reservation_persists_attestations_and_advances() {
+    let dir = tempdir().unwrap();
+    let database = dir.path().join("runs.db");
+    let pack = client_pack();
+    let repository = Arc::new(RunRepository::open(&database).unwrap());
+    let (batch_id, plan) = create_guided_batch(&repository, &pack);
+    let service = ManualRunService::new(repository.clone(), dir.path().join("artifacts"));
+    let started_at = plan.cost_estimate.issued_at + Duration::seconds(1);
+    let reserved = repository
+        .reserve_next_runnable_member_and_run(
+            batch_id,
+            started_at,
+            &owned_run_for_ordinal(&plan, 0, started_at),
+        )
+        .unwrap()
+        .unwrap();
+    let run_id = reserved.run.id;
+
+    let running = service
+        .start_owned_guided_batch_run(pack.clone(), reserved, started_at)
+        .unwrap();
+    assert_eq!(running.id, run_id);
+    assert_eq!(repository.list_runs().unwrap().len(), 1);
+
+    let mut submitted = 0_i64;
+    while let Some(step) = service.next_step(run_id).unwrap() {
+        submitted += 1;
+        let recorded_at = started_at + Duration::seconds(submitted);
+        service
+            .submit_guided_batch_answer(
+                batch_id,
+                0,
+                run_id,
+                &step.task_id,
+                "synthetic local answer",
+                attestation(recorded_at, true),
+            )
+            .unwrap();
+    }
+    assert_eq!(submitted, i64::try_from(pack.tasks.len()).unwrap());
+    let batch = repository.get_batch(batch_id).unwrap().unwrap();
+    assert_eq!(batch.members[0].status, BatchMemberStatus::Completed);
+    assert_eq!(batch.members[1].status, BatchMemberStatus::Planned);
+    assert_eq!(repository.list_runs().unwrap().len(), 1);
+
+    let connection = Connection::open(&database).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM scan_batch_task_isolation WHERE run_id=?1 AND policy_version=1 AND enforcement_json='\"user_attested\"' AND user_attested=1",
+                [run_id.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        submitted
+    );
+
+    let second = owned_run_for_ordinal(&plan, 1, started_at + Duration::minutes(1));
+    let next = repository
+        .reserve_next_runnable_member_and_run(batch_id, started_at + Duration::minutes(1), &second)
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.member.ordinal, 1);
+}
+
+#[test]
+fn declined_guided_attestation_terminalizes_without_evidence() {
+    let dir = tempdir().unwrap();
+    let database = dir.path().join("runs.db");
+    let pack = client_pack();
+    let repository = Arc::new(RunRepository::open(&database).unwrap());
+    let (batch_id, plan) = create_guided_batch(&repository, &pack);
+    let service = ManualRunService::new(repository.clone(), dir.path().join("artifacts"));
+    let started_at = plan.cost_estimate.issued_at + Duration::seconds(1);
+    let reserved = repository
+        .reserve_next_runnable_member_and_run(
+            batch_id,
+            started_at,
+            &owned_run_for_ordinal(&plan, 0, started_at),
+        )
+        .unwrap()
+        .unwrap();
+    let run_id = reserved.run.id;
+    service
+        .start_owned_guided_batch_run(pack, reserved, started_at)
+        .unwrap();
+    let step = service.next_step(run_id).unwrap().unwrap();
+
+    service
+        .decline_guided_batch_attestation(
+            batch_id,
+            0,
+            run_id,
+            &step.task_id,
+            started_at + Duration::seconds(2),
+        )
+        .unwrap();
+
+    let batch = repository.get_batch(batch_id).unwrap().unwrap();
+    assert_eq!(batch.members[0].status, BatchMemberStatus::Invalid);
+    assert_eq!(
+        batch.members[0].failure_kind,
+        Some(FailureKind::UserCancelled)
+    );
+    assert!(repository.get_task_results(run_id).unwrap().is_empty());
+    assert_eq!(
+        Connection::open(&database)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM scan_batch_task_isolation WHERE run_id=?1",
+                [run_id.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+    assert!(
+        !dir.path()
+            .join("artifacts/runs")
+            .join(run_id.to_string())
+            .exists()
+    );
+}
+
+#[test]
+fn guided_checkpoint_failure_removes_artifact_and_defers_without_half_evidence() {
+    let dir = tempdir().unwrap();
+    let database = dir.path().join("runs.db");
+    let pack = client_pack();
+    let repository = Arc::new(RunRepository::open(&database).unwrap());
+    let (batch_id, plan) = create_guided_batch(&repository, &pack);
+    let service = ManualRunService::new(repository.clone(), dir.path().join("artifacts"));
+    let started_at = plan.cost_estimate.issued_at + Duration::seconds(1);
+    let reserved = repository
+        .reserve_next_runnable_member_and_run(
+            batch_id,
+            started_at,
+            &owned_run_for_ordinal(&plan, 0, started_at),
+        )
+        .unwrap()
+        .unwrap();
+    let run_id = reserved.run.id;
+    service
+        .start_owned_guided_batch_run(pack, reserved, started_at)
+        .unwrap();
+    let step = service.next_step(run_id).unwrap().unwrap();
+    Connection::open(&database)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER fail_guided_result BEFORE INSERT ON task_results
+             BEGIN SELECT RAISE(ABORT, 'forced guided checkpoint failure'); END;",
+        )
+        .unwrap();
+
+    assert!(matches!(
+        service.submit_guided_batch_answer(
+            batch_id,
+            0,
+            run_id,
+            &step.task_id,
+            "synthetic local answer",
+            attestation(started_at + Duration::seconds(2), true),
+        ),
+        Err(RunServiceError::Storage(_))
+    ));
+    assert!(repository.get_task_results(run_id).unwrap().is_empty());
+    let connection = Connection::open(&database).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM scan_batch_task_isolation WHERE run_id=?1",
+                [run_id.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+    assert!(
+        !dir.path()
+            .join("artifacts/runs")
+            .join(run_id.to_string())
+            .join(format!("{}.txt", step.task_id))
+            .exists()
+    );
+    let batch = repository.get_batch(batch_id).unwrap().unwrap();
+    assert_eq!(batch.members[0].status, BatchMemberStatus::Deferred);
+    assert_eq!(
+        batch.members[0].failure_kind,
+        Some(FailureKind::AppInterrupted)
+    );
+    assert_eq!(
+        repository.get_run(run_id).unwrap().unwrap().status,
+        RunStatus::Interrupted
+    );
+    assert!(matches!(
+        service.next_step(run_id),
+        Err(RunServiceError::RunNotFound(id)) if id == run_id
+    ));
 }
 
 #[test]

@@ -322,6 +322,19 @@ export function HomePage() {
         </div>
       </section>
 
+      <section aria-labelledby="batch-entry-title" className="batch-entry-card">
+        <div>
+          <p className="section-kicker">同题包 · 交错顺序 · 本地留证</p>
+          <h2 id="batch-entry-title">比较 ChatGPT 与 Claude 客户端</h2>
+          <p>
+            先用轻量双目标扫描验证流程。每道题单独确认新空白对话，结果明确标注证据边界。
+          </p>
+        </div>
+        <Link className="button" to="/batch/setup">
+          建立多目标扫描
+        </Link>
+      </section>
+
       <div className="target-sections">
         <TargetGroup
           description="手动复制与粘贴"

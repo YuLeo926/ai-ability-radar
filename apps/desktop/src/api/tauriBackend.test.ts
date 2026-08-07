@@ -329,10 +329,46 @@ function batchResponses() {
       member: members[0],
       target: targets[1],
     },
+    run: {
+      id: "6ca97ed4-1b88-4ee1-9e0e-5ab34f225761",
+      target: targets[1].target,
+      mode: "quick",
+      suiteId: plan.suiteId,
+      suiteVersion: plan.suiteVersion,
+      status: "running",
+      startedAt: "2026-07-30T02:00:04Z",
+      finishedAt: null,
+      totalTasks: 2,
+      completedTasks: 0,
+      environment: {
+        osFamily: "Windows",
+        osVersion: "11",
+        appVersion: "0.2.2",
+        cliVersion: null,
+        verifierRuntimeVersion: null,
+        suiteId: plan.suiteId,
+        suiteVersion: plan.suiteVersion,
+        suiteContentSha256: plan.suiteContentSha256,
+        scoringRuleVersion: plan.scoringRuleVersion,
+        executionAdapterIdentity: targets[1].executionAdapterIdentity,
+        resumed: false,
+      },
+      score: null,
+    },
+    taskResult: {
+      runId: "6ca97ed4-1b88-4ee1-9e0e-5ab34f225761",
+      taskId: "logic-grid",
+      category: "logic",
+      outcome: "failed",
+      score: 0,
+      failureKind: "wrong_answer",
+      durationMs: 712,
+      answerRelPath: "runs/6ca97ed4-1b88-4ee1-9e0e-5ab34f225761/answers/logic-grid.txt",
+    },
   };
 }
 
-test("uses the twelve reviewed batch commands with exact nested camelCase payloads", async () => {
+test("uses the fifteen reviewed batch commands with exact nested camelCase payloads", async () => {
   const responses = batchResponses();
   bridge.invoke.mockImplementation(async (command: string) => {
     switch (command) {
@@ -344,6 +380,7 @@ test("uses the twelve reviewed batch commands with exact nested camelCase payloa
       case "resume_batch":
       case "pause_batch":
       case "cancel_batch":
+      case "decline_guided_batch_attestation":
         return responses.record;
       case "list_batches":
         return [responses.record];
@@ -354,6 +391,10 @@ test("uses the twelve reviewed batch commands with exact nested camelCase payloa
         return responses.retryEstimate;
       case "get_next_guided_member":
         return responses.next;
+      case "begin_guided_batch_member":
+        return responses.run;
+      case "submit_guided_batch_answer":
+        return responses.taskResult;
       default:
         throw new Error(`unexpected command ${command}`);
     }
@@ -377,6 +418,20 @@ test("uses the twelve reviewed batch commands with exact nested camelCase payloa
     estimateCreatedAt: "2026-07-30T02:00:02Z",
     acknowledgementHash: "c".repeat(64),
   };
+  const guidedAnswer = {
+    batchId,
+    memberOrdinal: 0,
+    runId: responses.run.id,
+    taskId: "logic-grid",
+    answer: "local pasted answer",
+    userAttestedNewConversation: true as const,
+  };
+  const declineInput = {
+    batchId,
+    memberOrdinal: 0,
+    runId: responses.run.id,
+    taskId: "logic-grid",
+  };
 
   await tauriBackend.estimateBatch(plan);
   await tauriBackend.createAcknowledgedBatch(createInput);
@@ -393,6 +448,9 @@ test("uses the twelve reviewed batch commands with exact nested camelCase payloa
   await tauriBackend.pauseBatch(batchId);
   await tauriBackend.cancelBatch(batchId);
   await tauriBackend.getNextGuidedMember(batchId);
+  await tauriBackend.beginGuidedBatchMember(batchId);
+  await tauriBackend.submitGuidedBatchAnswer(guidedAnswer);
+  await tauriBackend.declineGuidedBatchAttestation(declineInput);
 
   expect(bridge.invoke.mock.calls).toEqual([
     ["estimate_batch", { input: plan }],
@@ -410,6 +468,9 @@ test("uses the twelve reviewed batch commands with exact nested camelCase payloa
     ["pause_batch", { input: { batchId } }],
     ["cancel_batch", { input: { batchId } }],
     ["get_next_guided_member", { input: { batchId } }],
+    ["begin_guided_batch_member", { input: { batchId } }],
+    ["submit_guided_batch_answer", { input: guidedAnswer }],
+    ["decline_guided_batch_attestation", { input: declineInput }],
   ]);
   expect(JSON.stringify(bridge.invoke.mock.calls)).not.toMatch(
     /program|arguments|destination|filePath|artifactPath/i,
@@ -437,6 +498,34 @@ test("rejects malformed nested batch responses with a stable local protocol erro
 
   await expect(tauriBackend.estimateBatch(batchPlanInput())).rejects.toThrow(
     "Batch command estimate_batch returned invalid local data",
+  );
+});
+
+test("rejects extra fields from guided run and task-result commands", async () => {
+  const responses = batchResponses();
+  bridge.invoke
+    .mockResolvedValueOnce({ ...responses.run, program: "private.exe" })
+    .mockResolvedValueOnce({
+      ...responses.taskResult,
+      detail: "private grader detail",
+    });
+
+  await expect(
+    tauriBackend.beginGuidedBatchMember(responses.record.id),
+  ).rejects.toThrow(
+    "Batch command begin_guided_batch_member returned invalid local data",
+  );
+  await expect(
+    tauriBackend.submitGuidedBatchAnswer({
+      batchId: responses.record.id,
+      memberOrdinal: 0,
+      runId: responses.run.id,
+      taskId: "logic-grid",
+      answer: "local answer",
+      userAttestedNewConversation: true,
+    }),
+  ).rejects.toThrow(
+    "Batch command submit_guided_batch_answer returned invalid local data",
   );
 });
 

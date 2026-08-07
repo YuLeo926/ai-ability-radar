@@ -23,6 +23,11 @@ import {
   ThemeToggle,
 } from "../components/ThemeToggle";
 import { messages, translate } from "../i18n/messages";
+import type {
+  BatchEstimate,
+  BatchPlanInput,
+  ScanBatchRecord,
+} from "../domain/batch";
 import indexHtml from "../../index.html?raw";
 
 const runId = "task21-synthetic-run";
@@ -258,6 +263,152 @@ function runDetail(): RunDetail {
     },
   ];
   return { run: runRecord(), taskResults };
+}
+
+function accessibleBatchRecord(completed = false): ScanBatchRecord {
+  const targets = [
+    {
+      target: {
+        kind: "chat_gpt_client" as const,
+        reportedModel: "GPT-5.6",
+        reasoningEffort: "max",
+        modelSource: "windows_accessibility" as const,
+        modelVerification: "user_confirmed" as const,
+      },
+      routeIdentity: {
+        kind: "chat_gpt_client" as const,
+        modelOrRoute: "gpt-5.6",
+        reasoningEffort: "max",
+        executionSurface: "guided_client" as const,
+        isDefaultRoute: false,
+      },
+      executionAdapterIdentity: {
+        executionSurface: "guided_client" as const,
+        providerFamily: "openai",
+        launchKind: "guided_client" as const,
+        publicVersion: null,
+        adapterContractVersion: "guided-client-v1",
+      },
+    },
+    {
+      target: {
+        kind: "claude_client" as const,
+        reportedModel: "Claude Sonnet 4.5",
+        reasoningEffort: "high",
+        modelSource: "manual" as const,
+        modelVerification: "user_confirmed" as const,
+      },
+      routeIdentity: {
+        kind: "claude_client" as const,
+        modelOrRoute: "claude sonnet 4.5",
+        reasoningEffort: "high",
+        executionSurface: "guided_client" as const,
+        isDefaultRoute: false,
+      },
+      executionAdapterIdentity: {
+        executionSurface: "guided_client" as const,
+        providerFamily: "anthropic",
+        launchKind: "guided_client" as const,
+        publicVersion: null,
+        adapterContractVersion: "guided-client-v1",
+      },
+    },
+  ];
+  return {
+    id: "39d9f772-2e12-4b2d-af13-94c32d36f2d3",
+    plan: {
+      suiteId: "client-quick",
+      suiteVersion: "1.0.0",
+      suiteContentSha256: "a".repeat(64),
+      scoringRuleVersion: "ability-v1",
+      mode: "quick_comparison",
+      seed: 17,
+      status: "created",
+      schedulePolicyVersion: 1,
+      taskSessionPolicyVersion: 1,
+      sessionIsolationPolicy:
+        "user_attested_fresh_conversation_per_task",
+      targets,
+      sealedTaskBudgets: [
+        { maxTurns: 1, timeBudgetSecs: 270 },
+        { maxTurns: 1, timeBudgetSecs: 270 },
+      ],
+      costEstimate: {
+        policyVersion: 1,
+        executionSurface: "guided_client",
+        mode: "quick_comparison",
+        targetCount: 2,
+        repetitionsPerTarget: 1,
+        tasksPerMemberRun: 2,
+        plannedMemberRuns: 2,
+        taskLaunches: 4,
+        guidedInteractions: 4,
+        maxProviderTurns: 4,
+        summedTaskBudgetSecs: 1_080,
+        expectedElapsedSecsMin: 1_200,
+        expectedElapsedSecsMax: 1_800,
+        providerExecutionCeilingSecs: 1_680,
+        authorizationWallClockSecs: 14_400,
+        issuedAt: "2026-07-31T12:00:00Z",
+        initialAcknowledgementExpiresAt: "2026-07-31T12:15:00Z",
+        tokenQuotaAmount: null,
+        automaticRetryBudget: 0,
+      },
+      acknowledgementHash: "b".repeat(64),
+    },
+    status: completed ? "completed" : "running",
+    cancelRequested: false,
+    plannedMemberCount: 2,
+    terminalMemberCount: completed ? 2 : 0,
+    createdAt: "2026-07-31T12:00:01Z",
+    updatedAt: "2026-07-31T12:00:04Z",
+    members: [
+      {
+        ordinal: 0,
+        targetPosition: 0,
+        repetitionIndex: 0,
+        runId: "6ca97ed4-1b88-4ee1-9e0e-5ab34f225761",
+        status: completed ? "completed" : "running",
+        failureKind: null,
+        attemptNumber: 1,
+        updatedAt: "2026-07-31T12:00:04Z",
+      },
+      {
+        ordinal: 1,
+        targetPosition: 1,
+        repetitionIndex: 0,
+        runId: completed
+          ? "6eac7183-954c-426d-9c69-86a96772da12"
+          : null,
+        status: completed ? "completed" : "planned",
+        failureKind: null,
+        attemptNumber: completed ? 1 : 0,
+        updatedAt: "2026-07-31T12:00:04Z",
+      },
+    ],
+  };
+}
+
+function accessibleBatchEstimate(input: BatchPlanInput): BatchEstimate {
+  const record = accessibleBatchRecord();
+  return {
+    capabilities: ["guided_quick_v1", "cli_standard_v1"],
+    plan: {
+      ...record.plan,
+      seed: input.seed,
+      targets: input.targets.map((target) => ({
+        target: target.target,
+        routeIdentity: {
+          kind: target.target.kind,
+          modelOrRoute: target.target.reportedModel.trim().toLowerCase(),
+          reasoningEffort: target.target.reasoningEffort ?? null,
+          executionSurface: target.executionSurface,
+          isDefaultRoute: false,
+        },
+        executionAdapterIdentity: target.executionAdapterIdentity,
+      })),
+    },
+  };
 }
 
 function fakeBackend(overrides: Partial<Backend> = {}): Backend {
@@ -545,6 +696,59 @@ describe("Task 21 accessibility baseline", () => {
     await expectNoSeriousAxeViolations(notFound.container);
   });
 
+  test("batch setup, guided task, and insufficient-data result pass axe", async () => {
+    const setup = renderRoute(
+      "/batch/setup",
+      fakeBackend({
+        estimateBatch: vi.fn<Backend["estimateBatch"]>(async (input) =>
+          accessibleBatchEstimate(input),
+        ),
+      }),
+    );
+    await screen.findByRole("heading", {
+      name: "建立一次可复核的双客户端扫描",
+    });
+    await expectNoSeriousAxeViolations(setup.container);
+    setup.unmount();
+
+    const running = accessibleBatchRecord();
+    const task = renderRoute(
+      `/batch/${running.id}`,
+      fakeBackend({
+        getBatch: vi.fn(async () => running),
+        getNextGuidedMember: vi.fn<Backend["getNextGuidedMember"]>(
+          async () => ({
+            decision: "blocked_by_active",
+            member: running.members[0],
+            target: running.plan.targets[0],
+          }),
+        ),
+        nextManualStep: vi.fn(async () => ({
+          runId: running.members[0]!.runId!,
+          taskId: "logic-grid",
+          taskNumber: 1,
+          totalTasks: 2,
+          prompt: "合成客户端题目",
+        })),
+      }),
+    );
+    await screen.findByRole("heading", {
+      name: "在新的空白对话中完成本题",
+    });
+    await expectNoSeriousAxeViolations(task.container);
+    task.unmount();
+
+    const completed = accessibleBatchRecord(true);
+    const result = renderRoute(
+      `/batch/${completed.id}/result`,
+      fakeBackend({ getBatch: vi.fn(async () => completed) }),
+    );
+    await screen.findByRole("heading", {
+      name: "证据不足，暂不判断是否降智",
+    });
+    await expectNoSeriousAxeViolations(result.container);
+  });
+
   test("the keyboard-visible skip link focuses the current main", async () => {
     const user = userEvent.setup();
     renderRoute("/");
@@ -766,6 +970,7 @@ describe("Task 21 accessibility baseline", () => {
   test("the precision-radar surface uses no CSS gradients", () => {
     const styleFiles = [
       join(sourceRoot, "styles", "app.css"),
+      join(sourceRoot, "pages", "BatchPages.css"),
       join(sourceRoot, "pages", "ManualRunPage.css"),
       join(sourceRoot, "pages", "CliRunPage.css"),
       join(sourceRoot, "pages", "ResultsHistory.css"),
@@ -786,6 +991,7 @@ describe("Task 21 accessibility baseline", () => {
     );
 
     for (const file of [
+      "BatchPages.css",
       "ManualRunPage.css",
       "CliRunPage.css",
       "ResultsHistory.css",
@@ -811,6 +1017,7 @@ describe("Task 21 accessibility baseline", () => {
 
   test("page focus rules use the semantic focus token and preserve forced colors", () => {
     const pageSources = [
+      "BatchPages.css",
       "ManualRunPage.css",
       "CliRunPage.css",
       "ResultsHistory.css",

@@ -1,10 +1,12 @@
 use crate::{
-    ArtifactStore, EnvironmentFingerprint, FailureKind, GraderSpec, LoadedPack,
-    RecoveryArtifactCheckpoint, RunMode, RunRecord, RunRepository, RunStatus, StorageError,
-    TargetKind, TargetSelection, TaskOutcome, TaskResult, grade_submission, summarize_scores,
+    ArtifactStore, BatchMemberStatus, BatchReservation, EnvironmentFingerprint, FailureKind,
+    GraderSpec, IsolationAttestation, IsolationEnforcement, LoadedPack, RecoveryArtifactCheckpoint,
+    RunMode, RunRecord, RunRepository, RunStatus, StorageError, TargetKind, TargetSelection,
+    TaskOutcome, TaskResult, grade_submission, summarize_scores,
 };
 #[cfg(test)]
 use crate::{ModelSource, ModelVerification};
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -77,13 +79,35 @@ pub enum RunServiceError {
         cleanup: std::io::Error,
         status: Box<StorageError>,
     },
+    #[error("checkpoint storage failed and owned-run recovery failed: {storage}; {status}")]
+    CheckpointTerminalization {
+        storage: Box<StorageError>,
+        status: Box<StorageError>,
+    },
+    #[error("guided batch ownership does not match the active run")]
+    BatchOwnershipMismatch,
+    #[error("guided task evidence requires a fresh positive user attestation")]
+    MissingIsolationAttestation,
     #[error("service state lock is poisoned")]
     Poisoned,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GuidedBatchOwnership {
+    batch_id: Uuid,
+    member_ordinal: u32,
+}
+
+struct GuidedSubmission {
+    ownership: GuidedBatchOwnership,
+    attestation: IsolationAttestation,
 }
 
 struct ActiveManualRun {
     pack: Arc<LoadedPack>,
     task_started: Instant,
+    task_started_at: DateTime<Utc>,
+    guided_ownership: Option<GuidedBatchOwnership>,
 }
 
 pub struct ManualRunService {
@@ -127,6 +151,38 @@ impl ManualRunService {
         mode: RunMode,
         environment: EnvironmentFingerprint,
     ) -> Result<RunRecord, RunServiceError> {
+        self.validate_manual_run_contract(&pack, &target, &environment)?;
+
+        // Acquire state before persistence: if the mutex is poisoned, no Running row is created.
+        let mut active = self.active.lock().map_err(|_| RunServiceError::Poisoned)?;
+        let mut run = RunRecord::new(
+            target,
+            mode,
+            pack.manifest.id.clone(),
+            pack.manifest.version.clone(),
+            u32::try_from(pack.tasks.len()).map_err(|_| RunServiceError::ElapsedOverflow)?,
+            environment,
+        );
+        run.status = RunStatus::Running;
+        self.repository.insert_run(&run)?;
+        active.insert(
+            run.id,
+            ActiveManualRun {
+                pack,
+                task_started: Instant::now(),
+                task_started_at: Utc::now(),
+                guided_ownership: None,
+            },
+        );
+        Ok(run)
+    }
+
+    fn validate_manual_run_contract(
+        &self,
+        pack: &LoadedPack,
+        target: &TargetSelection,
+        environment: &EnvironmentFingerprint,
+    ) -> Result<(), RunServiceError> {
         validate_artifact_root(&self.artifact_root)?;
         if !matches!(
             target.kind,
@@ -155,24 +211,61 @@ impl ManualRunService {
         for task in &pack.tasks {
             validate_task_artifact_names(&task.definition.id)?;
         }
+        Ok(())
+    }
 
-        // Acquire state before persistence: if the mutex is poisoned, no Running row is created.
+    pub fn start_owned_guided_batch_run(
+        &self,
+        pack: Arc<LoadedPack>,
+        reservation: BatchReservation,
+        started_at: DateTime<Utc>,
+    ) -> Result<RunRecord, RunServiceError> {
+        self.validate_manual_run_contract(
+            &pack,
+            &reservation.run.target,
+            &reservation.run.environment,
+        )?;
+        let run_id = reservation.run.id;
+        if reservation.member.status != BatchMemberStatus::Reserved
+            || reservation.member.run_id != Some(run_id)
+            || reservation.run.status != RunStatus::Created
+        {
+            return Err(RunServiceError::BatchOwnershipMismatch);
+        }
+
         let mut active = self.active.lock().map_err(|_| RunServiceError::Poisoned)?;
-        let mut run = RunRecord::new(
-            target,
-            mode,
-            pack.manifest.id.clone(),
-            pack.manifest.version.clone(),
-            u32::try_from(pack.tasks.len()).map_err(|_| RunServiceError::ElapsedOverflow)?,
-            environment,
-        );
-        run.status = RunStatus::Running;
-        self.repository.insert_run(&run)?;
+        if active.contains_key(&run_id) {
+            return Err(RunServiceError::BatchOwnershipMismatch);
+        }
+        self.repository.mark_member_launching(
+            reservation.batch_id,
+            reservation.member.ordinal,
+            run_id,
+            started_at,
+        )?;
+        self.repository.mark_member_running(
+            reservation.batch_id,
+            reservation.member.ordinal,
+            run_id,
+            started_at,
+        )?;
+        let run = self
+            .repository
+            .get_run(run_id)?
+            .ok_or(RunServiceError::RunNotFound(run_id))?;
+        if run.status != RunStatus::Running {
+            return Err(RunServiceError::BatchOwnershipMismatch);
+        }
         active.insert(
-            run.id,
+            run_id,
             ActiveManualRun {
                 pack,
                 task_started: Instant::now(),
+                task_started_at: started_at,
+                guided_ownership: Some(GuidedBatchOwnership {
+                    batch_id: reservation.batch_id,
+                    member_ordinal: reservation.member.ordinal,
+                }),
             },
         );
         Ok(run)
@@ -246,6 +339,8 @@ impl ManualRunService {
             ActiveManualRun {
                 pack,
                 task_started: Instant::now(),
+                task_started_at: Utc::now(),
+                guided_ownership: None,
             },
         );
         Ok(resumed)
@@ -253,7 +348,7 @@ impl ManualRunService {
 
     pub fn next_step(&self, run_id: Uuid) -> Result<Option<ManualStep>, RunServiceError> {
         let mut active = self.active.lock().map_err(|_| RunServiceError::Poisoned)?;
-        let (completed, total_tasks) = {
+        let (completed, total_tasks, status) = {
             let state = match active.get(&run_id) {
                 Some(state) => state,
                 None => {
@@ -267,17 +362,23 @@ impl ManualRunService {
                 .repository
                 .get_run(run_id)?
                 .ok_or(RunServiceError::RunNotFound(run_id))?;
-            if run.status != RunStatus::Running {
-                return Err(RunServiceError::RunNotFound(run_id));
-            }
             (
                 self.repository.get_task_results(run_id)?.len(),
                 state.pack.tasks.len(),
+                run.status,
             )
         };
 
+        if status == RunStatus::Completed && completed == total_tasks {
+            self.complete_active_run(run_id, &active, Utc::now())?;
+            active.remove(&run_id);
+            return Ok(None);
+        }
+        if status != RunStatus::Running {
+            return Err(RunServiceError::RunNotFound(run_id));
+        }
         if completed == total_tasks {
-            self.complete_active_run(run_id, &active)?;
+            self.complete_active_run(run_id, &active, Utc::now())?;
             active.remove(&run_id);
             return Ok(None);
         }
@@ -293,22 +394,43 @@ impl ManualRunService {
 
     pub fn cancel(&self, run_id: Uuid) -> Result<bool, RunServiceError> {
         let mut active = self.active.lock().map_err(|_| RunServiceError::Poisoned)?;
-        if !active.contains_key(&run_id) {
+        let Some(state) = active.get(&run_id) else {
             return Ok(false);
+        };
+        if let Some(ownership) = state.guided_ownership {
+            self.repository.finish_batch_member(
+                ownership.batch_id,
+                ownership.member_ordinal,
+                run_id,
+                BatchMemberStatus::Cancelled,
+                Some(FailureKind::UserCancelled),
+                Utc::now(),
+            )?;
+        } else {
+            self.repository
+                .finish_without_score(run_id, RunStatus::Cancelled)?;
         }
-        self.repository
-            .finish_without_score(run_id, RunStatus::Cancelled)?;
         active.remove(&run_id);
         Ok(true)
     }
 
     pub fn interrupt(&self, run_id: Uuid) -> Result<bool, RunServiceError> {
         let mut active = self.active.lock().map_err(|_| RunServiceError::Poisoned)?;
-        if !active.contains_key(&run_id) {
+        let Some(state) = active.get(&run_id) else {
             return Ok(false);
+        };
+        if let Some(ownership) = state.guided_ownership {
+            self.repository.defer_batch_member(
+                ownership.batch_id,
+                ownership.member_ordinal,
+                Some(run_id),
+                FailureKind::AppInterrupted,
+                Utc::now(),
+            )?;
+        } else {
+            self.repository
+                .finish_without_score(run_id, RunStatus::Interrupted)?;
         }
-        self.repository
-            .finish_without_score(run_id, RunStatus::Interrupted)?;
         active.remove(&run_id);
         Ok(true)
     }
@@ -319,15 +441,63 @@ impl ManualRunService {
         task_id: &str,
         answer: &str,
     ) -> Result<TaskResult, RunServiceError> {
+        self.submit_answer_inner(run_id, task_id, answer, None)
+    }
+
+    pub fn submit_guided_batch_answer(
+        &self,
+        batch_id: Uuid,
+        member_ordinal: u32,
+        run_id: Uuid,
+        task_id: &str,
+        answer: &str,
+        attestation: IsolationAttestation,
+    ) -> Result<TaskResult, RunServiceError> {
+        if attestation.policy_version != 1
+            || attestation.enforcement != IsolationEnforcement::UserAttested
+            || !attestation.user_attested
+        {
+            return Err(RunServiceError::MissingIsolationAttestation);
+        }
+        self.submit_answer_inner(
+            run_id,
+            task_id,
+            answer,
+            Some(GuidedSubmission {
+                ownership: GuidedBatchOwnership {
+                    batch_id,
+                    member_ordinal,
+                },
+                attestation,
+            }),
+        )
+    }
+
+    fn submit_answer_inner(
+        &self,
+        run_id: Uuid,
+        task_id: &str,
+        answer: &str,
+        guided: Option<GuidedSubmission>,
+    ) -> Result<TaskResult, RunServiceError> {
         if answer.len() > MAX_ANSWER_BYTES {
             return Err(RunServiceError::AnswerTooLarge);
         }
 
         let mut active = self.active.lock().map_err(|_| RunServiceError::Poisoned)?;
-        let (task_id_to_save, category, grader, duration_ms, total_tasks, completed) = {
+        let (task_id_to_save, category, grader, duration_ms, total_tasks, completed, ownership) = {
             let state = active
                 .get(&run_id)
                 .ok_or(RunServiceError::RunNotFound(run_id))?;
+            match (state.guided_ownership, guided.as_ref()) {
+                (None, None) => {}
+                (Some(expected), Some(submission)) if expected == submission.ownership => {
+                    if submission.attestation.recorded_at < state.task_started_at {
+                        return Err(RunServiceError::MissingIsolationAttestation);
+                    }
+                }
+                _ => return Err(RunServiceError::BatchOwnershipMismatch),
+            }
             let run = self
                 .repository
                 .get_run(run_id)?
@@ -337,7 +507,14 @@ impl ManualRunService {
             }
             let completed = self.repository.get_task_results(run_id)?.len();
             if completed == state.pack.tasks.len() {
-                self.complete_active_run(run_id, &active)?;
+                self.complete_active_run(
+                    run_id,
+                    &active,
+                    guided
+                        .as_ref()
+                        .map(|submission| submission.attestation.recorded_at)
+                        .unwrap_or_else(Utc::now),
+                )?;
                 active.remove(&run_id);
                 return Err(RunServiceError::RunNotFound(run_id));
             }
@@ -357,6 +534,7 @@ impl ManualRunService {
                     .map_err(|_| RunServiceError::ElapsedOverflow)?,
                 state.pack.tasks.len(),
                 completed,
+                state.guided_ownership,
             )
         };
 
@@ -400,13 +578,68 @@ impl ManualRunService {
                 "forced checkpoint failure".into(),
             ))
         } else {
-            self.repository.save_task_result(&result)
+            self.checkpoint_task_result(&result, guided.as_ref())
         };
         #[cfg(not(all(test, windows)))]
-        let checkpoint_result = self.repository.save_task_result(&result);
+        let checkpoint_result = self.checkpoint_task_result(&result, guided.as_ref());
 
         if let Err(error) = checkpoint_result {
-            return match artifact.remove_after_checkpoint_failure() {
+            let cleanup_result = artifact.remove_after_checkpoint_failure();
+            if let Some(ownership) = ownership {
+                active.remove(&run_id);
+                #[cfg(all(test, windows))]
+                let status_result = if self
+                    .artifact_write_hooks
+                    .lock()
+                    .expect("test hook lock")
+                    .force_status_failure
+                {
+                    Err(StorageError::RunNotFound(run_id))
+                } else {
+                    self.repository.defer_batch_member(
+                        ownership.batch_id,
+                        ownership.member_ordinal,
+                        Some(run_id),
+                        FailureKind::AppInterrupted,
+                        guided
+                            .as_ref()
+                            .expect("owned checkpoint has guided submission")
+                            .attestation
+                            .recorded_at,
+                    )
+                };
+                #[cfg(not(all(test, windows)))]
+                let status_result = self.repository.defer_batch_member(
+                    ownership.batch_id,
+                    ownership.member_ordinal,
+                    Some(run_id),
+                    FailureKind::AppInterrupted,
+                    guided
+                        .as_ref()
+                        .expect("owned checkpoint has guided submission")
+                        .attestation
+                        .recorded_at,
+                );
+                return match (cleanup_result, status_result) {
+                    (Ok(()), Ok(())) => Err(error.into()),
+                    (Ok(()), Err(status)) => Err(RunServiceError::CheckpointTerminalization {
+                        storage: Box::new(error),
+                        status: Box::new(status),
+                    }),
+                    (Err(cleanup), Ok(())) => Err(RunServiceError::CheckpointCleanup {
+                        storage: Box::new(error),
+                        cleanup,
+                    }),
+                    (Err(cleanup), Err(status)) => {
+                        Err(RunServiceError::CheckpointCleanupTerminal {
+                            storage: Box::new(error),
+                            cleanup,
+                            status: Box::new(status),
+                        })
+                    }
+                };
+            }
+            return match cleanup_result {
                 Ok(()) => Err(error.into()),
                 Err(cleanup) => {
                     active.remove(&run_id);
@@ -445,21 +678,97 @@ impl ManualRunService {
         if completed + 1 == total_tasks {
             // Preserve the active state unless the repository confirms completion, so a
             // subsequent next_step call can safely retry a transient completion failure.
-            self.complete_active_run(run_id, &active)?;
+            self.complete_active_run(
+                run_id,
+                &active,
+                guided
+                    .as_ref()
+                    .map(|submission| submission.attestation.recorded_at)
+                    .unwrap_or_else(Utc::now),
+            )?;
             active.remove(&run_id);
         } else {
-            active
+            let state = active
                 .get_mut(&run_id)
-                .expect("active state remains until completion")
-                .task_started = Instant::now();
+                .expect("active state remains until completion");
+            state.task_started = Instant::now();
+            state.task_started_at = guided
+                .as_ref()
+                .map(|submission| submission.attestation.recorded_at)
+                .unwrap_or_else(Utc::now);
         }
         Ok(result)
+    }
+
+    fn checkpoint_task_result(
+        &self,
+        result: &TaskResult,
+        guided: Option<&GuidedSubmission>,
+    ) -> Result<(), StorageError> {
+        match guided {
+            Some(submission) => self.repository.save_guided_task_result_with_isolation(
+                submission.ownership.batch_id,
+                submission.ownership.member_ordinal,
+                result,
+                &submission.attestation,
+            ),
+            None => self.repository.save_task_result(result),
+        }
+    }
+
+    pub fn decline_guided_batch_attestation(
+        &self,
+        batch_id: Uuid,
+        member_ordinal: u32,
+        run_id: Uuid,
+        task_id: &str,
+        declined_at: DateTime<Utc>,
+    ) -> Result<(), RunServiceError> {
+        let mut active = self.active.lock().map_err(|_| RunServiceError::Poisoned)?;
+        let state = active
+            .get(&run_id)
+            .ok_or(RunServiceError::RunNotFound(run_id))?;
+        if state.guided_ownership
+            != Some(GuidedBatchOwnership {
+                batch_id,
+                member_ordinal,
+            })
+            || declined_at < state.task_started_at
+        {
+            return Err(RunServiceError::BatchOwnershipMismatch);
+        }
+        let run = self
+            .repository
+            .get_run(run_id)?
+            .ok_or(RunServiceError::RunNotFound(run_id))?;
+        let completed = self.repository.get_task_results(run_id)?.len();
+        if run.status != RunStatus::Running
+            || state
+                .pack
+                .tasks
+                .get(completed)
+                .map(|task| task.definition.id.as_str())
+                != Some(task_id)
+        {
+            return Err(RunServiceError::OutOfOrder);
+        }
+        self.repository.finish_batch_member(
+            batch_id,
+            member_ordinal,
+            run_id,
+            BatchMemberStatus::Invalid,
+            Some(FailureKind::UserCancelled),
+            declined_at,
+        )?;
+        active.remove(&run_id);
+        Ok(())
     }
 
     fn complete_active_run(
         &self,
         run_id: Uuid,
         active: &HashMap<Uuid, ActiveManualRun>,
+        completed_at: DateTime<Utc>,
     ) -> Result<(), RunServiceError> {
         let state = active
             .get(&run_id)
@@ -469,7 +778,25 @@ impl ManualRunService {
             &results,
             u32::try_from(state.pack.tasks.len()).map_err(|_| RunServiceError::ElapsedOverflow)?,
         );
-        self.repository.complete_run(run_id, summary.as_ref())?;
+        let run = self
+            .repository
+            .get_run(run_id)?
+            .ok_or(RunServiceError::RunNotFound(run_id))?;
+        if run.status == RunStatus::Running {
+            self.repository.complete_run(run_id, summary.as_ref())?;
+        } else if run.status != RunStatus::Completed {
+            return Err(RunServiceError::RunNotFound(run_id));
+        }
+        if let Some(ownership) = state.guided_ownership {
+            self.repository.finish_batch_member(
+                ownership.batch_id,
+                ownership.member_ordinal,
+                run_id,
+                BatchMemberStatus::Completed,
+                None,
+                completed_at,
+            )?;
+        }
         Ok(())
     }
 
@@ -1294,7 +1621,13 @@ impl ArtifactPublication {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
-    use crate::{PackLoader, TargetSelection};
+    use crate::{
+        AdapterLaunchKind, BatchExecutionSurface, BatchMemberSeed, BatchMode,
+        ExecutionAdapterIdentity, IsolationAttestation, IsolationEnforcement, PackLoader,
+        ScanBatchPlan, ScanBatchTarget, ScanExecutionAuthorization, TargetSelection,
+        build_batch_schedule,
+    };
+    use chrono::Duration;
     use rusqlite::Connection;
     use std::fs;
     use std::process::Command;
@@ -1360,6 +1693,128 @@ mod tests {
             )
             .unwrap();
         (directory, repository, service, run)
+    }
+
+    fn start_owned_service() -> (
+        tempfile::TempDir,
+        Arc<RunRepository>,
+        ManualRunService,
+        Uuid,
+        u32,
+        RunRecord,
+        DateTime<Utc>,
+    ) {
+        let directory = tempdir().unwrap();
+        let pack = Arc::new(
+            PackLoader::load(
+                &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .join("benchmark-packs/client-quick-v1"),
+            )
+            .unwrap(),
+        );
+        let targets = [
+            (TargetKind::ChatGptClient, "openai", "GPT-5.6"),
+            (TargetKind::ClaudeClient, "anthropic", "Claude Sonnet 4.5"),
+        ]
+        .into_iter()
+        .map(|(kind, provider, model)| {
+            ScanBatchTarget::new(
+                TargetSelection {
+                    kind,
+                    reported_model: model.into(),
+                    reasoning_effort: Some("high".into()),
+                    model_source: ModelSource::Manual,
+                    model_verification: ModelVerification::UserConfirmed,
+                },
+                BatchExecutionSurface::GuidedClient,
+                ExecutionAdapterIdentity::new(
+                    BatchExecutionSurface::GuidedClient,
+                    provider,
+                    AdapterLaunchKind::GuidedClient,
+                    None,
+                    "guided-client-v1",
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+        let issued_at = Utc::now();
+        let plan = ScanBatchPlan::new(
+            &pack,
+            "ability-v1",
+            BatchMode::QuickComparison,
+            17,
+            targets,
+            issued_at,
+        )
+        .unwrap();
+        let schedule = build_batch_schedule(&plan).unwrap();
+        let members = schedule
+            .members
+            .iter()
+            .map(|member| BatchMemberSeed {
+                ordinal: member.ordinal,
+                target_position: member.target_position,
+                repetition_index: member.repetition_index,
+            })
+            .collect::<Vec<_>>();
+        let repository = Arc::new(RunRepository::open(&directory.path().join("runs.db")).unwrap());
+        let batch_id = Uuid::new_v4();
+        repository
+            .insert_batch_plan(batch_id, &pack, &plan, &members, issued_at)
+            .unwrap();
+        repository
+            .append_execution_authorization(&ScanExecutionAuthorization {
+                batch_id,
+                member_ordinal: None,
+                attempt_number: 1,
+                max_provider_turns: plan.cost_estimate.max_provider_turns,
+                max_task_budget_secs: plan.cost_estimate.summed_task_budget_secs,
+                acknowledgement_hash: plan.acknowledgement_hash.clone(),
+                allowed_failure_kind: None,
+                expires_at: issued_at + Duration::hours(4),
+                created_at: issued_at,
+            })
+            .unwrap();
+        let first = &schedule.members[0];
+        let target = &plan.targets[usize::try_from(first.target_position).unwrap()];
+        let started_at = issued_at + Duration::seconds(1);
+        let run = RunRecord {
+            id: Uuid::new_v4(),
+            target: target.target.clone(),
+            mode: RunMode::Quick,
+            suite_id: plan.suite_id.clone(),
+            suite_version: plan.suite_version.clone(),
+            status: RunStatus::Created,
+            started_at,
+            finished_at: None,
+            total_tasks: u32::try_from(pack.tasks.len()).unwrap(),
+            completed_tasks: 0,
+            environment: EnvironmentFingerprint {
+                execution_adapter_identity: Some(target.execution_adapter_identity.clone()),
+                ..environment(&pack)
+            },
+            score: None,
+        };
+        let reservation = repository
+            .reserve_next_runnable_member_and_run(batch_id, started_at, &run)
+            .unwrap()
+            .unwrap();
+        let service = ManualRunService::new(repository.clone(), directory.path().join("artifacts"));
+        let running = service
+            .start_owned_guided_batch_run(pack, reservation, started_at)
+            .unwrap();
+        (
+            directory,
+            repository,
+            service,
+            batch_id,
+            first.ordinal,
+            running,
+            started_at,
+        )
     }
 
     #[test]
@@ -1602,6 +2057,72 @@ mod tests {
             .join("one.txt");
         assert!(answer_path.exists());
         assert!(repository.get_task_results(run.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn owned_checkpoint_and_cleanup_failure_defers_the_same_run_without_half_evidence() {
+        let (directory, repository, service, batch_id, ordinal, run, started_at) =
+            start_owned_service();
+        service.force_checkpoint_and_cleanup_failure_for_test();
+        let step = service.next_step(run.id).unwrap().unwrap();
+
+        assert!(matches!(
+            service.submit_guided_batch_answer(
+                batch_id,
+                ordinal,
+                run.id,
+                &step.task_id,
+                "synthetic answer",
+                IsolationAttestation {
+                    policy_version: 1,
+                    enforcement: IsolationEnforcement::UserAttested,
+                    user_attested: true,
+                    recorded_at: started_at + Duration::seconds(1),
+                },
+            ),
+            Err(RunServiceError::CheckpointCleanup { .. })
+        ));
+        let stored = repository.get_batch(batch_id).unwrap().unwrap();
+        assert_eq!(
+            stored.members[usize::try_from(ordinal).unwrap()].run_id,
+            Some(run.id)
+        );
+        assert_eq!(
+            stored.members[usize::try_from(ordinal).unwrap()].status,
+            BatchMemberStatus::Deferred
+        );
+        assert_eq!(
+            stored.members[usize::try_from(ordinal).unwrap()].failure_kind,
+            Some(FailureKind::AppInterrupted)
+        );
+        assert_eq!(
+            repository.get_run(run.id).unwrap().unwrap().status,
+            RunStatus::Interrupted
+        );
+        assert!(repository.get_task_results(run.id).unwrap().is_empty());
+        assert_eq!(
+            Connection::open(directory.path().join("runs.db"))
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM scan_batch_task_isolation WHERE run_id=?1",
+                    [run.id.to_string()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        assert!(
+            directory
+                .path()
+                .join("artifacts/runs")
+                .join(run.id.to_string())
+                .join(format!("{}.txt", step.task_id))
+                .exists()
+        );
+        assert!(matches!(
+            service.next_step(run.id),
+            Err(RunServiceError::RunNotFound(id)) if id == run.id
+        ));
     }
 
     #[test]

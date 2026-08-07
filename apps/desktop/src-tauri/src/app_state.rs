@@ -257,6 +257,9 @@ impl AppState {
         repository
             .mark_running_as_interrupted()
             .map_err(|error| error.to_string())?;
+        repository
+            .reconcile_batches_after_startup(chrono::Utc::now())
+            .map_err(|error| error.to_string())?;
 
         let artifact_root = paths.app_data.join("artifacts");
         fs::create_dir_all(&artifact_root).map_err(|error| error.to_string())?;

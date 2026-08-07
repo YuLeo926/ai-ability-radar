@@ -40,6 +40,7 @@ export function AppShell() {
     pathname.startsWith("/cli/");
   const historyActive =
     pathname === "/history" || pathname.startsWith("/results/");
+  const batchActive = pathname.startsWith("/batch/");
 
   return (
     <div className="app-shell">
@@ -66,6 +67,13 @@ export function AppShell() {
               to="/"
             >
               {t("nav.start")}
+            </Link>
+            <Link
+              aria-current={batchActive ? "page" : undefined}
+              className={navClassName(batchActive)}
+              to="/batch/setup"
+            >
+              {t("nav.batch")}
             </Link>
             <Link
               aria-current={historyActive ? "page" : undefined}

@@ -393,6 +393,29 @@ button:disabled,
   gap: clamp(2.5rem, 6vw, 4.5rem);
 }
 
+.batch-entry-card {
+  display: grid;
+  margin-bottom: var(--space-7);
+  padding: var(--space-5);
+  border: 1px solid var(--border);
+  border-left: 0.35rem solid var(--warning);
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-5);
+  background: var(--panel);
+  box-shadow: var(--shadow-sm);
+}
+
+.batch-entry-card > div {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.batch-entry-card h2,
+.batch-entry-card p {
+  margin-block: 0;
+}
+
 .target-section {
   min-width: 0;
 }
@@ -975,6 +998,10 @@ button:disabled,
 
   .target-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .batch-entry-card {
+    grid-template-columns: 1fr;
   }
 
   .report-review-backdrop {

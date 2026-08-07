@@ -1,0 +1,593 @@
+.app-shell main.batch-page {
+  width: min(76rem, calc(100% - clamp(1.5rem, 5vw, 4rem)));
+  color: var(--text-primary);
+}
+
+.batch-page h1,
+.batch-page h2,
+.batch-page h3,
+.batch-page p,
+.batch-page dl,
+.batch-page ul {
+  margin-block: 0;
+}
+
+.batch-hero,
+.batch-run-header,
+.batch-result-hero {
+  display: grid;
+  margin-bottom: var(--space-6);
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: var(--space-6);
+}
+
+.batch-hero > div:first-child,
+.batch-run-header > div:first-child,
+.batch-result-hero {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.batch-method-stamp {
+  display: grid;
+  min-width: 15rem;
+  padding: var(--space-4);
+  border: 1px solid var(--border-strong);
+  border-top: 0.25rem solid var(--warning);
+  gap: var(--space-1);
+  background: var(--panel);
+  box-shadow: var(--shadow-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.batch-method-stamp span,
+.batch-method-stamp small,
+.batch-section-heading > p,
+.batch-estimate-copy > p,
+.batch-rail-heading > p,
+.batch-copy-boundary {
+  color: var(--text-muted);
+}
+
+.batch-method-stamp span,
+.batch-coordinate,
+.batch-result-code {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.78rem;
+  font-weight: 760;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.batch-mode-panel,
+.batch-estimate-panel,
+.batch-target-editor,
+.batch-schedule-rail,
+.batch-workspace,
+.batch-result-summary {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  box-shadow: var(--shadow-sm);
+}
+
+.batch-mode-panel {
+  display: grid;
+  padding: var(--space-5);
+  grid-template-columns: minmax(14rem, 0.65fr) minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-5);
+}
+
+.batch-mode-panel > div:first-child,
+.batch-section-heading > div,
+.batch-estimate-copy,
+.batch-rail-heading,
+.batch-workspace-state,
+.batch-result-summary {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.batch-mode-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.batch-mode-options label {
+  display: flex;
+  min-width: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  align-items: flex-start;
+  gap: var(--space-2);
+  background: var(--panel-raised);
+}
+
+.batch-mode-options label:first-child {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+}
+
+.batch-mode-options label[aria-disabled="true"] {
+  color: var(--text-muted);
+  opacity: 0.72;
+}
+
+.batch-mode-options input,
+.batch-acknowledgement input,
+.batch-task-attestation input {
+  width: 1.2rem;
+  min-width: 1.2rem;
+  min-height: 1.2rem;
+  margin-top: 0.18rem;
+  accent-color: var(--brand);
+}
+
+.batch-mode-options label > span {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.batch-mode-options small {
+  color: var(--text-muted);
+}
+
+.batch-target-section {
+  margin-top: var(--space-7);
+}
+
+.batch-section-heading {
+  display: grid;
+  margin-bottom: var(--space-4);
+  grid-template-columns: minmax(0, 1fr) minmax(14rem, 0.55fr);
+  align-items: end;
+  gap: var(--space-5);
+}
+
+.batch-target-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+}
+
+.batch-target-editor {
+  display: grid;
+  min-width: 0;
+  padding: var(--space-5);
+  border-top: 0.25rem solid var(--mineral);
+  gap: var(--space-4);
+}
+
+.batch-target-header,
+.batch-task-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.batch-target-header > div,
+.batch-task-heading > div {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.batch-coordinate {
+  color: var(--mineral);
+}
+
+.batch-surface-tag,
+.batch-user-attested,
+.batch-result-code {
+  width: fit-content;
+  padding: 0.2rem 0.55rem;
+  border: 1px solid var(--border);
+  background: var(--surface-muted);
+  color: var(--brand-strong);
+  font-size: 0.78rem;
+  font-weight: 760;
+  white-space: nowrap;
+}
+
+.batch-target-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+}
+
+.batch-target-editor .selection-panel {
+  padding: var(--space-3);
+  border-style: dashed;
+}
+
+.batch-target-editor .selection-panel-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.batch-target-editor .selection-panel-header h2 {
+  font-size: 1rem;
+}
+
+.batch-comparability-note,
+.batch-user-boundary,
+.batch-attestation-note {
+  display: grid;
+  padding: var(--space-4);
+  border-left: 0.3rem solid var(--warning);
+  gap: var(--space-1);
+  background: var(--warning-soft);
+}
+
+.batch-comparability-note {
+  margin-top: var(--space-4);
+  grid-template-columns: minmax(12rem, 0.4fr) minmax(0, 1fr);
+  gap: var(--space-4);
+}
+
+.batch-estimate-panel {
+  display: grid;
+  margin-top: var(--space-7);
+  padding: var(--space-5);
+  border-top: 0.25rem solid var(--brand);
+  grid-template-columns: minmax(14rem, 0.62fr) minmax(0, 1fr);
+  align-items: start;
+  gap: var(--space-5);
+}
+
+.batch-cost-grid,
+.batch-result-counts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.batch-cost-grid div,
+.batch-result-counts div,
+.batch-target-facts div {
+  display: grid;
+  min-width: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  gap: var(--space-1);
+  background: var(--panel-raised);
+}
+
+.batch-cost-grid dt,
+.batch-result-counts dt,
+.batch-target-facts dt {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.batch-cost-grid dd,
+.batch-result-counts dd {
+  font-family: var(--font-display);
+  font-size: 1.15rem;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+}
+
+.batch-estimate-state {
+  min-height: 5.4rem;
+  padding: var(--space-4);
+  border: 1px dashed var(--border-strong);
+  background: var(--surface-muted);
+  color: var(--text-muted);
+}
+
+.batch-acknowledgement,
+.batch-task-attestation {
+  display: flex;
+  grid-column: 1 / -1;
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  align-items: flex-start;
+  gap: var(--space-3);
+  background: var(--brand-soft);
+}
+
+.batch-estimate-panel > button,
+.batch-estimate-panel > .form-error {
+  grid-column: 1 / -1;
+}
+
+.batch-live-status {
+  display: inline-flex;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  align-items: center;
+  gap: var(--space-2);
+  background: var(--panel);
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.batch-live-status > span {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  background: var(--success);
+}
+
+.batch-console-layout,
+.batch-result-layout {
+  display: grid;
+  grid-template-columns: minmax(16rem, 0.34fr) minmax(0, 1fr);
+  align-items: start;
+  gap: var(--space-4);
+}
+
+.batch-schedule-rail {
+  position: sticky;
+  top: 5rem;
+  display: grid;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.batch-rail-heading {
+  padding: var(--space-5);
+  border-bottom: 1px solid var(--border);
+}
+
+.batch-schedule-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.batch-member {
+  display: grid;
+  padding: var(--space-4);
+  border-bottom: 1px solid var(--border);
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.batch-member-running {
+  background: var(--brand-soft);
+}
+
+.batch-member-completed {
+  border-left: 0.25rem solid var(--success);
+}
+
+.batch-member-invalid,
+.batch-member-deferred {
+  border-left: 0.25rem solid var(--warning);
+}
+
+.batch-member-index {
+  color: var(--text-muted);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.75rem;
+}
+
+.batch-member > span:nth-child(2) {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-1);
+}
+
+.batch-member small,
+.batch-member em {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-style: normal;
+  overflow-wrap: anywhere;
+}
+
+.batch-isolation-legend {
+  display: flex;
+  padding: var(--space-4);
+  align-items: flex-start;
+  gap: var(--space-3);
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.batch-attestation-dot {
+  width: 0.65rem;
+  height: 0.65rem;
+  flex: 0 0 auto;
+  margin-top: 0.35rem;
+  border: 0.12rem solid var(--warning);
+  border-radius: 50%;
+}
+
+.batch-workspace {
+  display: grid;
+  min-width: 0;
+  min-height: 34rem;
+  padding: clamp(1.25rem, 3vw, 2.25rem);
+  align-content: start;
+  gap: var(--space-4);
+  box-shadow: var(--shadow-md);
+}
+
+.batch-target-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.batch-target-facts dd {
+  font-weight: 680;
+  overflow-wrap: anywhere;
+}
+
+.batch-ambiguous-state {
+  padding: var(--space-5);
+  border: 1px solid var(--warning);
+  background: var(--warning-soft);
+}
+
+.batch-ambiguous-state code {
+  width: fit-content;
+  max-width: 100%;
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  background: var(--panel-raised);
+  overflow-wrap: anywhere;
+}
+
+.batch-prompt {
+  max-height: 40vh;
+  margin: 0;
+  padding: var(--space-4);
+  overflow: auto;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-muted);
+  color: var(--text-primary);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.92rem;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  user-select: text;
+  white-space: pre-wrap;
+}
+
+.batch-answer-field {
+  display: grid;
+  gap: var(--space-2);
+  font-weight: 680;
+}
+
+.batch-task-actions,
+.batch-result-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.batch-decline-confirm {
+  display: grid;
+  width: 100%;
+  padding: var(--space-4);
+  border: 1px solid var(--danger);
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: var(--space-3);
+  background: var(--danger-soft);
+}
+
+.batch-result-hero {
+  max-width: 52rem;
+  grid-template-columns: 1fr;
+  align-items: start;
+}
+
+.batch-result-code {
+  border-color: var(--warning);
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.batch-result-summary {
+  padding: clamp(1.25rem, 3vw, 2.25rem);
+  gap: var(--space-4);
+}
+
+.batch-result-summary ul {
+  display: grid;
+  padding-left: 1.2rem;
+  gap: var(--space-2);
+}
+
+.batch-result-counts {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.batch-state-page {
+  display: grid;
+  min-height: min(65vh, 42rem);
+  max-width: 44rem;
+  align-content: start;
+  gap: var(--space-3);
+}
+
+.batch-page button:focus-visible,
+.batch-page a:focus-visible,
+.batch-page input:focus-visible,
+.batch-page select:focus-visible,
+.batch-page textarea:focus-visible,
+.batch-page pre:focus-visible {
+  outline: 0.2rem solid var(--focus);
+  outline-offset: 0.16rem;
+}
+
+@media (max-width: 64rem) {
+  .batch-target-grid,
+  .batch-console-layout,
+  .batch-result-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .batch-schedule-rail {
+    position: static;
+  }
+
+  .batch-schedule-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .batch-member:nth-child(odd) {
+    border-right: 1px solid var(--border);
+  }
+}
+
+@media (max-width: 48rem) {
+  .batch-hero,
+  .batch-run-header,
+  .batch-mode-panel,
+  .batch-section-heading,
+  .batch-estimate-panel,
+  .batch-comparability-note {
+    grid-template-columns: 1fr;
+  }
+
+  .batch-method-stamp {
+    min-width: 0;
+  }
+
+  .batch-mode-options,
+  .batch-target-fields,
+  .batch-cost-grid,
+  .batch-result-counts,
+  .batch-target-facts {
+    grid-template-columns: 1fr;
+  }
+
+  .batch-estimate-panel > button,
+  .batch-estimate-panel > .form-error,
+  .batch-acknowledgement,
+  .batch-task-attestation {
+    grid-column: 1;
+  }
+
+  .batch-schedule-list {
+    grid-template-columns: 1fr;
+  }
+
+  .batch-member:nth-child(odd) {
+    border-right: 0;
+  }
+
+  .batch-decline-confirm {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (forced-colors: active) {
+  .batch-live-status > span,
+  .batch-attestation-dot {
+    border: 1px solid CanvasText;
+  }
+}

@@ -364,7 +364,7 @@ export function ClientSelectionPanel({
               <label className="selection-option" key={key}>
                 <input
                   checked={state.selectedKey === key}
-                  name="client-selection-candidate"
+                  name={`${titleId}-candidate`}
                   onChange={() =>
                     setState((current) =>
                       current.kind === "multiple"

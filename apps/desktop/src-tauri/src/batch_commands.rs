@@ -2,17 +2,20 @@ use crate::app_state::AppState;
 use crate::dto::{
     AuthorizeBatchExecutionInput, AuthorizeBatchRetryInput, BatchEstimateDto,
     BatchExecutionAuthorizationDto, BatchIdInput, BatchPlanInput, BatchRetryEstimateDto,
-    BatchTargetInput, CreateAcknowledgedBatchInput, EstimateBatchRetryInput, GuidedMemberDecision,
-    NextGuidedMemberDto,
+    BatchTargetInput, CreateAcknowledgedBatchInput, DeclineGuidedBatchAttestationInput,
+    EstimateBatchRetryInput, GuidedMemberDecision, NextGuidedMemberDto,
+    SubmitGuidedBatchAnswerInput, TaskResultDto,
 };
 use ability_core::{
     build_batch_schedule, select_next_scheduled_member, AdapterLaunchKind, BatchExecutionSurface,
-    BatchFeatureLevel, BatchMemberSeed, BatchMemberStatus, BatchMode, LoadedPack,
-    NextScheduledMember, RunRepository, ScanBatchPlan, ScanBatchRecord, ScanBatchTarget,
+    BatchFeatureLevel, BatchMemberSeed, BatchMemberStatus, BatchMode, EnvironmentFingerprint,
+    IsolationAttestation, IsolationEnforcement, LoadedPack, ManualRunService, NextScheduledMember,
+    RunMode, RunRecord, RunRepository, RunStatus, ScanBatchPlan, ScanBatchRecord, ScanBatchTarget,
     ScanExecutionAuthorization, ScheduledMemberLifecycle, ScheduledMemberState, TargetKind,
     TargetSelection,
 };
 use chrono::{DateTime, Utc};
+use std::sync::Arc;
 use tauri::State;
 use uuid::Uuid;
 
@@ -569,6 +572,146 @@ pub(crate) fn get_next_guided_member_record(
     }
 }
 
+fn guided_environment(pack: &LoadedPack, target: &ScanBatchTarget) -> EnvironmentFingerprint {
+    let os = os_info::get();
+    EnvironmentFingerprint {
+        os_family: os.os_type().to_string(),
+        os_version: os.version().to_string(),
+        app_version: env!("CARGO_PKG_VERSION").into(),
+        cli_version: None,
+        verifier_runtime_version: None,
+        suite_id: pack.manifest.id.clone(),
+        suite_version: pack.manifest.version.clone(),
+        suite_content_sha256: pack.content_sha256.clone(),
+        scoring_rule_version: SCORING_RULE_VERSION.into(),
+        execution_adapter_identity: Some(target.execution_adapter_identity.clone()),
+        resumed: false,
+    }
+}
+
+pub(crate) fn begin_guided_batch_member_at(
+    context: &BatchCommandContext<'_>,
+    service: &ManualRunService,
+    pack: Arc<LoadedPack>,
+    input: BatchIdInput,
+    now: DateTime<Utc>,
+    run_id: Uuid,
+) -> Result<RunRecord, String> {
+    let batch = get_supported_batch(context, input.batch_id)?;
+    if batch.status != ability_core::BatchStatus::Running
+        || batch_surface(&batch)? != BatchExecutionSurface::GuidedClient
+        || batch.plan.mode != BatchMode::QuickComparison
+    {
+        return Err("guided work can start only from a running Quick Comparison batch".into());
+    }
+    if pack.manifest.id != batch.plan.suite_id
+        || pack.manifest.version != batch.plan.suite_version
+        || pack.content_sha256 != batch.plan.suite_content_sha256
+    {
+        return Err("guided batch pack does not match the immutable plan".into());
+    }
+
+    let next = get_next_guided_member_record(context, input)?;
+    if next.decision != GuidedMemberDecision::Runnable {
+        return Err(match next.decision {
+            GuidedMemberDecision::BlockedByActive => {
+                "guided batch already has an active member; it will not be reopened automatically"
+            }
+            GuidedMemberDecision::Exhausted => "guided batch has no runnable member",
+            GuidedMemberDecision::Runnable => unreachable!(),
+        }
+        .into());
+    }
+    let expected_member = next
+        .member
+        .ok_or_else(|| "runnable guided member is missing".to_string())?;
+    let target = next
+        .target
+        .ok_or_else(|| "runnable guided target is missing".to_string())?;
+    let total_tasks = u32::try_from(pack.tasks.len())
+        .map_err(|_| "guided task count exceeds the supported range".to_string())?;
+    let run = RunRecord {
+        id: run_id,
+        target: target.target.clone(),
+        mode: RunMode::Quick,
+        suite_id: pack.manifest.id.clone(),
+        suite_version: pack.manifest.version.clone(),
+        status: RunStatus::Created,
+        started_at: now,
+        finished_at: None,
+        total_tasks,
+        completed_tasks: 0,
+        environment: guided_environment(&pack, &target),
+        score: None,
+    };
+    let reservation = context
+        .repository
+        .reserve_next_runnable_member_and_run(input.batch_id, now, &run)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "guided batch has no authorized runnable member".to_string())?;
+    if reservation.member.ordinal != expected_member.ordinal
+        || reservation.member.target_position != expected_member.target_position
+    {
+        return Err("guided batch schedule changed while the member was reserved".into());
+    }
+    service
+        .start_owned_guided_batch_run(pack, reservation, now)
+        .map_err(|error| error.to_string())
+}
+
+fn validate_guided_task_id(value: &str) -> Result<&str, String> {
+    if value.is_empty() || value.len() > 128 || value.chars().any(char::is_control) {
+        return Err("invalid guided task id".into());
+    }
+    Ok(value)
+}
+
+pub(crate) fn submit_guided_batch_answer_at(
+    service: &ManualRunService,
+    input: SubmitGuidedBatchAnswerInput,
+    now: DateTime<Utc>,
+) -> Result<TaskResultDto, String> {
+    let task_id = validate_guided_task_id(&input.task_id)?;
+    if !input.user_attested_new_conversation {
+        return Err("a fresh blank conversation must be confirmed for this task".into());
+    }
+    let result = service
+        .submit_guided_batch_answer(
+            input.batch_id,
+            input.member_ordinal,
+            input.run_id,
+            task_id,
+            &input.answer,
+            IsolationAttestation {
+                policy_version: 1,
+                enforcement: IsolationEnforcement::UserAttested,
+                user_attested: true,
+                recorded_at: now,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    TaskResultDto::try_from(result)
+}
+
+pub(crate) fn decline_guided_batch_attestation_at(
+    context: &BatchCommandContext<'_>,
+    service: &ManualRunService,
+    input: DeclineGuidedBatchAttestationInput,
+    now: DateTime<Utc>,
+) -> Result<ScanBatchRecord, String> {
+    let task_id = validate_guided_task_id(&input.task_id)?;
+    service
+        .decline_guided_batch_attestation(
+            input.batch_id,
+            input.member_ordinal,
+            input.run_id,
+            task_id,
+            now,
+        )
+        .map_err(|error| error.to_string())?;
+    required_batch(context, input.batch_id)
+}
+
 fn claim_mutation(state: &AppState) -> Result<crate::app_state::LocalDataMutationClaim, String> {
     state
         .local_data_gate
@@ -679,4 +822,56 @@ pub fn get_next_guided_member(
     input: BatchIdInput,
 ) -> Result<NextGuidedMemberDto, String> {
     get_next_guided_member_record(&BatchCommandContext::from_state(&state), input)
+}
+
+#[tauri::command]
+pub fn begin_guided_batch_member(
+    state: State<'_, AppState>,
+    input: BatchIdInput,
+) -> Result<RunRecord, String> {
+    let _claim = claim_mutation(&state)?;
+    let run_id = Uuid::new_v4();
+    let _operation = state
+        .run_operations
+        .claim([run_id])
+        .map_err(|_| "guided run already has an active local-data operation".to_string())?;
+    begin_guided_batch_member_at(
+        &BatchCommandContext::from_state(&state),
+        &state.manual_runs,
+        state.client_pack.clone(),
+        input,
+        Utc::now(),
+        run_id,
+    )
+}
+
+#[tauri::command]
+pub fn submit_guided_batch_answer(
+    state: State<'_, AppState>,
+    input: SubmitGuidedBatchAnswerInput,
+) -> Result<TaskResultDto, String> {
+    let _claim = claim_mutation(&state)?;
+    let _operation = state
+        .run_operations
+        .claim([input.run_id])
+        .map_err(|_| "guided run already has an active local-data operation".to_string())?;
+    submit_guided_batch_answer_at(&state.manual_runs, input, Utc::now())
+}
+
+#[tauri::command]
+pub fn decline_guided_batch_attestation(
+    state: State<'_, AppState>,
+    input: DeclineGuidedBatchAttestationInput,
+) -> Result<ScanBatchRecord, String> {
+    let _claim = claim_mutation(&state)?;
+    let _operation = state
+        .run_operations
+        .claim([input.run_id])
+        .map_err(|_| "guided run already has an active local-data operation".to_string())?;
+    decline_guided_batch_attestation_at(
+        &BatchCommandContext::from_state(&state),
+        &state.manual_runs,
+        input,
+        Utc::now(),
+    )
 }

@@ -25,6 +25,8 @@ import {
   isSafeBatchRetryEstimate,
   isSafeClientSelectionDetection,
   isSafeNextGuidedMember,
+  isSafeGuidedBatchRunRecord,
+  isSafeGuidedBatchTaskResult,
   isSafeScanExecutionAuthorization,
 } from "./runtimeValidation";
 
@@ -162,6 +164,24 @@ export const tauriBackend: Backend = {
       "get_next_guided_member",
       batchIdInput(batchId),
       isSafeNextGuidedMember,
+    ),
+  beginGuidedBatchMember: (batchId) =>
+    invokeValidated<RunRecord>(
+      "begin_guided_batch_member",
+      batchIdInput(batchId),
+      isSafeGuidedBatchRunRecord,
+    ),
+  submitGuidedBatchAnswer: (input) =>
+    invokeValidated<TaskResult>(
+      "submit_guided_batch_answer",
+      { input },
+      isSafeGuidedBatchTaskResult,
+    ),
+  declineGuidedBatchAttestation: (input) =>
+    invokeValidated<ScanBatchRecord>(
+      "decline_guided_batch_attestation",
+      { input },
+      isSafeBatchRecord,
     ),
   onRunEvent: async (listener) =>
     listen<RunEvent>("run://event", ({ payload }) => listener(payload)),

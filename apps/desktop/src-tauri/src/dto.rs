@@ -22,6 +22,20 @@ where
     Ok(parsed)
 }
 
+fn deserialize_canonical_run_uuid<'de, D>(deserializer: D) -> Result<Uuid, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    let parsed = Uuid::parse_str(&value).map_err(serde::de::Error::custom)?;
+    if parsed.is_nil() || !parsed.hyphenated().to_string().eq_ignore_ascii_case(&value) {
+        return Err(serde::de::Error::custom(
+            "run id must be a non-nil canonical UUID",
+        ));
+    }
+    Ok(parsed)
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PackSummaryDto {
@@ -153,6 +167,43 @@ pub struct NextGuidedMemberDto {
     pub decision: GuidedMemberDecision,
     pub member: Option<ScanBatchMemberRecord>,
     pub target: Option<ScanBatchTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SubmitGuidedBatchAnswerInput {
+    #[serde(deserialize_with = "deserialize_canonical_batch_uuid")]
+    pub batch_id: Uuid,
+    pub member_ordinal: u32,
+    #[serde(deserialize_with = "deserialize_canonical_run_uuid")]
+    pub run_id: Uuid,
+    pub task_id: String,
+    pub answer: String,
+    #[serde(deserialize_with = "deserialize_fresh_conversation_true")]
+    pub user_attested_new_conversation: bool,
+}
+
+fn deserialize_fresh_conversation_true<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match bool::deserialize(deserializer)? {
+        true => Ok(true),
+        false => Err(serde::de::Error::custom(
+            "fresh blank conversation attestation must be true",
+        )),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeclineGuidedBatchAttestationInput {
+    #[serde(deserialize_with = "deserialize_canonical_batch_uuid")]
+    pub batch_id: Uuid,
+    pub member_ordinal: u32,
+    #[serde(deserialize_with = "deserialize_canonical_run_uuid")]
+    pub run_id: Uuid,
+    pub task_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

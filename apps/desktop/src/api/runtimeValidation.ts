@@ -123,6 +123,43 @@ const clientSelectionKeys = new Set([
   "confidence",
 ]);
 const clientSelectionDetectionKeys = new Set(["status", "candidates"]);
+const taskResultKeys = new Set([
+  "runId",
+  "taskId",
+  "category",
+  "outcome",
+  "score",
+  "failureKind",
+  "durationMs",
+  "answerRelPath",
+]);
+const guidedRunKeys = new Set([
+  "id",
+  "target",
+  "mode",
+  "suiteId",
+  "suiteVersion",
+  "status",
+  "startedAt",
+  "finishedAt",
+  "totalTasks",
+  "completedTasks",
+  "environment",
+  "score",
+]);
+const guidedEnvironmentKeys = new Set([
+  "osFamily",
+  "osVersion",
+  "appVersion",
+  "cliVersion",
+  "verifierRuntimeVersion",
+  "suiteId",
+  "suiteVersion",
+  "suiteContentSha256",
+  "scoringRuleVersion",
+  "executionAdapterIdentity",
+  "resumed",
+]);
 const forbiddenDisplayCharacter =
   /[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}\uD800-\uDFFF]/u;
 
@@ -390,8 +427,13 @@ export function isSafeRunRecord(value: unknown): value is RunRecord {
   );
 }
 
-function isSafeTaskResult(value: unknown): value is TaskResult {
-  if (!isObject(value)) return false;
+export function isSafeTaskResult(value: unknown): value is TaskResult {
+  if (
+    !isObject(value) ||
+    !hasExactKeys(value, taskResultKeys, [...taskResultKeys])
+  ) {
+    return false;
+  }
   return (
     typeof value.runId === "string" &&
     typeof value.taskId === "string" &&
@@ -406,6 +448,50 @@ function isSafeTaskResult(value: unknown): value is TaskResult {
       failureKinds.has(value.failureKind as FailureKind)) &&
     isOptionalString(value.answerRelPath)
   );
+}
+
+export function isSafeGuidedBatchRunRecord(
+  value: unknown,
+): value is RunRecord {
+  if (
+    !isObject(value) ||
+    !hasExactKeys(value, guidedRunKeys, [...guidedRunKeys]) ||
+    !isSafeRunRecord(value) ||
+    !isUuid(value.id) ||
+    value.mode !== "quick" ||
+    value.status !== "running" ||
+    value.finishedAt !== null ||
+    value.completedTasks !== 0 ||
+    value.score !== null ||
+    !isObject(value.target) ||
+    !hasExactKeys(value.target, targetSelectionKeys, [
+      "kind",
+      "reportedModel",
+      "reasoningEffort",
+      "modelSource",
+      "modelVerification",
+    ]) ||
+    !["chat_gpt_client", "claude_client"].includes(value.target.kind as string) ||
+    !isObject(value.environment) ||
+    !hasExactKeys(value.environment, guidedEnvironmentKeys, [
+      ...guidedEnvironmentKeys,
+    ]) ||
+    value.environment.resumed !== false ||
+    !isSafeAdapterIdentity(
+      value.environment.executionAdapterIdentity,
+      value.target.kind as TargetKind,
+      "guided_client",
+    )
+  ) {
+    return false;
+  }
+  return true;
+}
+
+export function isSafeGuidedBatchTaskResult(
+  value: unknown,
+): value is TaskResult {
+  return isSafeTaskResult(value) && isUuid(value.runId);
 }
 
 function hasCoherentTaskEvidence(result: TaskResult): boolean {

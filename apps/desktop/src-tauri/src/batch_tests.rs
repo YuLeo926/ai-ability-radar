@@ -1,22 +1,25 @@
 use crate::batch_commands::{
-    authorize_batch_execution_at, authorize_batch_retry_at, cancel_batch_at,
-    create_acknowledged_batch_at, estimate_batch_at, estimate_batch_retry_at, get_batch_record,
-    get_next_guided_member_record, list_batch_records, pause_batch_at, resume_batch_at,
-    start_batch_at, BatchCommandContext, BATCH_CAPABILITIES,
+    authorize_batch_execution_at, authorize_batch_retry_at, begin_guided_batch_member_at,
+    cancel_batch_at, create_acknowledged_batch_at, decline_guided_batch_attestation_at,
+    estimate_batch_at, estimate_batch_retry_at, get_batch_record, get_next_guided_member_record,
+    list_batch_records, pause_batch_at, resume_batch_at, start_batch_at,
+    submit_guided_batch_answer_at, BatchCommandContext, BATCH_CAPABILITIES,
 };
 use crate::dto::{
     AuthorizeBatchExecutionInput, AuthorizeBatchRetryInput, BatchIdInput, BatchPlanInput,
-    BatchTargetInput, CreateAcknowledgedBatchInput, EstimateBatchRetryInput, TargetSelectionInput,
+    BatchTargetInput, CreateAcknowledgedBatchInput, DeclineGuidedBatchAttestationInput,
+    EstimateBatchRetryInput, SubmitGuidedBatchAnswerInput, TargetSelectionInput,
 };
 use ability_core::{
     build_batch_schedule, AdapterLaunchKind, BatchExecutionSurface, BatchFeatureLevel,
     BatchMemberSeed, BatchMemberStatus, BatchMode, BatchStatus, ExecutionAdapterIdentity,
-    FailureKind, LoadedPack, ModelSource, ModelVerification, PackLoader, RunRepository,
-    ScanBatchPlan, ScanBatchTarget, TargetKind, TargetSelection,
+    FailureKind, LoadedPack, ManualRunService, ModelSource, ModelVerification, PackLoader,
+    RunRepository, ScanBatchPlan, ScanBatchTarget, TargetKind, TargetSelection,
 };
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use serde_json::json;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tempfile::tempdir;
 use uuid::Uuid;
 
@@ -240,6 +243,199 @@ fn batch_dtos_use_exact_camel_case_and_reject_unknown_fields() {
     ] {
         assert!(serde_json::from_value::<BatchIdInput>(invalid).is_err());
     }
+
+    let run_id = Uuid::new_v4();
+    let guided_answer = json!({
+        "batchId": canonical_id,
+        "memberOrdinal": 0,
+        "runId": run_id,
+        "taskId": "logic-grid",
+        "answer": "answer",
+        "userAttestedNewConversation": true
+    });
+    assert!(serde_json::from_value::<SubmitGuidedBatchAnswerInput>(guided_answer.clone()).is_ok());
+    for invalid in [
+        {
+            let mut value = guided_answer.clone();
+            value["userAttestedNewConversation"] = json!(false);
+            value
+        },
+        {
+            let mut value = guided_answer.clone();
+            value["runId"] = json!(run_id.simple().to_string());
+            value
+        },
+        {
+            let mut value = guided_answer;
+            value["copiedAutomatically"] = json!(true);
+            value
+        },
+    ] {
+        assert!(serde_json::from_value::<SubmitGuidedBatchAnswerInput>(invalid).is_err());
+    }
+}
+
+#[test]
+fn guided_command_path_reuses_the_reserved_run_and_advances_the_schedule() {
+    let directory = tempdir().unwrap();
+    let repository = Arc::new(RunRepository::open(&directory.path().join("ability.db")).unwrap());
+    let artifact_root = directory.path().join("artifacts");
+    std::fs::create_dir_all(&artifact_root).unwrap();
+    let service = ManualRunService::new(repository.clone(), artifact_root);
+    let client_pack = Arc::new(pack("client-quick-v1"));
+    let cli_pack = pack("cli-quick-v1");
+    let context = context(&repository, &client_pack, &cli_pack);
+    let created = create_batch(&context, guided_plan());
+    authorize_batch_execution_at(
+        &context,
+        AuthorizeBatchExecutionInput {
+            batch_id: created.id,
+            acknowledgement_hash: created.plan.acknowledgement_hash.clone(),
+        },
+        issued_at() + Duration::seconds(2),
+    )
+    .unwrap();
+    start_batch_at(
+        &context,
+        BatchIdInput {
+            batch_id: created.id,
+        },
+        issued_at() + Duration::seconds(3),
+    )
+    .unwrap();
+
+    let run_id = Uuid::new_v4();
+    let run = begin_guided_batch_member_at(
+        &context,
+        &service,
+        client_pack.clone(),
+        BatchIdInput {
+            batch_id: created.id,
+        },
+        issued_at() + Duration::seconds(4),
+        run_id,
+    )
+    .unwrap();
+    assert_eq!(run.id, run_id);
+    assert_eq!(repository.list_runs().unwrap().len(), 1);
+    let active = repository.get_batch(created.id).unwrap().unwrap();
+    let first = &active.members[0];
+    assert_eq!(first.run_id, Some(run_id));
+    assert_eq!(first.status, BatchMemberStatus::Running);
+    assert!(begin_guided_batch_member_at(
+        &context,
+        &service,
+        client_pack.clone(),
+        BatchIdInput {
+            batch_id: created.id,
+        },
+        issued_at() + Duration::seconds(5),
+        Uuid::new_v4(),
+    )
+    .is_err());
+    assert_eq!(repository.list_runs().unwrap().len(), 1);
+
+    let mut submitted = 0_i64;
+    while let Some(step) = service.next_step(run_id).unwrap() {
+        submit_guided_batch_answer_at(
+            &service,
+            SubmitGuidedBatchAnswerInput {
+                batch_id: created.id,
+                member_ordinal: first.ordinal,
+                run_id,
+                task_id: step.task_id,
+                answer: "deterministic local answer".into(),
+                user_attested_new_conversation: true,
+            },
+            issued_at() + Duration::seconds(6 + submitted),
+        )
+        .unwrap();
+        submitted += 1;
+    }
+    assert_eq!(usize::try_from(submitted).unwrap(), client_pack.tasks.len());
+    let advanced = repository.get_batch(created.id).unwrap().unwrap();
+    assert_eq!(advanced.members[0].status, BatchMemberStatus::Completed);
+    assert_eq!(advanced.members[1].status, BatchMemberStatus::Planned);
+    assert_eq!(
+        repository.get_task_results(run_id).unwrap().len(),
+        client_pack.tasks.len()
+    );
+    assert_eq!(
+        get_next_guided_member_record(
+            &context,
+            BatchIdInput {
+                batch_id: created.id,
+            }
+        )
+        .unwrap()
+        .member
+        .unwrap()
+        .ordinal,
+        1
+    );
+}
+
+#[test]
+fn guided_decline_command_invalidates_only_the_exact_active_member() {
+    let directory = tempdir().unwrap();
+    let repository = Arc::new(RunRepository::open(&directory.path().join("ability.db")).unwrap());
+    let artifact_root = directory.path().join("artifacts");
+    std::fs::create_dir_all(&artifact_root).unwrap();
+    let service = ManualRunService::new(repository.clone(), artifact_root);
+    let client_pack = Arc::new(pack("client-quick-v1"));
+    let cli_pack = pack("cli-quick-v1");
+    let context = context(&repository, &client_pack, &cli_pack);
+    let created = create_batch(&context, guided_plan());
+    authorize_batch_execution_at(
+        &context,
+        AuthorizeBatchExecutionInput {
+            batch_id: created.id,
+            acknowledgement_hash: created.plan.acknowledgement_hash.clone(),
+        },
+        issued_at() + Duration::seconds(2),
+    )
+    .unwrap();
+    start_batch_at(
+        &context,
+        BatchIdInput {
+            batch_id: created.id,
+        },
+        issued_at() + Duration::seconds(3),
+    )
+    .unwrap();
+    let run_id = Uuid::new_v4();
+    begin_guided_batch_member_at(
+        &context,
+        &service,
+        client_pack.clone(),
+        BatchIdInput {
+            batch_id: created.id,
+        },
+        issued_at() + Duration::seconds(4),
+        run_id,
+    )
+    .unwrap();
+    let step = service.next_step(run_id).unwrap().unwrap();
+
+    let declined = decline_guided_batch_attestation_at(
+        &context,
+        &service,
+        DeclineGuidedBatchAttestationInput {
+            batch_id: created.id,
+            member_ordinal: 0,
+            run_id,
+            task_id: step.task_id,
+        },
+        issued_at() + Duration::seconds(5),
+    )
+    .unwrap();
+    assert_eq!(declined.members[0].status, BatchMemberStatus::Invalid);
+    assert_eq!(
+        declined.members[0].failure_kind,
+        Some(FailureKind::UserCancelled)
+    );
+    assert_eq!(declined.members[1].status, BatchMemberStatus::Planned);
+    assert!(repository.get_task_results(run_id).unwrap().is_empty());
 }
 
 #[test]

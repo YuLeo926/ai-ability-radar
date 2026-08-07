@@ -6,11 +6,13 @@ import type {
   BatchPlanInput,
   BatchRetryEstimate,
   CreateAcknowledgedBatchInput,
+  DeclineGuidedBatchAttestationInput,
   EstimateBatchRetryInput,
   ExecutionAdapterIdentity,
   NextGuidedMember,
   ScanBatchRecord,
   ScanExecutionAuthorization,
+  SubmitGuidedBatchAnswerInput,
 } from "../domain/batch";
 
 export type TargetKind =
@@ -280,6 +282,13 @@ export interface Backend {
   pauseBatch(batchId: string): Promise<ScanBatchRecord>;
   cancelBatch(batchId: string): Promise<ScanBatchRecord>;
   getNextGuidedMember(batchId: string): Promise<NextGuidedMember>;
+  beginGuidedBatchMember(batchId: string): Promise<RunRecord>;
+  submitGuidedBatchAnswer(
+    input: SubmitGuidedBatchAnswerInput,
+  ): Promise<TaskResult>;
+  declineGuidedBatchAttestation(
+    input: DeclineGuidedBatchAttestationInput,
+  ): Promise<ScanBatchRecord>;
   onRunEvent(listener: (event: RunEvent) => void): Promise<Unlisten>;
   onRunError(listener: (event: RunErrorEvent) => void): Promise<Unlisten>;
 }
@@ -298,6 +307,9 @@ type BatchBackendMethods = Pick<
   | "pauseBatch"
   | "cancelBatch"
   | "getNextGuidedMember"
+  | "beginGuidedBatchMember"
+  | "submitGuidedBatchAnswer"
+  | "declineGuidedBatchAttestation"
 >;
 
 async function unsupportedBatchCall(): Promise<never> {
@@ -317,4 +329,7 @@ export const unsupportedBatchBackend: BatchBackendMethods = {
   pauseBatch: unsupportedBatchCall,
   cancelBatch: unsupportedBatchCall,
   getNextGuidedMember: unsupportedBatchCall,
+  beginGuidedBatchMember: unsupportedBatchCall,
+  submitGuidedBatchAnswer: unsupportedBatchCall,
+  declineGuidedBatchAttestation: unsupportedBatchCall,
 };

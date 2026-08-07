@@ -6,6 +6,8 @@ import { HomePage } from "../pages/HomePage";
 import { ManualRunPage } from "../pages/ManualRunPage";
 import { NotFoundPage } from "../pages/NotFoundPage";
 import { ResultPage } from "../pages/ResultPage";
+import { BatchRunPage } from "../pages/BatchRunPage";
+import { BatchSetupPage } from "../pages/BatchSetupPage";
 
 export function AppRoutes() {
   return (
@@ -16,6 +18,12 @@ export function AppRoutes() {
         <Route path="cli/:target" element={<CliRunPage />} />
         <Route path="history" element={<HistoryPage />} />
         <Route path="results/:runId" element={<ResultPage />} />
+        <Route path="batch/setup" element={<BatchSetupPage />} />
+        <Route path="batch/:batchId" element={<BatchRunPage />} />
+        <Route
+          path="batch/:batchId/result"
+          element={<BatchRunPage resultMode />}
+        />
         <Route path="*" element={<NotFoundPage />} />
       </Route>
     </Routes>

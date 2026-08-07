@@ -2,6 +2,7 @@ export const messages = {
   "app.name": "AI 能力雷达",
   "nav.label": "主导航",
   "nav.start": "开始体检",
+  "nav.batch": "多目标扫描",
   "nav.history": "历史记录",
   "skip.main": "跳到主要内容",
   "theme.label": "配色主题",
