@@ -161,6 +161,9 @@ async fn execute_cancelled_run(
     verifier: Arc<dyn WorkspaceVerifier>,
     pid_file: &Path,
 ) {
+    let availability = adapter.detect().await;
+    assert!(availability.installed);
+    assert_eq!(availability.auth_state, AuthState::Ready);
     let run = service
         .prepare(
             pack.clone(),
