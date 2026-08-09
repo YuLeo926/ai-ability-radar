@@ -1,5 +1,6 @@
 mod artifact_store;
 mod batch;
+mod batch_analysis;
 mod batch_schedule;
 mod display_text;
 mod domain;
@@ -11,6 +12,7 @@ mod storage;
 
 pub use artifact_store::*;
 pub use batch::*;
+pub use batch_analysis::*;
 pub use batch_schedule::*;
 pub use display_text::*;
 pub use domain::*;

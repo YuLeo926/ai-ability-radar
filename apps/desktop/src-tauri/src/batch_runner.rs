@@ -267,8 +267,9 @@ impl BatchRunner {
     fn validate_cli_batch(&self, batch: &ScanBatchRecord) -> Result<(), BatchRunnerError> {
         if !matches!(
             batch.plan.mode,
-            BatchMode::QuickComparison | BatchMode::Standard
-        ) || batch.plan.suite_id != self.pack.manifest.id
+            BatchMode::QuickComparison | BatchMode::Standard | BatchMode::Full
+        ) || (batch.plan.mode == BatchMode::Full && batch.baseline_snapshot.is_none())
+            || batch.plan.suite_id != self.pack.manifest.id
             || batch.plan.suite_version != self.pack.manifest.version
             || batch.plan.suite_content_sha256 != self.pack.content_sha256
             || batch.plan.targets.is_empty()
@@ -713,9 +714,22 @@ impl RunnerFixture {
             })
             .collect::<Vec<_>>();
         let batch_id = Uuid::new_v4();
-        self.repository
-            .insert_batch_plan(batch_id, &self.pack, &plan, &members, now)
-            .unwrap();
+        if mode == BatchMode::Full {
+            self.repository
+                .create_full_batch_with_baseline_snapshot(
+                    batch_id,
+                    &self.pack,
+                    &plan,
+                    &members,
+                    now,
+                    &ability_core::CalibrationPolicy::production_v1(),
+                )
+                .unwrap();
+        } else {
+            self.repository
+                .insert_batch_plan(batch_id, &self.pack, &plan, &members, now)
+                .unwrap();
+        }
         self.repository
             .append_execution_authorization(&ScanExecutionAuthorization {
                 batch_id,
@@ -1307,7 +1321,7 @@ async fn cancellation_stops_the_active_member_and_prevents_future_launches() {
 
 #[cfg(test)]
 #[tokio::test]
-async fn forged_full_batch_is_rejected_before_reservation_or_launch() {
+async fn full_batch_runs_only_after_atomic_snapshot_creation() {
     let fixture = RunnerFixture::new();
     let batch = fixture.create_batch(
         BatchMode::Full,
@@ -1317,17 +1331,27 @@ async fn forged_full_batch_is_rejected_before_reservation_or_launch() {
         ],
     );
     let metrics = Arc::new(AdapterMetrics::default());
-    let adapters = BTreeMap::from([(
-        TargetKind::CodexCli,
-        fake_adapter(
+    let adapters = BTreeMap::from([
+        (
             TargetKind::CodexCli,
-            AvailabilityStatus::Ready,
-            metrics.clone(),
+            fake_adapter(
+                TargetKind::CodexCli,
+                AvailabilityStatus::Ready,
+                metrics.clone(),
+            ),
         ),
-    )]);
+        (
+            TargetKind::ClaudeCode,
+            fake_adapter(
+                TargetKind::ClaudeCode,
+                AvailabilityStatus::Ready,
+                metrics.clone(),
+            ),
+        ),
+    ]);
     let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
 
-    let error = fixture
+    let completed = fixture
         .runner
         .run(
             batch.id,
@@ -1337,11 +1361,12 @@ async fn forged_full_batch_is_rejected_before_reservation_or_launch() {
             events,
         )
         .await
-        .unwrap_err();
+        .unwrap();
 
-    assert!(matches!(error, BatchRunnerError::UnsupportedBatch));
-    assert_eq!(metrics.detects.load(Ordering::SeqCst), 0);
-    assert_eq!(metrics.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(completed.status, BatchStatus::Completed);
+    assert!(completed.baseline_snapshot.is_some());
+    assert!(metrics.detects.load(Ordering::SeqCst) > 0);
+    assert!(metrics.calls.load(Ordering::SeqCst) > 0);
     assert!(fixture
         .repository
         .get_batch(batch.id)
@@ -1349,5 +1374,18 @@ async fn forged_full_batch_is_rejected_before_reservation_or_launch() {
         .unwrap()
         .members
         .iter()
-        .all(|member| member.run_id.is_none()));
+        .all(|member| member.status == BatchMemberStatus::Completed));
+    let analysis = fixture
+        .repository
+        .analyze_batch(batch.id, &ability_core::CalibrationPolicy::production_v1())
+        .unwrap();
+    assert_eq!(
+        analysis.signal,
+        ability_core::RegressionSignal::InsufficientData
+    );
+    assert_eq!(analysis.targets.len(), 2);
+    assert!(analysis
+        .targets
+        .iter()
+        .all(|target| target.candidate_member_count == 5));
 }

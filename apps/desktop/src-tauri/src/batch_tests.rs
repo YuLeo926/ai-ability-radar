@@ -1,9 +1,9 @@
 use crate::batch_commands::{
     authorize_batch_execution_at, authorize_batch_retry_at, begin_guided_batch_member_at,
     cancel_batch_at, create_acknowledged_batch_at, decline_guided_batch_attestation_at,
-    estimate_batch_at, estimate_batch_retry_at, get_batch_record, get_next_guided_member_record,
-    list_batch_records, pause_batch_at, resume_batch_at, start_batch_at,
-    submit_guided_batch_answer_at, BatchCommandContext, BATCH_CAPABILITIES,
+    estimate_batch_at, estimate_batch_retry_at, get_batch_analysis_record, get_batch_record,
+    get_next_guided_member_record, list_batch_records, pause_batch_at, resume_batch_at,
+    start_batch_at, submit_guided_batch_answer_at, BatchCommandContext, BATCH_CAPABILITIES,
 };
 use crate::dto::{
     AuthorizeBatchExecutionInput, AuthorizeBatchRetryInput, BatchIdInput, BatchPlanInput,
@@ -11,10 +11,9 @@ use crate::dto::{
     EstimateBatchRetryInput, SubmitGuidedBatchAnswerInput, TargetSelectionInput,
 };
 use ability_core::{
-    build_batch_schedule, AdapterLaunchKind, BatchExecutionSurface, BatchFeatureLevel,
-    BatchMemberSeed, BatchMemberStatus, BatchMode, BatchStatus, ExecutionAdapterIdentity,
-    FailureKind, LoadedPack, ManualRunService, ModelSource, ModelVerification, PackLoader,
-    RunRepository, ScanBatchPlan, ScanBatchTarget, TargetKind, TargetSelection,
+    AdapterLaunchKind, BatchExecutionSurface, BatchFeatureLevel, BatchMemberStatus, BatchMode,
+    BatchStatus, ExecutionAdapterIdentity, FailureKind, LoadedPack, ManualRunService, ModelSource,
+    ModelVerification, PackLoader, RegressionSignal, RunRepository, TargetKind,
 };
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use serde_json::json;
@@ -109,21 +108,6 @@ fn cli_plan(mode: BatchMode) -> BatchPlanInput {
             cli_target(TargetKind::ClaudeCode, "claude-opus-4.5"),
         ],
     }
-}
-
-fn core_target(input: &BatchTargetInput) -> ScanBatchTarget {
-    ScanBatchTarget::new(
-        TargetSelection {
-            kind: input.target.kind,
-            reported_model: input.target.reported_model.clone(),
-            reasoning_effort: input.target.reasoning_effort.clone(),
-            model_source: input.target.model_source,
-            model_verification: input.target.model_verification,
-        },
-        input.execution_surface,
-        input.execution_adapter_identity.clone(),
-    )
-    .unwrap()
 }
 
 fn context<'a>(
@@ -439,12 +423,13 @@ fn guided_decline_command_invalidates_only_the_exact_active_member() {
 }
 
 #[test]
-fn full_mode_is_gated_before_reliable_analysis() {
+fn full_mode_is_enabled_only_with_an_atomic_baseline_snapshot() {
     assert_eq!(
         BATCH_CAPABILITIES,
         [
             BatchFeatureLevel::GuidedQuickV1,
-            BatchFeatureLevel::CliStandardV1
+            BatchFeatureLevel::CliStandardV1,
+            BatchFeatureLevel::ReliableFullV1,
         ]
     );
     let directory = tempdir().unwrap();
@@ -454,47 +439,33 @@ fn full_mode_is_gated_before_reliable_analysis() {
     let context = context(&repository, &client_pack, &cli_pack);
 
     let full_input = cli_plan(BatchMode::Full);
-    assert!(estimate_batch_at(&context, full_input.clone(), issued_at()).is_err());
-    assert!(create_acknowledged_batch_at(
+    let estimate = estimate_batch_at(&context, full_input.clone(), issued_at()).unwrap();
+    let batch_id = Uuid::new_v4();
+    let created = create_acknowledged_batch_at(
         &context,
         CreateAcknowledgedBatchInput {
-            plan: full_input.clone(),
+            plan: full_input,
             estimate_issued_at: issued_at(),
-            acknowledgement_hash: "0".repeat(64),
+            acknowledgement_hash: estimate.plan.acknowledgement_hash,
         },
         issued_at(),
-        Uuid::new_v4(),
-    )
-    .is_err());
-    assert!(repository.list_batches().unwrap().is_empty());
-    assert!(repository.list_runs().unwrap().is_empty());
-
-    let full_plan = ScanBatchPlan::new(
-        &cli_pack,
-        "ability-v1",
-        BatchMode::Full,
-        full_input.seed,
-        full_input.targets.iter().map(core_target).collect(),
-        issued_at(),
+        batch_id,
     )
     .unwrap();
-    let schedule = build_batch_schedule(&full_plan).unwrap();
-    let members = schedule
-        .members
-        .iter()
-        .map(|member| BatchMemberSeed {
-            ordinal: member.ordinal,
-            target_position: member.target_position,
-            repetition_index: member.repetition_index,
-        })
-        .collect::<Vec<_>>();
-    let batch_id = Uuid::new_v4();
-    repository
-        .insert_batch_plan(batch_id, &cli_pack, &full_plan, &members, issued_at())
-        .unwrap();
-    let before = repository.get_batch(batch_id).unwrap().unwrap();
-    assert!(start_batch_at(&context, BatchIdInput { batch_id }, issued_at()).is_err());
-    assert_eq!(repository.get_batch(batch_id).unwrap().unwrap(), before);
+    assert_eq!(created.id, batch_id);
+    assert!(created.baseline_snapshot.is_some());
+    assert_eq!(
+        repository
+            .get_baseline_snapshot(batch_id)
+            .unwrap()
+            .unwrap()
+            .baseline_as_of,
+        created.created_at
+    );
+    let analysis = get_batch_analysis_record(&context, BatchIdInput { batch_id }).unwrap();
+    assert_eq!(analysis.signal, RegressionSignal::InsufficientData);
+    assert_eq!(analysis.targets.len(), 2);
+    assert!(analysis.baseline_snapshot_sha256.is_some());
     assert!(repository.list_runs().unwrap().is_empty());
 }
 

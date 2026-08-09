@@ -285,6 +285,7 @@ function batchResponses() {
   const record = {
     id: "39d9f772-2e12-4b2d-af13-94c32d36f2d3",
     plan,
+    baselineSnapshot: null,
     status: "created",
     cancelRequested: false,
     plannedMemberCount: 2,
@@ -309,9 +310,21 @@ function batchResponses() {
   return {
     estimate: {
       plan,
-      capabilities: ["guided_quick_v1", "cli_standard_v1"],
+      capabilities: [
+        "guided_quick_v1",
+        "cli_standard_v1",
+        "reliable_full_v1",
+      ],
     },
     record,
+    analysis: {
+      candidateBatchId: record.id,
+      analysisVersion: 1,
+      calibrationPolicyVersion: 1,
+      baselineSnapshotSha256: null,
+      signal: "insufficient_data",
+      targets: [],
+    },
     authorization,
     retryEstimate: {
       authorization: {
@@ -368,7 +381,7 @@ function batchResponses() {
   };
 }
 
-test("uses the fifteen reviewed batch commands with exact nested camelCase payloads", async () => {
+test("uses the sixteen reviewed batch commands with exact nested camelCase payloads", async () => {
   const responses = batchResponses();
   bridge.invoke.mockImplementation(async (command: string) => {
     switch (command) {
@@ -382,6 +395,8 @@ test("uses the fifteen reviewed batch commands with exact nested camelCase paylo
       case "cancel_batch":
       case "decline_guided_batch_attestation":
         return responses.record;
+      case "get_batch_analysis":
+        return responses.analysis;
       case "list_batches":
         return [responses.record];
       case "authorize_batch_execution":
@@ -436,6 +451,7 @@ test("uses the fifteen reviewed batch commands with exact nested camelCase paylo
   await tauriBackend.estimateBatch(plan);
   await tauriBackend.createAcknowledgedBatch(createInput);
   await tauriBackend.getBatch(batchId);
+  await tauriBackend.getBatchAnalysis(batchId);
   await tauriBackend.listBatches();
   await tauriBackend.authorizeBatchExecution({
     batchId,
@@ -456,6 +472,7 @@ test("uses the fifteen reviewed batch commands with exact nested camelCase paylo
     ["estimate_batch", { input: plan }],
     ["create_acknowledged_batch", { input: createInput }],
     ["get_batch", { input: { batchId } }],
+    ["get_batch_analysis", { input: { batchId } }],
     ["list_batches"],
     [
       "authorize_batch_execution",

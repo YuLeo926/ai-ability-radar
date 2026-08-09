@@ -48,6 +48,7 @@ function batchRecord(
   const batchMembers = members(firstStatus);
   return {
     id: batchId,
+    baselineSnapshot: null,
     plan: {
       suiteId: "client-quick",
       suiteVersion: "1.0.0",

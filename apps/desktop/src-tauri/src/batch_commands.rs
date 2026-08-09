@@ -10,12 +10,12 @@ use crate::dto::{
     SubmitGuidedBatchAnswerInput, TaskResultDto,
 };
 use ability_core::{
-    build_batch_schedule, select_next_scheduled_member, AdapterLaunchKind, BatchExecutionSurface,
-    BatchFeatureLevel, BatchMemberSeed, BatchMemberStatus, BatchMode, EnvironmentFingerprint,
-    IsolationAttestation, IsolationEnforcement, LoadedPack, ManualRunService, NextScheduledMember,
-    RunMode, RunRecord, RunRepository, RunStatus, ScanBatchPlan, ScanBatchRecord, ScanBatchTarget,
-    ScanExecutionAuthorization, ScheduledMemberLifecycle, ScheduledMemberState, TargetKind,
-    TargetSelection,
+    build_batch_schedule, select_next_scheduled_member, AdapterLaunchKind, BatchAnalysis,
+    BatchExecutionSurface, BatchFeatureLevel, BatchMemberSeed, BatchMemberStatus, BatchMode,
+    CalibrationPolicy, EnvironmentFingerprint, IsolationAttestation, IsolationEnforcement,
+    LoadedPack, ManualRunService, NextScheduledMember, RunMode, RunRecord, RunRepository,
+    RunStatus, ScanBatchPlan, ScanBatchRecord, ScanBatchTarget, ScanExecutionAuthorization,
+    ScheduledMemberLifecycle, ScheduledMemberState, TargetKind, TargetSelection,
 };
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -25,9 +25,10 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-pub(crate) const BATCH_CAPABILITIES: [BatchFeatureLevel; 2] = [
+pub(crate) const BATCH_CAPABILITIES: [BatchFeatureLevel; 3] = [
     BatchFeatureLevel::GuidedQuickV1,
     BatchFeatureLevel::CliStandardV1,
+    BatchFeatureLevel::ReliableFullV1,
 ];
 const SCORING_RULE_VERSION: &str = "ability-v1";
 const MAX_SAFE_JSON_INTEGER: u64 = 9_007_199_254_740_991;
@@ -232,10 +233,24 @@ pub(crate) fn create_acknowledged_batch_at(
             repetition_index: member.repetition_index,
         })
         .collect::<Vec<_>>();
-    context
-        .repository
-        .insert_batch_plan(batch_id, pack, &plan, &members, now)
-        .map_err(|error| error.to_string())?;
+    if plan.mode == BatchMode::Full {
+        context
+            .repository
+            .create_full_batch_with_baseline_snapshot(
+                batch_id,
+                pack,
+                &plan,
+                &members,
+                now,
+                &CalibrationPolicy::production_v1(),
+            )
+            .map_err(|error| error.to_string())?;
+    } else {
+        context
+            .repository
+            .insert_batch_plan(batch_id, pack, &plan, &members, now)
+            .map_err(|error| error.to_string())?;
+    }
     required_batch(context, batch_id)
 }
 
@@ -246,6 +261,16 @@ pub(crate) fn get_batch_record(
     context
         .repository
         .get_batch(input.batch_id)
+        .map_err(|error| error.to_string())
+}
+
+pub(crate) fn get_batch_analysis_record(
+    context: &BatchCommandContext<'_>,
+    input: BatchIdInput,
+) -> Result<BatchAnalysis, String> {
+    context
+        .repository
+        .analyze_batch(input.batch_id, &CalibrationPolicy::production_v1())
         .map_err(|error| error.to_string())
 }
 
@@ -838,6 +863,14 @@ pub fn get_batch(
     input: BatchIdInput,
 ) -> Result<Option<ScanBatchRecord>, String> {
     get_batch_record(&BatchCommandContext::from_state(&state), input)
+}
+
+#[tauri::command]
+pub fn get_batch_analysis(
+    state: State<'_, AppState>,
+    input: BatchIdInput,
+) -> Result<BatchAnalysis, String> {
+    get_batch_analysis_record(&BatchCommandContext::from_state(&state), input)
 }
 
 #[tauri::command]

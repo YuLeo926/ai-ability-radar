@@ -13,6 +13,7 @@ import type {
 } from "./backend";
 import type {
   BatchEstimate,
+  BatchAnalysis,
   BatchRetryEstimate,
   NextGuidedMember,
   ScanBatchRecord,
@@ -20,6 +21,7 @@ import type {
 } from "../domain/batch";
 import {
   isSafeBatchEstimate,
+  isSafeBatchAnalysis,
   isSafeBatchRecord,
   isSafeBatchRecordList,
   isSafeBatchRetryEstimate,
@@ -111,6 +113,12 @@ export const tauriBackend: Backend = {
     }
     return value;
   },
+  getBatchAnalysis: (batchId) =>
+    invokeValidated<BatchAnalysis>(
+      "get_batch_analysis",
+      batchIdInput(batchId),
+      isSafeBatchAnalysis,
+    ),
   listBatches: () =>
     invokeValidated<ScanBatchRecord[]>(
       "list_batches",

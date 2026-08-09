@@ -18,6 +18,10 @@ import {
   BATCH_RESPONSE_LIMITS,
   supportsBatchMode,
   type AdapterLaunchKind,
+  type AcceptedProvenanceClass,
+  type BaselineExclusionReason,
+  type BaselineSnapshot,
+  type BatchAnalysis,
   type BatchEstimate,
   type BatchExecutionSurface,
   type BatchFeatureLevel,
@@ -728,6 +732,7 @@ const batchEstimateKeys = new Set(["plan", "capabilities"]);
 const batchRecordKeys = new Set([
   "id",
   "plan",
+  "baselineSnapshot",
   "status",
   "cancelRequested",
   "plannedMemberCount",
@@ -745,6 +750,102 @@ const batchMemberKeys = new Set([
   "failureKind",
   "attemptNumber",
   "updatedAt",
+]);
+const baselineSnapshotKeys = new Set([
+  "candidateBatchId",
+  "baselineAsOf",
+  "analysisVersion",
+  "calibrationPolicyVersion",
+  "historyWindowDays",
+  "maximumHistoricalBatches",
+  "bootstrapSeed",
+  "bootstrapResamples",
+  "identity",
+  "selectedBatchIds",
+  "exclusions",
+  "contentSha256",
+]);
+const analysisIdentityKeys = new Set([
+  "analysisVersion",
+  "suiteId",
+  "suiteVersion",
+  "suiteContentSha256",
+  "scoringRuleVersion",
+  "executionSurface",
+  "targets",
+]);
+const analysisTargetIdentityKeys = new Set([
+  "routeIdentity",
+  "provenanceClass",
+  "providerFamily",
+  "launchKind",
+  "adapterContractVersion",
+]);
+const baselineExclusionKeys = new Set(["batchId", "reason"]);
+const acceptedProvenanceClasses = new Set<AcceptedProvenanceClass>([
+  "guided_manual_confirmed",
+  "guided_accessibility_confirmed",
+  "cli_requested_confirmed",
+  "cli_default_unverified",
+]);
+const baselineExclusionReasons = new Set<BaselineExclusionReason>([
+  "candidate_batch",
+  "duplicate_evidence_id",
+  "not_completed_full",
+  "missing_or_invalid_snapshot",
+  "not_strictly_before_cutoff",
+  "outside_history_window",
+  "incompatible_identity",
+  "older_batch_on_same_utc_day",
+  "beyond_maximum_historical_batches",
+]);
+const batchAnalysisKeys = new Set([
+  "candidateBatchId",
+  "analysisVersion",
+  "calibrationPolicyVersion",
+  "baselineSnapshotSha256",
+  "signal",
+  "targets",
+]);
+const targetAnalysisKeys = new Set([
+  "targetPosition",
+  "signal",
+  "candidate",
+  "baseline",
+  "baselineBatchCount",
+  "baselineUtcDayCount",
+  "candidateMemberCount",
+  "delta",
+  "absoluteDrop",
+  "relativeDrop",
+  "deltaConfidenceInterval",
+  "categoryCandidate",
+  "categoryBaseline",
+  "matchedTaskDeltas",
+  "excludedCandidateMemberOrdinals",
+]);
+const distributionKeys = new Set([
+  "count",
+  "median",
+  "medianAbsoluteDeviation",
+]);
+const confidenceIntervalKeys = new Set([
+  "lower",
+  "upper",
+  "confidenceLevel",
+]);
+const matchedTaskDeltaKeys = new Set([
+  "taskId",
+  "category",
+  "candidateMedian",
+  "baselineMedian",
+  "delta",
+]);
+const regressionSignals = new Set([
+  "insufficient_data",
+  "stable",
+  "watch",
+  "likely_regression",
 ]);
 const authorizationKeys = new Set([
   "batchId",
@@ -1157,9 +1258,10 @@ export function isSafeBatchEstimate(value: unknown): value is BatchEstimate {
     !hasExactKeys(value, batchEstimateKeys, ["plan", "capabilities"]) ||
     !isSafeBatchPlan(value.plan) ||
     !Array.isArray(value.capabilities) ||
-    value.capabilities.length !== 2 ||
+    value.capabilities.length !== 3 ||
     value.capabilities[0] !== "guided_quick_v1" ||
-    value.capabilities[1] !== "cli_standard_v1"
+    value.capabilities[1] !== "cli_standard_v1" ||
+    value.capabilities[2] !== "reliable_full_v1"
   ) {
     return false;
   }
@@ -1167,6 +1269,221 @@ export function isSafeBatchEstimate(value: unknown): value is BatchEstimate {
     value.capabilities as BatchFeatureLevel[],
     value.plan.costEstimate.executionSurface,
     value.plan.mode,
+  );
+}
+
+function expectedProvenanceClass(
+  target: ScanBatchTarget,
+): AcceptedProvenanceClass | null {
+  const surface = target.routeIdentity.executionSurface;
+  const source = target.target.modelSource;
+  const verification = target.target.modelVerification;
+  if (
+    surface === "guided_client" &&
+    source === "manual" &&
+    verification === "user_confirmed"
+  ) {
+    return "guided_manual_confirmed";
+  }
+  if (
+    surface === "guided_client" &&
+    source === "windows_accessibility" &&
+    verification === "user_confirmed"
+  ) {
+    return "guided_accessibility_confirmed";
+  }
+  if (
+    surface === "automated_cli" &&
+    source === "cli_requested" &&
+    verification === "user_confirmed"
+  ) {
+    return "cli_requested_confirmed";
+  }
+  if (
+    surface === "automated_cli" &&
+    source === "default_route" &&
+    verification === "unverified"
+  ) {
+    return "cli_default_unverified";
+  }
+  return null;
+}
+
+function isSafeBaselineSnapshot(
+  value: unknown,
+  batchId: string,
+  createdAt: string,
+  plan: ScanBatchPlan,
+): value is BaselineSnapshot {
+  if (
+    !isObject(value) ||
+    !hasExactKeys(value, baselineSnapshotKeys, [...baselineSnapshotKeys]) ||
+    value.candidateBatchId !== batchId ||
+    value.baselineAsOf !== createdAt ||
+    value.analysisVersion !== 1 ||
+    value.calibrationPolicyVersion !== 1 ||
+    value.historyWindowDays !== 90 ||
+    value.maximumHistoricalBatches !== 12 ||
+    !isCount(value.bootstrapSeed) ||
+    value.bootstrapResamples !== 2_000 ||
+    !isSha256(value.contentSha256) ||
+    !Array.isArray(value.selectedBatchIds) ||
+    value.selectedBatchIds.length > 12 ||
+    !value.selectedBatchIds.every(isUuid) ||
+    new Set(value.selectedBatchIds).size !== value.selectedBatchIds.length ||
+    value.selectedBatchIds.includes(batchId) ||
+    !Array.isArray(value.exclusions) ||
+    value.exclusions.length > BATCH_RESPONSE_LIMITS.batchList ||
+    !value.exclusions.every(
+      (entry) =>
+        isObject(entry) &&
+        hasExactKeys(entry, baselineExclusionKeys, ["batchId", "reason"]) &&
+        isUuid(entry.batchId) &&
+        baselineExclusionReasons.has(entry.reason as BaselineExclusionReason),
+    ) ||
+    !isObject(value.identity) ||
+    !hasExactKeys(value.identity, analysisIdentityKeys, [
+      ...analysisIdentityKeys,
+    ])
+  ) {
+    return false;
+  }
+  const identity = value.identity;
+  const surface = plan.costEstimate.executionSurface;
+  if (
+    identity.analysisVersion !== 1 ||
+    identity.suiteId !== plan.suiteId ||
+    identity.suiteVersion !== plan.suiteVersion ||
+    identity.suiteContentSha256 !== plan.suiteContentSha256 ||
+    identity.scoringRuleVersion !== plan.scoringRuleVersion ||
+    identity.executionSurface !== surface ||
+    !Array.isArray(identity.targets) ||
+    identity.targets.length !== plan.targets.length
+  ) {
+    return false;
+  }
+  return identity.targets.every((entry, index) => {
+    const planned = plan.targets[index];
+    const expectedProvenance = expectedProvenanceClass(planned);
+    return (
+      isObject(entry) &&
+      hasExactKeys(entry, analysisTargetIdentityKeys, [
+        ...analysisTargetIdentityKeys,
+      ]) &&
+      acceptedProvenanceClasses.has(
+        entry.provenanceClass as AcceptedProvenanceClass,
+      ) &&
+      entry.provenanceClass === expectedProvenance &&
+      JSON.stringify(entry.routeIdentity) ===
+        JSON.stringify(planned.routeIdentity) &&
+      entry.providerFamily ===
+        planned.executionAdapterIdentity.providerFamily &&
+      entry.launchKind === planned.executionAdapterIdentity.launchKind &&
+      entry.adapterContractVersion ===
+        planned.executionAdapterIdentity.adapterContractVersion
+    );
+  });
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isSafeDistribution(value: unknown): boolean {
+  return (
+    isObject(value) &&
+    hasExactKeys(value, distributionKeys, [...distributionKeys]) &&
+    isPositiveCount(value.count) &&
+    isScoreValue(value.median) &&
+    isScoreValue(value.medianAbsoluteDeviation)
+  );
+}
+
+function isSafeCategoryDistributions(value: unknown): boolean {
+  return (
+    isObject(value) &&
+    Object.keys(value).every((key) => categories.has(key as Category)) &&
+    Object.values(value).every(isSafeDistribution)
+  );
+}
+
+export function isSafeBatchAnalysis(value: unknown): value is BatchAnalysis {
+  if (
+    !isObject(value) ||
+    !hasExactKeys(value, batchAnalysisKeys, [...batchAnalysisKeys]) ||
+    !isUuid(value.candidateBatchId) ||
+    value.analysisVersion !== 1 ||
+    value.calibrationPolicyVersion !== 1 ||
+    !(
+      value.baselineSnapshotSha256 === null ||
+      isSha256(value.baselineSnapshotSha256)
+    ) ||
+    !regressionSignals.has(value.signal as string) ||
+    !Array.isArray(value.targets) ||
+    value.targets.length > BATCH_RESPONSE_LIMITS.targets
+  ) {
+    return false;
+  }
+  const validTargets = value.targets.every((target) => {
+    if (
+      !isObject(target) ||
+      !hasExactKeys(target, targetAnalysisKeys, [...targetAnalysisKeys]) ||
+      !isCount(target.targetPosition) ||
+      !regressionSignals.has(target.signal as string) ||
+      !(target.candidate === null || isSafeDistribution(target.candidate)) ||
+      !(target.baseline === null || isSafeDistribution(target.baseline)) ||
+      !isCount(target.baselineBatchCount) ||
+      target.baselineBatchCount > 12 ||
+      !isCount(target.baselineUtcDayCount) ||
+      target.baselineUtcDayCount > target.baselineBatchCount ||
+      !isCount(target.candidateMemberCount) ||
+      target.candidateMemberCount > 5 ||
+      ![target.delta, target.absoluteDrop, target.relativeDrop].every(
+        (entry) => entry === null || isFiniteNumber(entry),
+      ) ||
+      !isSafeCategoryDistributions(target.categoryCandidate) ||
+      !isSafeCategoryDistributions(target.categoryBaseline) ||
+      !Array.isArray(target.matchedTaskDeltas) ||
+      target.matchedTaskDeltas.length > BATCH_RESPONSE_LIMITS.taskBudgets ||
+      !target.matchedTaskDeltas.every(
+        (entry) =>
+          isObject(entry) &&
+          hasExactKeys(entry, matchedTaskDeltaKeys, [
+            ...matchedTaskDeltaKeys,
+          ]) &&
+          isIdentifier(entry.taskId, 128) &&
+          categories.has(entry.category as Category) &&
+          isScoreValue(entry.candidateMedian) &&
+          isScoreValue(entry.baselineMedian) &&
+          isFiniteNumber(entry.delta),
+      ) ||
+      !Array.isArray(target.excludedCandidateMemberOrdinals) ||
+      target.excludedCandidateMemberOrdinals.length > 5 ||
+      !target.excludedCandidateMemberOrdinals.every(isCount) ||
+      new Set(target.excludedCandidateMemberOrdinals).size !==
+        target.excludedCandidateMemberOrdinals.length
+    ) {
+      return false;
+    }
+    if (target.deltaConfidenceInterval === null) return true;
+    const interval = target.deltaConfidenceInterval;
+    return (
+      isObject(interval) &&
+      hasExactKeys(interval, confidenceIntervalKeys, [
+        ...confidenceIntervalKeys,
+      ]) &&
+      isFiniteNumber(interval.lower) &&
+      isFiniteNumber(interval.upper) &&
+      interval.lower <= interval.upper &&
+      interval.confidenceLevel === 0.95
+    );
+  });
+  return (
+    validTargets &&
+    new Set(value.targets.map((target) => target.targetPosition)).size ===
+      value.targets.length &&
+    (value.baselineSnapshotSha256 !== null ||
+      (value.signal === "insufficient_data" && value.targets.length === 0))
   );
 }
 
@@ -1229,6 +1546,18 @@ export function isSafeBatchRecord(value: unknown): value is ScanBatchRecord {
     return false;
   }
   const plan = value.plan as ScanBatchPlan;
+  if (
+    (plan.mode === "full" &&
+      !isSafeBaselineSnapshot(
+        value.baselineSnapshot,
+        value.id as string,
+        value.createdAt as string,
+        plan,
+      )) ||
+    (plan.mode !== "full" && value.baselineSnapshot !== null)
+  ) {
+    return false;
+  }
   const members = value.members as ScanBatchMemberRecord[];
   if (
     members.length !== plan.costEstimate.plannedMemberRuns ||

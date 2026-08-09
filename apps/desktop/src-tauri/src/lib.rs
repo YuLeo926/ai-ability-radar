@@ -15,8 +15,8 @@ use app_state::AppState;
 use batch_commands::{
     authorize_batch_execution, authorize_batch_retry, begin_guided_batch_member, cancel_batch,
     create_acknowledged_batch, decline_guided_batch_attestation, estimate_batch,
-    estimate_batch_retry, get_batch, get_next_guided_member, list_batches, pause_batch,
-    resume_batch, start_batch, submit_guided_batch_answer,
+    estimate_batch_retry, get_batch, get_batch_analysis, get_next_guided_member, list_batches,
+    pause_batch, resume_batch, start_batch, submit_guided_batch_answer,
 };
 use commands::{
     cancel_run, delete_raw_artifacts, delete_run, delete_target_history, detect_client_selection,
@@ -51,6 +51,7 @@ macro_rules! command_inventory {
             estimate_batch,
             create_acknowledged_batch,
             get_batch,
+            get_batch_analysis,
             list_batches,
             authorize_batch_execution,
             estimate_batch_retry,
@@ -129,6 +130,7 @@ mod tests {
                 "estimate_batch",
                 "create_acknowledged_batch",
                 "get_batch",
+                "get_batch_analysis",
                 "list_batches",
                 "authorize_batch_execution",
                 "estimate_batch_retry",

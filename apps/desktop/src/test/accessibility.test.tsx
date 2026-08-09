@@ -316,6 +316,7 @@ function accessibleBatchRecord(completed = false): ScanBatchRecord {
   ];
   return {
     id: "39d9f772-2e12-4b2d-af13-94c32d36f2d3",
+    baselineSnapshot: null,
     plan: {
       suiteId: "client-quick",
       suiteVersion: "1.0.0",

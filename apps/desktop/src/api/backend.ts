@@ -2,6 +2,7 @@ import type {
   AuthorizeBatchExecutionInput,
   AuthorizeBatchRetryInput,
   BatchEstimate,
+  BatchAnalysis,
   BatchFeatureLevel,
   BatchPlanInput,
   BatchRetryEstimate,
@@ -267,6 +268,7 @@ export interface Backend {
     input: CreateAcknowledgedBatchInput,
   ): Promise<ScanBatchRecord>;
   getBatch(batchId: string): Promise<ScanBatchRecord | null>;
+  getBatchAnalysis(batchId: string): Promise<BatchAnalysis>;
   listBatches(): Promise<ScanBatchRecord[]>;
   authorizeBatchExecution(
     input: AuthorizeBatchExecutionInput,
@@ -298,6 +300,7 @@ type BatchBackendMethods = Pick<
   | "estimateBatch"
   | "createAcknowledgedBatch"
   | "getBatch"
+  | "getBatchAnalysis"
   | "listBatches"
   | "authorizeBatchExecution"
   | "estimateBatchRetry"
@@ -320,6 +323,7 @@ export const unsupportedBatchBackend: BatchBackendMethods = {
   estimateBatch: unsupportedBatchCall,
   createAcknowledgedBatch: unsupportedBatchCall,
   getBatch: unsupportedBatchCall,
+  getBatchAnalysis: unsupportedBatchCall,
   listBatches: unsupportedBatchCall,
   authorizeBatchExecution: unsupportedBatchCall,
   estimateBatchRetry: unsupportedBatchCall,

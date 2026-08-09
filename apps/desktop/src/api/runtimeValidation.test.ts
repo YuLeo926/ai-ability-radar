@@ -7,6 +7,7 @@ import type {
 } from "./backend";
 import {
   isSafeBatchEstimate,
+  isSafeBatchAnalysis,
   isSafeBatchRecord,
   isSafeBatchRecordList,
   isSafeBatchRetryEstimate,
@@ -930,7 +931,11 @@ function makeBatchEstimate() {
       },
       acknowledgementHash: "b".repeat(64),
     },
-    capabilities: ["guided_quick_v1", "cli_standard_v1"],
+    capabilities: [
+      "guided_quick_v1",
+      "cli_standard_v1",
+      "reliable_full_v1",
+    ],
   };
 }
 
@@ -939,6 +944,7 @@ function makeBatchRecord() {
   return {
     id: "39d9f772-2e12-4b2d-af13-94c32d36f2d3",
     plan: estimate.plan,
+    baselineSnapshot: null,
     status: "created",
     cancelRequested: false,
     plannedMemberCount: 2,
@@ -970,6 +976,137 @@ function makeBatchRecord() {
   };
 }
 
+function makeFullBatchRecord() {
+  const createdAt = "2026-07-30T02:00:01Z";
+  const cliTarget = (
+    kind: "codex_cli" | "claude_code",
+    model: string,
+    providerFamily: "openai" | "anthropic",
+    adapterContractVersion: "codex-cli-v1" | "claude-code-v1",
+  ) => ({
+    target: {
+      kind,
+      reportedModel: model,
+      reasoningEffort: "high",
+      modelSource: "cli_requested" as const,
+      modelVerification: "user_confirmed" as const,
+    },
+    routeIdentity: {
+      kind,
+      modelOrRoute: model,
+      reasoningEffort: "high",
+      executionSurface: "automated_cli" as const,
+      isDefaultRoute: false,
+    },
+    executionAdapterIdentity: {
+      executionSurface: "automated_cli" as const,
+      providerFamily,
+      launchKind: "native_exe" as const,
+      publicVersion: "1.2.3",
+      adapterContractVersion,
+    },
+  });
+  const targets = [
+    cliTarget("codex_cli", "gpt-5.6", "openai", "codex-cli-v1"),
+    cliTarget(
+      "claude_code",
+      "claude-sonnet-4.6",
+      "anthropic",
+      "claude-code-v1",
+    ),
+  ];
+  const plan = {
+    suiteId: "cli-quick",
+    suiteVersion: "1.0.0",
+    suiteContentSha256: "a".repeat(64),
+    scoringRuleVersion: "ability-v1",
+    mode: "full" as const,
+    seed: 17,
+    status: "created" as const,
+    schedulePolicyVersion: 1,
+    taskSessionPolicyVersion: 1,
+    sessionIsolationPolicy:
+      "machine_enforced_fresh_session_and_workspace_per_task" as const,
+    targets,
+    sealedTaskBudgets: [
+      { maxTurns: 1, timeBudgetSecs: 100 },
+      { maxTurns: 1, timeBudgetSecs: 100 },
+    ],
+    costEstimate: {
+      policyVersion: 1,
+      executionSurface: "automated_cli" as const,
+      mode: "full" as const,
+      targetCount: 2,
+      repetitionsPerTarget: 5,
+      tasksPerMemberRun: 2,
+      plannedMemberRuns: 10,
+      taskLaunches: 20,
+      guidedInteractions: 0,
+      maxProviderTurns: 20,
+      summedTaskBudgetSecs: 2_000,
+      expectedElapsedSecsMin: 18_000,
+      expectedElapsedSecsMax: 36_000,
+      providerExecutionCeilingSecs: 5_000,
+      authorizationWallClockSecs: 259_200,
+      issuedAt: "2026-07-30T02:00:00Z",
+      initialAcknowledgementExpiresAt: "2026-07-30T02:15:00Z",
+      tokenQuotaAmount: null,
+      automaticRetryBudget: 0,
+    },
+    acknowledgementHash: "b".repeat(64),
+  };
+  const id = "49d9f772-2e12-4b2d-af13-94c32d36f2d3";
+  return {
+    id,
+    plan,
+    baselineSnapshot: {
+      candidateBatchId: id,
+      baselineAsOf: createdAt,
+      analysisVersion: 1,
+      calibrationPolicyVersion: 1,
+      historyWindowDays: 90,
+      maximumHistoricalBatches: 12,
+      bootstrapSeed: 4_149_524_144_152,
+      bootstrapResamples: 2_000,
+      identity: {
+        analysisVersion: 1,
+        suiteId: plan.suiteId,
+        suiteVersion: plan.suiteVersion,
+        suiteContentSha256: plan.suiteContentSha256,
+        scoringRuleVersion: plan.scoringRuleVersion,
+        executionSurface: "automated_cli",
+        targets: targets.map((target) => ({
+          routeIdentity: target.routeIdentity,
+          provenanceClass: "cli_requested_confirmed",
+          providerFamily: target.executionAdapterIdentity.providerFamily,
+          launchKind: target.executionAdapterIdentity.launchKind,
+          adapterContractVersion:
+            target.executionAdapterIdentity.adapterContractVersion,
+        })),
+      },
+      selectedBatchIds: [],
+      exclusions: [],
+      contentSha256: "c".repeat(64),
+    },
+    status: "created",
+    cancelRequested: false,
+    plannedMemberCount: 10,
+    terminalMemberCount: 0,
+    createdAt,
+    updatedAt: createdAt,
+    members: Array.from({ length: 10 }, (_, ordinal) => ({
+      ordinal,
+      targetPosition: ordinal % 2,
+      repetitionIndex: Math.floor(ordinal / 2),
+      runId: null,
+      status: "planned",
+      failureKind: null,
+      attemptNumber: 0,
+      updatedAt: createdAt,
+    })),
+  };
+}
+
 function makeAuthorization() {
   return {
     batchId: "39d9f772-2e12-4b2d-af13-94c32d36f2d3",
@@ -987,6 +1124,27 @@ function makeAuthorization() {
 }
 
 describe("strict batch runtime validation", () => {
+  test("requires an exact immutable baseline snapshot for Full records", () => {
+    const full = makeFullBatchRecord();
+    expect(isSafeBatchRecord(full)).toBe(true);
+    expect(isSafeBatchRecord({ ...full, baselineSnapshot: null })).toBe(false);
+    expect(
+      isSafeBatchRecord({
+        ...full,
+        baselineSnapshot: {
+          ...full.baselineSnapshot,
+          baselineAsOf: "2026-07-30T02:00:02Z",
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isSafeBatchRecord({
+        ...makeBatchRecord(),
+        baselineSnapshot: full.baselineSnapshot,
+      }),
+    ).toBe(false);
+  });
+
   test("accepts exact estimates, records, authorizations, retries, and guided decisions", () => {
     const estimate = makeBatchEstimate();
     const record = makeBatchRecord();
@@ -994,6 +1152,66 @@ describe("strict batch runtime validation", () => {
     expect(isSafeBatchEstimate(estimate)).toBe(true);
     expect(isSafeBatchRecord(record)).toBe(true);
     expect(isSafeBatchRecordList([record])).toBe(true);
+    expect(
+      isSafeBatchAnalysis({
+        candidateBatchId: record.id,
+        analysisVersion: 1,
+        calibrationPolicyVersion: 1,
+        baselineSnapshotSha256: "c".repeat(64),
+        signal: "insufficient_data",
+        targets: [
+          {
+            targetPosition: 0,
+            signal: "insufficient_data",
+            candidate: null,
+            baseline: null,
+            baselineBatchCount: 0,
+            baselineUtcDayCount: 0,
+            candidateMemberCount: 0,
+            delta: null,
+            absoluteDrop: null,
+            relativeDrop: null,
+            deltaConfidenceInterval: null,
+            categoryCandidate: {},
+            categoryBaseline: {},
+            matchedTaskDeltas: [],
+            excludedCandidateMemberOrdinals: [0],
+          },
+        ],
+      }),
+    ).toBe(true);
+    expect(
+      isSafeBatchAnalysis({
+        candidateBatchId: record.id,
+        analysisVersion: 1,
+        calibrationPolicyVersion: 1,
+        baselineSnapshotSha256: "c".repeat(64),
+        signal: "watch",
+        targets: [
+          {
+            targetPosition: 0,
+            signal: "watch",
+            candidate: { count: 5, median: Number.NaN, medianAbsoluteDeviation: 0 },
+            baseline: { count: 5, median: 90, medianAbsoluteDeviation: 0 },
+            baselineBatchCount: 5,
+            baselineUtcDayCount: 3,
+            candidateMemberCount: 5,
+            delta: -10,
+            absoluteDrop: 10,
+            relativeDrop: 0.111,
+            deltaConfidenceInterval: {
+              lower: -10,
+              upper: -10,
+              confidenceLevel: 0.95,
+            },
+            categoryCandidate: {},
+            categoryBaseline: {},
+            matchedTaskDeltas: [],
+            excludedCandidateMemberOrdinals: [],
+          },
+        ],
+      }),
+    ).toBe(false);
     expect(isSafeScanExecutionAuthorization(authorization)).toBe(true);
     expect(
       isSafeBatchRetryEstimate({

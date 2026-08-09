@@ -150,9 +150,135 @@ export interface ScanBatchMemberRecord {
   updatedAt: string;
 }
 
+export type AcceptedProvenanceClass =
+  | "guided_manual_confirmed"
+  | "guided_accessibility_confirmed"
+  | "cli_requested_confirmed"
+  | "cli_default_unverified";
+
+export type BaselineExclusionReason =
+  | "candidate_batch"
+  | "duplicate_evidence_id"
+  | "not_completed_full"
+  | "missing_or_invalid_snapshot"
+  | "not_strictly_before_cutoff"
+  | "outside_history_window"
+  | "incompatible_identity"
+  | "older_batch_on_same_utc_day"
+  | "beyond_maximum_historical_batches";
+
+export interface AnalysisTargetIdentity {
+  routeIdentity: TargetRouteIdentity;
+  provenanceClass: AcceptedProvenanceClass;
+  providerFamily: string;
+  launchKind: AdapterLaunchKind;
+  adapterContractVersion: string;
+}
+
+export interface BatchAnalysisIdentity {
+  analysisVersion: number;
+  suiteId: string;
+  suiteVersion: string;
+  suiteContentSha256: string;
+  scoringRuleVersion: string;
+  executionSurface: BatchExecutionSurface;
+  targets: AnalysisTargetIdentity[];
+}
+
+export interface BaselineExclusion {
+  batchId: string;
+  reason: BaselineExclusionReason;
+}
+
+export interface BaselineSnapshot {
+  candidateBatchId: string;
+  baselineAsOf: string;
+  analysisVersion: number;
+  calibrationPolicyVersion: number;
+  historyWindowDays: number;
+  maximumHistoricalBatches: number;
+  bootstrapSeed: number;
+  bootstrapResamples: number;
+  identity: BatchAnalysisIdentity;
+  selectedBatchIds: string[];
+  exclusions: BaselineExclusion[];
+  contentSha256: string;
+}
+
+export type RegressionSignal =
+  | "insufficient_data"
+  | "stable"
+  | "watch"
+  | "likely_regression";
+
+export interface DistributionSummary {
+  count: number;
+  median: number;
+  medianAbsoluteDeviation: number;
+}
+
+export interface ConfidenceInterval {
+  lower: number;
+  upper: number;
+  confidenceLevel: number;
+}
+
+export interface MatchedTaskDelta {
+  taskId: string;
+  category: "instruction_following" | "logic" | "code_review" | "cli_coding";
+  candidateMedian: number;
+  baselineMedian: number;
+  delta: number;
+}
+
+export interface TargetBatchAnalysis {
+  targetPosition: number;
+  signal: RegressionSignal;
+  candidate: DistributionSummary | null;
+  baseline: DistributionSummary | null;
+  baselineBatchCount: number;
+  baselineUtcDayCount: number;
+  candidateMemberCount: number;
+  delta: number | null;
+  absoluteDrop: number | null;
+  relativeDrop: number | null;
+  deltaConfidenceInterval: ConfidenceInterval | null;
+  categoryCandidate: Partial<
+    Record<MatchedTaskDelta["category"], DistributionSummary>
+  >;
+  categoryBaseline: Partial<
+    Record<MatchedTaskDelta["category"], DistributionSummary>
+  >;
+  matchedTaskDeltas: MatchedTaskDelta[];
+  excludedCandidateMemberOrdinals: number[];
+}
+
+export interface BatchAnalysis {
+  candidateBatchId: string;
+  analysisVersion: number;
+  calibrationPolicyVersion: number;
+  baselineSnapshotSha256: string | null;
+  signal: RegressionSignal;
+  targets: TargetBatchAnalysis[];
+}
+
+export function regressionSignalLabel(signal: RegressionSignal): string {
+  switch (signal) {
+    case "stable":
+      return "表现稳定";
+    case "watch":
+    case "likely_regression":
+      // Stronger wording remains calibration-gated in production.
+      return "值得复测";
+    case "insufficient_data":
+      return "证据不足";
+  }
+}
+
 export interface ScanBatchRecord {
   id: string;
   plan: ScanBatchPlan;
+  baselineSnapshot: BaselineSnapshot | null;
   status: BatchStatus;
   cancelRequested: boolean;
   plannedMemberCount: number;

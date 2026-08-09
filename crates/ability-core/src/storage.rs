@@ -1,6 +1,8 @@
 use crate::{
-    BatchStatus, FailureKind, RunMode, RunRecord, RunStatus, ScanBatchPlan, ScoreSummary,
-    TargetKind, TargetSelection, TaskOutcome, TaskResult, grading::has_coherent_task_evidence,
+    BaselineEvidenceCandidate, BaselineSnapshot, BatchAnalysis, BatchAnalysisIdentity, BatchMode,
+    BatchStatus, CalibrationPolicy, CompletedBatchEvidence, FailureKind, MemberEvidence, RunMode,
+    RunRecord, RunStatus, ScanBatchPlan, ScoreSummary, TargetKind, TargetSelection, TaskEvidence,
+    TaskOutcome, TaskResult, analyze_matched_batch, grading::has_coherent_task_evidence,
     summarize_scores,
 };
 use chrono::{DateTime, Utc};
@@ -8,6 +10,7 @@ use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::path::{Component, Path};
 use thiserror::Error;
 use uuid::Uuid;
@@ -96,6 +99,7 @@ pub struct ScanBatchMemberRecord {
 pub struct ScanBatchRecord {
     pub id: Uuid,
     pub plan: ScanBatchPlan,
+    pub baseline_snapshot: Option<BaselineSnapshot>,
     pub status: BatchStatus,
     pub cancel_requested: bool,
     pub planned_member_count: u32,
@@ -990,6 +994,11 @@ impl RunRepository {
         members: &[BatchMemberSeed],
         created_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
+        if plan.mode == BatchMode::Full {
+            return Err(StorageError::InvalidData(
+                "Full batches require atomic baseline snapshot creation".into(),
+            ));
+        }
         validate_new_batch_plan(plan, members)?;
         validate_batch_plan_against_pack(plan, pack)?;
         if created_at < plan.cost_estimate.issued_at
@@ -999,115 +1008,160 @@ impl RunRepository {
                 "batch creation time is outside the acknowledged estimate window".into(),
             ));
         }
-        let seed = i64::try_from(plan.seed)
-            .map_err(|_| StorageError::InvalidData("batch seed exceeds SQLite range".into()))?;
-        let planned_member_count = i64::try_from(members.len()).map_err(|_| {
-            StorageError::InvalidData("batch member count exceeds SQLite range".into())
-        })?;
-        let plan_json = serde_json::to_string(plan)?;
-        let mode_json = serde_json::to_string(&plan.mode)?;
-        let status_json = serde_json::to_string(&BatchStatus::Created)?;
-        let batch_id_text = batch_id.to_string();
         let mut connection = self.connection.lock();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-
-        transaction.execute(
-            "INSERT OR IGNORE INTO suite_versions(
-               suite_id,suite_version,content_sha256,scoring_rule_version
-             ) VALUES (?1,?2,?3,?4)",
-            params![
-                &plan.suite_id,
-                &plan.suite_version,
-                &plan.suite_content_sha256,
-                &plan.scoring_rule_version,
-            ],
-        )?;
-        let stored_suite: (String, String) = transaction.query_row(
-            "SELECT content_sha256,scoring_rule_version FROM suite_versions
-             WHERE suite_id=?1 AND suite_version=?2",
-            params![&plan.suite_id, &plan.suite_version],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        if stored_suite
-            != (
-                plan.suite_content_sha256.clone(),
-                plan.scoring_rule_version.clone(),
-            )
-        {
-            return Err(StorageError::InvalidData(
-                "suite id/version is already bound to different content or scoring".into(),
-            ));
-        }
-
-        transaction.execute(
-            "INSERT INTO scan_batches(
-               id,plan_json,mode_json,suite_id,suite_version,content_sha256,
-               scoring_rule_version,seed,status_json,acknowledgement_hash,
-               acknowledgement_expires_at,planned_member_count,terminal_member_count,
-               cancel_requested,created_at,updated_at
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,0,0,?13,?13)",
-            params![
-                &batch_id_text,
-                &plan_json,
-                &mode_json,
-                &plan.suite_id,
-                &plan.suite_version,
-                &plan.suite_content_sha256,
-                &plan.scoring_rule_version,
-                seed,
-                &status_json,
-                &plan.acknowledgement_hash,
-                plan.cost_estimate
-                    .initial_acknowledgement_expires_at
-                    .to_rfc3339(),
-                planned_member_count,
-                created_at.to_rfc3339(),
-            ],
-        )?;
-
-        for (position, target) in plan.targets.iter().enumerate() {
-            let target_json = serde_json::to_string(&target.target)?;
-            transaction.execute(
-                "INSERT OR IGNORE INTO targets(target_json) VALUES (?1)",
-                [&target_json],
-            )?;
-            transaction.execute(
-                "INSERT INTO scan_batch_targets(
-                   batch_id,position,target_json,route_identity_json,
-                   adapter_identity_json,execution_surface_json
-                 ) VALUES (?1,?2,?3,?4,?5,?6)",
-                params![
-                    &batch_id_text,
-                    i64::try_from(position).map_err(|_| StorageError::InvalidData(
-                        "batch target position exceeds SQLite range".into()
-                    ))?,
-                    target_json,
-                    serde_json::to_string(&target.route_identity)?,
-                    serde_json::to_string(&target.execution_adapter_identity)?,
-                    serde_json::to_string(&target.route_identity.execution_surface)?,
-                ],
-            )?;
-        }
-
-        let planned_json = serde_json::to_string(&BatchMemberStatus::Planned)?;
-        for member in members {
-            transaction.execute(
-                "INSERT INTO scan_batch_members(
-                   batch_id,ordinal,target_position,repetition_index,run_id,
-                   status_json,failure_kind_json,attempt_number,updated_at
-                 ) VALUES (?1,?2,?3,?4,NULL,?5,NULL,0,?6)",
-                params![
-                    &batch_id_text,
-                    i64::from(member.ordinal),
-                    i64::from(member.target_position),
-                    i64::from(member.repetition_index),
-                    &planned_json,
-                    created_at.to_rfc3339(),
-                ],
-            )?;
-        }
+        insert_batch_rows(&transaction, batch_id, plan, members, created_at)?;
         transaction.commit()?;
         Ok(())
+    }
+
+    pub fn create_full_batch_with_baseline_snapshot(
+        &self,
+        batch_id: Uuid,
+        pack: &crate::LoadedPack,
+        plan: &ScanBatchPlan,
+        members: &[BatchMemberSeed],
+        baseline_as_of: DateTime<Utc>,
+        policy: &CalibrationPolicy,
+    ) -> Result<BaselineSnapshot, StorageError> {
+        if plan.mode != BatchMode::Full {
+            return Err(StorageError::InvalidData(
+                "atomic baseline creation only accepts Full batches".into(),
+            ));
+        }
+        validate_new_batch_plan(plan, members)?;
+        validate_batch_plan_against_pack(plan, pack)?;
+        if baseline_as_of < plan.cost_estimate.issued_at
+            || baseline_as_of > plan.cost_estimate.initial_acknowledgement_expires_at
+        {
+            return Err(StorageError::InvalidData(
+                "batch creation time is outside the acknowledged estimate window".into(),
+            ));
+        }
+        let candidate_identity = BatchAnalysisIdentity::from_plan(plan)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let rows = {
+            let mut statement = transaction.prepare(
+                "SELECT id,mode_json,status_json,updated_at
+                 FROM scan_batches ORDER BY updated_at DESC,id ASC",
+            )?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut evidence = Vec::with_capacity(rows.len());
+        for (stored_id, mode_json, status_json, updated_at) in rows {
+            let evidence_id = Uuid::parse_str(&stored_id)
+                .map_err(|_| StorageError::InvalidData("stored batch id is invalid".into()))?;
+            match load_batch(&transaction, evidence_id) {
+                Ok(Some(batch)) => evidence.push(BaselineEvidenceCandidate {
+                    batch_id: evidence_id,
+                    mode: batch.plan.mode,
+                    status: batch.status,
+                    finished_at: batch.updated_at,
+                    identity: BatchAnalysisIdentity::from_plan(&batch.plan)
+                        .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+                    has_valid_snapshot: batch.baseline_snapshot.is_some(),
+                }),
+                Ok(None) | Err(_) => {
+                    // Preserve the exact id in the frozen exclusion list, but never let a
+                    // malformed stored row borrow the candidate's compatible identity.
+                    let mode = serde_json::from_str::<BatchMode>(&mode_json)
+                        .unwrap_or(BatchMode::QuickComparison);
+                    let status = serde_json::from_str::<BatchStatus>(&status_json)
+                        .unwrap_or(BatchStatus::Interrupted);
+                    let finished_at = DateTime::parse_from_rfc3339(&updated_at)
+                        .map_err(StorageError::Time)?
+                        .with_timezone(&Utc);
+                    evidence.push(BaselineEvidenceCandidate {
+                        batch_id: evidence_id,
+                        mode,
+                        status,
+                        finished_at,
+                        identity: candidate_identity.clone(),
+                        has_valid_snapshot: false,
+                    });
+                }
+            }
+        }
+        let snapshot = BaselineSnapshot::freeze(batch_id, plan, baseline_as_of, policy, &evidence)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        insert_batch_rows(&transaction, batch_id, plan, members, baseline_as_of)?;
+        transaction.execute(
+            "INSERT INTO baseline_snapshots(
+               candidate_batch_id,baseline_as_of,snapshot_json,content_sha256,created_at
+             ) VALUES (?1,?2,?3,?4,?2)",
+            params![
+                batch_id.to_string(),
+                baseline_as_of.to_rfc3339(),
+                serde_json::to_string(&snapshot)?,
+                &snapshot.content_sha256,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(snapshot)
+    }
+
+    pub fn get_baseline_snapshot(
+        &self,
+        batch_id: Uuid,
+    ) -> Result<Option<BaselineSnapshot>, StorageError> {
+        Ok(
+            load_batch(&self.connection.lock(), batch_id)?
+                .and_then(|batch| batch.baseline_snapshot),
+        )
+    }
+
+    pub fn analyze_batch(
+        &self,
+        batch_id: Uuid,
+        policy: &CalibrationPolicy,
+    ) -> Result<BatchAnalysis, StorageError> {
+        let connection = self.connection.lock();
+        let batch = load_batch(&connection, batch_id)?
+            .ok_or_else(|| StorageError::InvalidData("batch does not exist".into()))?;
+        let candidate_members = load_member_evidence(&connection, &batch)?;
+        let mut historical = Vec::new();
+        if let Some(snapshot) = batch.baseline_snapshot.as_ref() {
+            for evidence_id in &snapshot.selected_batch_ids {
+                let evidence_batch = load_batch(&connection, *evidence_id)?.ok_or_else(|| {
+                    StorageError::InvalidData(
+                        "frozen baseline evidence is no longer available".into(),
+                    )
+                })?;
+                if evidence_batch.plan.mode != BatchMode::Full
+                    || evidence_batch.status != BatchStatus::Completed
+                    || evidence_batch.updated_at >= snapshot.baseline_as_of
+                {
+                    return Err(StorageError::InvalidData(
+                        "frozen baseline evidence no longer satisfies its cutoff".into(),
+                    ));
+                }
+                historical.push(CompletedBatchEvidence {
+                    batch_id: evidence_batch.id,
+                    finished_at: evidence_batch.updated_at,
+                    members: load_member_evidence(&connection, &evidence_batch)?,
+                });
+            }
+        }
+        analyze_matched_batch(
+            batch.plan.mode,
+            batch.id,
+            &candidate_members,
+            batch.baseline_snapshot.as_ref(),
+            &historical,
+            policy,
+        )
+        .map_err(|error| StorageError::InvalidData(error.to_string()))
     }
 
     pub fn get_batch(&self, batch_id: Uuid) -> Result<Option<ScanBatchRecord>, StorageError> {
@@ -3149,6 +3203,286 @@ fn validate_batch_immutable_identity(
     Ok(plan)
 }
 
+fn insert_batch_rows(
+    transaction: &rusqlite::Transaction<'_>,
+    batch_id: Uuid,
+    plan: &ScanBatchPlan,
+    members: &[BatchMemberSeed],
+    created_at: DateTime<Utc>,
+) -> Result<(), StorageError> {
+    let seed = i64::try_from(plan.seed)
+        .map_err(|_| StorageError::InvalidData("batch seed exceeds SQLite range".into()))?;
+    let planned_member_count = i64::try_from(members.len())
+        .map_err(|_| StorageError::InvalidData("batch member count exceeds SQLite range".into()))?;
+    let plan_json = serde_json::to_string(plan)?;
+    let mode_json = serde_json::to_string(&plan.mode)?;
+    let status_json = serde_json::to_string(&BatchStatus::Created)?;
+    let batch_id_text = batch_id.to_string();
+
+    transaction.execute(
+        "INSERT OR IGNORE INTO suite_versions(
+           suite_id,suite_version,content_sha256,scoring_rule_version
+         ) VALUES (?1,?2,?3,?4)",
+        params![
+            &plan.suite_id,
+            &plan.suite_version,
+            &plan.suite_content_sha256,
+            &plan.scoring_rule_version,
+        ],
+    )?;
+    let stored_suite: (String, String) = transaction.query_row(
+        "SELECT content_sha256,scoring_rule_version FROM suite_versions
+         WHERE suite_id=?1 AND suite_version=?2",
+        params![&plan.suite_id, &plan.suite_version],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if stored_suite
+        != (
+            plan.suite_content_sha256.clone(),
+            plan.scoring_rule_version.clone(),
+        )
+    {
+        return Err(StorageError::InvalidData(
+            "suite id/version is already bound to different content or scoring".into(),
+        ));
+    }
+
+    transaction.execute(
+        "INSERT INTO scan_batches(
+           id,plan_json,mode_json,suite_id,suite_version,content_sha256,
+           scoring_rule_version,seed,status_json,acknowledgement_hash,
+           acknowledgement_expires_at,planned_member_count,terminal_member_count,
+           cancel_requested,created_at,updated_at
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,0,0,?13,?13)",
+        params![
+            &batch_id_text,
+            &plan_json,
+            &mode_json,
+            &plan.suite_id,
+            &plan.suite_version,
+            &plan.suite_content_sha256,
+            &plan.scoring_rule_version,
+            seed,
+            &status_json,
+            &plan.acknowledgement_hash,
+            plan.cost_estimate
+                .initial_acknowledgement_expires_at
+                .to_rfc3339(),
+            planned_member_count,
+            created_at.to_rfc3339(),
+        ],
+    )?;
+
+    for (position, target) in plan.targets.iter().enumerate() {
+        let target_json = serde_json::to_string(&target.target)?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO targets(target_json) VALUES (?1)",
+            [&target_json],
+        )?;
+        transaction.execute(
+            "INSERT INTO scan_batch_targets(
+               batch_id,position,target_json,route_identity_json,
+               adapter_identity_json,execution_surface_json
+             ) VALUES (?1,?2,?3,?4,?5,?6)",
+            params![
+                &batch_id_text,
+                i64::try_from(position).map_err(|_| StorageError::InvalidData(
+                    "batch target position exceeds SQLite range".into()
+                ))?,
+                target_json,
+                serde_json::to_string(&target.route_identity)?,
+                serde_json::to_string(&target.execution_adapter_identity)?,
+                serde_json::to_string(&target.route_identity.execution_surface)?,
+            ],
+        )?;
+    }
+
+    let planned_json = serde_json::to_string(&BatchMemberStatus::Planned)?;
+    for member in members {
+        transaction.execute(
+            "INSERT INTO scan_batch_members(
+               batch_id,ordinal,target_position,repetition_index,run_id,
+               status_json,failure_kind_json,attempt_number,updated_at
+             ) VALUES (?1,?2,?3,?4,NULL,?5,NULL,0,?6)",
+            params![
+                &batch_id_text,
+                i64::from(member.ordinal),
+                i64::from(member.target_position),
+                i64::from(member.repetition_index),
+                &planned_json,
+                created_at.to_rfc3339(),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn load_valid_baseline_snapshot(
+    connection: &Connection,
+    batch_id: Uuid,
+) -> Result<Option<BaselineSnapshot>, StorageError> {
+    let rows = {
+        let mut statement = connection.prepare(
+            "SELECT baseline_as_of,snapshot_json,content_sha256,created_at
+             FROM baseline_snapshots WHERE candidate_batch_id=?1",
+        )?;
+        statement
+            .query_map([batch_id.to_string()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    if rows.len() != 1 {
+        return Err(StorageError::InvalidData(
+            "Full batch must have exactly one baseline snapshot".into(),
+        ));
+    }
+    let (baseline_as_of, snapshot_json, content_sha256, created_at) = &rows[0];
+    let snapshot: BaselineSnapshot = serde_json::from_str(snapshot_json)?;
+    snapshot
+        .validate()
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    let indexed_cutoff = DateTime::parse_from_rfc3339(baseline_as_of)
+        .map_err(StorageError::Time)?
+        .with_timezone(&Utc);
+    let indexed_created = DateTime::parse_from_rfc3339(created_at)
+        .map_err(StorageError::Time)?
+        .with_timezone(&Utc);
+    if snapshot.candidate_batch_id != batch_id
+        || snapshot.baseline_as_of != indexed_cutoff
+        || indexed_created != indexed_cutoff
+        || snapshot.content_sha256 != *content_sha256
+    {
+        return Err(StorageError::InvalidData(
+            "indexed baseline snapshot does not match immutable snapshot JSON".into(),
+        ));
+    }
+    Ok(Some(snapshot))
+}
+
+fn load_member_evidence(
+    connection: &Connection,
+    batch: &ScanBatchRecord,
+) -> Result<Vec<MemberEvidence>, StorageError> {
+    let mut evidence = Vec::with_capacity(batch.members.len());
+    for member in &batch.members {
+        let Some(run_id) = member.run_id else {
+            evidence.push(MemberEvidence {
+                member_ordinal: member.ordinal,
+                target_position: member.target_position,
+                status: member.status,
+                run_status: None,
+                score: None,
+                task_results: Vec::new(),
+                isolation_complete: false,
+            });
+            continue;
+        };
+        let run = {
+            let mut statement = connection.prepare(&format!("{RUN_SELECT_SQL} WHERE id=?1"))?;
+            statement
+                .query_row([run_id.to_string()], row_to_run)
+                .optional()?
+        };
+        let Some(run) = run else {
+            return Err(StorageError::InvalidData(
+                "batch member references a missing run".into(),
+            ));
+        };
+        let task_results = {
+            let mut statement = connection.prepare(
+                "SELECT run_id,task_id,category_json,outcome_json,score,failure_kind_json,
+                        duration_ms,answer_rel_path,detail
+                 FROM task_results WHERE run_id=?1 ORDER BY task_id ASC",
+            )?;
+            statement
+                .query_map([run_id.to_string()], row_to_task_result)?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let isolation_complete = match batch.plan.session_isolation_policy {
+            crate::SessionIsolationPolicy::MachineEnforcedFreshSessionAndWorkspacePerTask => batch
+                .plan
+                .targets
+                .get(usize::try_from(member.target_position).unwrap_or(usize::MAX))
+                .is_some_and(|target| {
+                    target.route_identity.execution_surface
+                        == crate::BatchExecutionSurface::AutomatedCli
+                }),
+            crate::SessionIsolationPolicy::UserAttestedFreshConversationPerTask => {
+                let rows = {
+                    let mut statement = connection.prepare(
+                        "SELECT task_id,policy_version,enforcement_json,user_attested
+                         FROM scan_batch_task_isolation
+                         WHERE batch_id=?1 AND member_ordinal=?2 AND run_id=?3
+                         ORDER BY task_id ASC",
+                    )?;
+                    statement
+                        .query_map(
+                            params![
+                                batch.id.to_string(),
+                                i64::from(member.ordinal),
+                                run_id.to_string(),
+                            ],
+                            |row| {
+                                Ok((
+                                    row.get::<_, String>(0)?,
+                                    row.get::<_, i64>(1)?,
+                                    row.get::<_, String>(2)?,
+                                    row.get::<_, i64>(3)?,
+                                ))
+                            },
+                        )?
+                        .collect::<Result<Vec<_>, _>>()?
+                };
+                let result_ids = task_results
+                    .iter()
+                    .map(|result| result.task_id.as_str())
+                    .collect::<BTreeSet<_>>();
+                rows.len() == task_results.len()
+                    && rows.len() == batch.plan.sealed_task_budgets.len()
+                    && rows
+                        .iter()
+                        .all(|(task_id, version, enforcement, attested)| {
+                            *version == i64::from(batch.plan.task_session_policy_version)
+                                && matches!(
+                                    serde_json::from_str::<IsolationEnforcement>(enforcement),
+                                    Ok(IsolationEnforcement::UserAttested)
+                                )
+                                && *attested == 1
+                                && result_ids.contains(task_id.as_str())
+                        })
+            }
+        };
+        evidence.push(MemberEvidence {
+            member_ordinal: member.ordinal,
+            target_position: member.target_position,
+            status: member.status,
+            run_status: Some(run.status),
+            score: run.score,
+            task_results: task_results
+                .into_iter()
+                .map(|result| TaskEvidence {
+                    task_id: result.task_id,
+                    category: result.category,
+                    outcome: result.outcome,
+                    score: result.score,
+                    failure_kind: result.failure_kind,
+                })
+                .collect(),
+            isolation_complete,
+        });
+    }
+    Ok(evidence)
+}
+
 fn load_batch(
     connection: &Connection,
     batch_id: Uuid,
@@ -3216,6 +3550,30 @@ fn load_batch(
         return Err(StorageError::InvalidData(
             "indexed batch identity does not match immutable plan JSON".into(),
         ));
+    }
+    let created_at = DateTime::parse_from_rfc3339(&row.created_at)
+        .map_err(StorageError::Time)?
+        .with_timezone(&Utc);
+    let snapshot = load_valid_baseline_snapshot(connection, batch_id)?;
+    match mode {
+        BatchMode::Full => {
+            let snapshot = snapshot.as_ref().ok_or_else(|| {
+                StorageError::InvalidData("Full batch is missing its baseline snapshot".into())
+            })?;
+            let identity = BatchAnalysisIdentity::from_plan(&plan)
+                .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+            if snapshot.baseline_as_of != created_at || snapshot.identity != identity {
+                return Err(StorageError::InvalidData(
+                    "Full batch baseline snapshot does not match its immutable plan".into(),
+                ));
+            }
+        }
+        BatchMode::QuickComparison | BatchMode::Standard if snapshot.is_some() => {
+            return Err(StorageError::InvalidData(
+                "Quick and Standard batches cannot carry regression snapshots".into(),
+            ));
+        }
+        BatchMode::QuickComparison | BatchMode::Standard => {}
     }
     let mut target_statement = connection.prepare(
         "SELECT position,target_json,route_identity_json,adapter_identity_json,
@@ -3289,13 +3647,12 @@ fn load_batch(
     Ok(Some(ScanBatchRecord {
         id: batch_id,
         plan,
+        baseline_snapshot: snapshot,
         status,
         cancel_requested: row.cancel_requested != 0,
         planned_member_count,
         terminal_member_count,
-        created_at: DateTime::parse_from_rfc3339(&row.created_at)
-            .map_err(StorageError::Time)?
-            .with_timezone(&Utc),
+        created_at,
         updated_at: DateTime::parse_from_rfc3339(&row.updated_at)
             .map_err(StorageError::Time)?
             .with_timezone(&Utc),
