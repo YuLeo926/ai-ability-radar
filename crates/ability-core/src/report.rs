@@ -1,7 +1,10 @@
 use crate::{
-    Category, FailureKind, ModelSource, ModelVerification, RunRecord, RunStatus, ScoreSummary,
-    TargetKind, TaskOutcome, TaskResult, contains_forbidden_display_character,
-    grading::has_coherent_task_evidence, is_valid_reported_model, summarize_scores,
+    AdapterLaunchKind, BaselineExclusionReason, BatchAnalysis, BatchExecutionSurface, BatchMode,
+    BatchStatus, Category, ConfidenceInterval, DistributionSummary, FailureKind, MatchedTaskDelta,
+    ModelSource, ModelVerification, RegressionSignal, RunRecord, RunStatus, ScanBatchRecord,
+    ScoreSummary, SessionIsolationPolicy, TargetKind, TaskOutcome, TaskResult,
+    contains_forbidden_display_character, grading::has_coherent_task_evidence,
+    is_valid_reported_model, summarize_scores,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use regex::Regex;
@@ -13,6 +16,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub const PUBLIC_REPORT_SCHEMA_VERSION: u32 = 2;
+pub const PUBLIC_BATCH_REPORT_SCHEMA_VERSION: u32 = 1;
 pub const PUBLIC_INTERPRETATION_STATUS: &str = "not_evaluated";
 pub const PUBLIC_METHODOLOGY_STATEMENT: &str =
     "v0.2 不生成降智结论；仅展示本题包的客观结果，不是 IQ，也不代表模型退化。";
@@ -74,6 +78,93 @@ pub struct PublicMethodology {
     pub statement: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PublicBatchReport {
+    pub schema_version: u32,
+    pub report_id: Uuid,
+    pub generated_at: DateTime<Utc>,
+    pub cohort: PublicBatchCohort,
+    pub targets: Vec<PublicBatchTarget>,
+    pub analysis: PublicBatchAnalysis,
+    pub baseline: PublicBatchBaseline,
+    pub methodology: PublicMethodology,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PublicBatchCohort {
+    pub mode: BatchMode,
+    pub execution_surface: BatchExecutionSurface,
+    pub suite_id: String,
+    pub suite_version: String,
+    pub suite_content_sha256: String,
+    pub scoring_rule_version: String,
+    pub schedule_policy_version: u32,
+    pub task_session_policy_version: u32,
+    pub session_isolation_policy: SessionIsolationPolicy,
+    pub status: BatchStatus,
+    pub planned_member_count: u32,
+    pub terminal_member_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PublicBatchTarget {
+    pub target_position: u32,
+    pub kind: TargetKind,
+    pub model_or_route: String,
+    pub reasoning_effort: Option<String>,
+    pub model_source: ModelSource,
+    pub model_verification: ModelVerification,
+    pub provider_family: String,
+    pub launch_kind: AdapterLaunchKind,
+    pub public_adapter_version: Option<String>,
+    pub adapter_contract_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PublicBatchAnalysis {
+    pub analysis_version: u32,
+    pub calibration_policy_version: u32,
+    pub baseline_snapshot_sha256: Option<String>,
+    pub signal: RegressionSignal,
+    pub targets: Vec<PublicBatchTargetAnalysis>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PublicBatchTargetAnalysis {
+    pub target_position: u32,
+    pub signal: RegressionSignal,
+    pub candidate: Option<DistributionSummary>,
+    pub baseline: Option<DistributionSummary>,
+    pub baseline_batch_count: u32,
+    pub baseline_utc_day_count: u32,
+    pub candidate_member_count: u32,
+    pub delta: Option<f64>,
+    pub absolute_drop: Option<f64>,
+    pub relative_drop: Option<f64>,
+    pub delta_confidence_interval: Option<ConfidenceInterval>,
+    pub category_candidate: BTreeMap<Category, DistributionSummary>,
+    pub category_baseline: BTreeMap<Category, DistributionSummary>,
+    pub matched_task_deltas: Vec<MatchedTaskDelta>,
+    pub excluded_candidate_member_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PublicBatchBaseline {
+    pub available: bool,
+    pub baseline_as_of: Option<DateTime<Utc>>,
+    pub history_window_days: Option<u32>,
+    pub maximum_historical_batches: Option<u32>,
+    pub selected_batch_count: u32,
+    pub exclusion_counts: BTreeMap<String, u32>,
+    pub content_sha256: Option<String>,
+}
+
 #[derive(Debug, Error)]
 pub enum ReportError {
     #[error("report contains sensitive-looking text in {0}")]
@@ -86,6 +177,341 @@ pub enum ReportError {
     DurationOverflow,
     #[error("report serialization failed")]
     Json(#[from] serde_json::Error),
+}
+
+pub fn build_public_batch_report(
+    batch: &ScanBatchRecord,
+    analysis: &BatchAnalysis,
+) -> Result<PublicBatchReport, ReportError> {
+    if batch.status != BatchStatus::Completed
+        || batch.terminal_member_count != batch.planned_member_count
+        || analysis.candidate_batch_id != batch.id
+        || (!analysis.targets.is_empty() && analysis.targets.len() != batch.plan.targets.len())
+    {
+        return Err(ReportError::NotCompleted);
+    }
+    let execution_surface = batch
+        .plan
+        .targets
+        .first()
+        .map(|target| target.route_identity.execution_surface)
+        .ok_or(ReportError::InvalidData("targets"))?;
+    if batch.plan.targets.iter().any(|target| {
+        target.route_identity.execution_surface != execution_surface
+            || target.execution_adapter_identity.execution_surface != execution_surface
+    }) {
+        return Err(ReportError::InvalidData("executionSurface"));
+    }
+
+    let targets = batch
+        .plan
+        .targets
+        .iter()
+        .enumerate()
+        .map(|(position, target)| {
+            Ok(PublicBatchTarget {
+                target_position: u32::try_from(position)
+                    .map_err(|_| ReportError::InvalidData("targetPosition"))?,
+                kind: target.target.kind,
+                model_or_route: required_reported_model(&target.route_identity.model_or_route)?,
+                reasoning_effort: optional_reasoning_effort(
+                    target.route_identity.reasoning_effort.as_deref(),
+                )?,
+                model_source: target.target.model_source,
+                model_verification: target.target.model_verification,
+                provider_family: required_text(
+                    &target.execution_adapter_identity.provider_family,
+                    "providerFamily",
+                    32,
+                )?,
+                launch_kind: target.execution_adapter_identity.launch_kind,
+                public_adapter_version: optional_text(
+                    target.execution_adapter_identity.public_version.as_deref(),
+                    "publicAdapterVersion",
+                    160,
+                )?,
+                adapter_contract_version: required_text(
+                    &target.execution_adapter_identity.adapter_contract_version,
+                    "adapterContractVersion",
+                    64,
+                )?,
+            })
+        })
+        .collect::<Result<Vec<_>, ReportError>>()?;
+
+    let analysis_targets = if analysis.targets.is_empty() {
+        batch
+            .plan
+            .targets
+            .iter()
+            .enumerate()
+            .map(|(position, _)| {
+                let target_position = u32::try_from(position).unwrap_or(u32::MAX);
+                let candidate_member_count = u32::try_from(
+                    batch
+                        .members
+                        .iter()
+                        .filter(|member| {
+                            member.target_position == target_position
+                                && member.status == crate::BatchMemberStatus::Completed
+                        })
+                        .count(),
+                )
+                .unwrap_or(u32::MAX);
+                let excluded_candidate_member_count = u32::try_from(
+                    batch
+                        .members
+                        .iter()
+                        .filter(|member| {
+                            member.target_position == target_position
+                                && member.status != crate::BatchMemberStatus::Completed
+                        })
+                        .count(),
+                )
+                .unwrap_or(u32::MAX);
+                PublicBatchTargetAnalysis {
+                    target_position,
+                    signal: RegressionSignal::InsufficientData,
+                    candidate: None,
+                    baseline: None,
+                    baseline_batch_count: 0,
+                    baseline_utc_day_count: 0,
+                    candidate_member_count,
+                    delta: None,
+                    absolute_drop: None,
+                    relative_drop: None,
+                    delta_confidence_interval: None,
+                    category_candidate: BTreeMap::new(),
+                    category_baseline: BTreeMap::new(),
+                    matched_task_deltas: Vec::new(),
+                    excluded_candidate_member_count,
+                }
+            })
+            .collect()
+    } else {
+        analysis
+            .targets
+            .iter()
+            .map(|target| PublicBatchTargetAnalysis {
+                target_position: target.target_position,
+                signal: target.signal,
+                candidate: target.candidate.clone(),
+                baseline: target.baseline.clone(),
+                baseline_batch_count: target.baseline_batch_count,
+                baseline_utc_day_count: target.baseline_utc_day_count,
+                candidate_member_count: target.candidate_member_count,
+                delta: target.delta,
+                absolute_drop: target.absolute_drop,
+                relative_drop: target.relative_drop,
+                delta_confidence_interval: target.delta_confidence_interval.clone(),
+                category_candidate: target.category_candidate.clone(),
+                category_baseline: target.category_baseline.clone(),
+                matched_task_deltas: target.matched_task_deltas.clone(),
+                excluded_candidate_member_count: u32::try_from(
+                    target.excluded_candidate_member_ordinals.len(),
+                )
+                .unwrap_or(u32::MAX),
+            })
+            .collect()
+    };
+    let baseline = match &batch.baseline_snapshot {
+        Some(snapshot) => {
+            if analysis.baseline_snapshot_sha256.as_deref() != Some(&snapshot.content_sha256) {
+                return Err(ReportError::InvalidData("baselineSnapshotSha256"));
+            }
+            let mut exclusion_counts = BTreeMap::new();
+            for exclusion in &snapshot.exclusions {
+                *exclusion_counts
+                    .entry(baseline_exclusion_name(exclusion.reason).into())
+                    .or_insert(0_u32) += 1;
+            }
+            PublicBatchBaseline {
+                available: true,
+                baseline_as_of: Some(snapshot.baseline_as_of),
+                history_window_days: Some(snapshot.history_window_days),
+                maximum_historical_batches: Some(snapshot.maximum_historical_batches),
+                selected_batch_count: u32::try_from(snapshot.selected_batch_ids.len())
+                    .map_err(|_| ReportError::InvalidData("selectedBatchCount"))?,
+                exclusion_counts,
+                content_sha256: Some(snapshot.content_sha256.clone()),
+            }
+        }
+        None => PublicBatchBaseline {
+            available: false,
+            baseline_as_of: None,
+            history_window_days: None,
+            maximum_historical_batches: None,
+            selected_batch_count: 0,
+            exclusion_counts: BTreeMap::new(),
+            content_sha256: None,
+        },
+    };
+
+    let report = PublicBatchReport {
+        schema_version: PUBLIC_BATCH_REPORT_SCHEMA_VERSION,
+        report_id: Uuid::new_v4(),
+        generated_at: Utc::now(),
+        cohort: PublicBatchCohort {
+            mode: batch.plan.mode,
+            execution_surface,
+            suite_id: required_text(&batch.plan.suite_id, "suiteId", 160)?,
+            suite_version: required_text(&batch.plan.suite_version, "suiteVersion", 120)?,
+            suite_content_sha256: required_text(
+                &batch.plan.suite_content_sha256,
+                "suiteContentSha256",
+                64,
+            )?,
+            scoring_rule_version: required_text(
+                &batch.plan.scoring_rule_version,
+                "scoringRuleVersion",
+                120,
+            )?,
+            schedule_policy_version: batch.plan.schedule_policy_version,
+            task_session_policy_version: batch.plan.task_session_policy_version,
+            session_isolation_policy: batch.plan.session_isolation_policy,
+            status: batch.status,
+            planned_member_count: batch.planned_member_count,
+            terminal_member_count: batch.terminal_member_count,
+        },
+        targets,
+        analysis: PublicBatchAnalysis {
+            analysis_version: analysis.analysis_version,
+            calibration_policy_version: analysis.calibration_policy_version,
+            baseline_snapshot_sha256: analysis.baseline_snapshot_sha256.clone(),
+            signal: analysis.signal,
+            targets: analysis_targets,
+        },
+        baseline,
+        methodology: PublicMethodology {
+            interpretation_status: PUBLIC_INTERPRETATION_STATUS.into(),
+            statement: PUBLIC_METHODOLOGY_STATEMENT.into(),
+        },
+    };
+    validate_public_batch_report(&report)?;
+    Ok(report)
+}
+
+fn baseline_exclusion_name(reason: BaselineExclusionReason) -> &'static str {
+    match reason {
+        BaselineExclusionReason::CandidateBatch => "candidate_batch",
+        BaselineExclusionReason::DuplicateEvidenceId => "duplicate_evidence_id",
+        BaselineExclusionReason::NotCompletedFull => "not_completed_full",
+        BaselineExclusionReason::MissingOrInvalidSnapshot => "missing_or_invalid_snapshot",
+        BaselineExclusionReason::NotStrictlyBeforeCutoff => "not_strictly_before_cutoff",
+        BaselineExclusionReason::OutsideHistoryWindow => "outside_history_window",
+        BaselineExclusionReason::IncompatibleIdentity => "incompatible_identity",
+        BaselineExclusionReason::OlderBatchOnSameUtcDay => "older_batch_on_same_utc_day",
+        BaselineExclusionReason::BeyondMaximumHistoricalBatches => {
+            "beyond_maximum_historical_batches"
+        }
+    }
+}
+
+pub fn validate_public_batch_report(report: &PublicBatchReport) -> Result<(), ReportError> {
+    if report.schema_version != PUBLIC_BATCH_REPORT_SCHEMA_VERSION || report.report_id.is_nil() {
+        return Err(ReportError::InvalidData("schemaVersion"));
+    }
+    if report.cohort.status != BatchStatus::Completed
+        || report.cohort.planned_member_count == 0
+        || report.cohort.planned_member_count != report.cohort.terminal_member_count
+        || report.targets.is_empty()
+        || report.targets.len() != report.analysis.targets.len()
+        || report.cohort.schedule_policy_version == 0
+        || report.cohort.task_session_policy_version == 0
+    {
+        return Err(ReportError::InvalidData("cohort"));
+    }
+    validate_text(&report.cohort.suite_id, "suiteId", 160, true)?;
+    validate_text(&report.cohort.suite_version, "suiteVersion", 120, true)?;
+    validate_text(
+        &report.cohort.suite_content_sha256,
+        "suiteContentSha256",
+        64,
+        true,
+    )?;
+    validate_text(
+        &report.cohort.scoring_rule_version,
+        "scoringRuleVersion",
+        120,
+        true,
+    )?;
+    if !is_lower_hex_sha256(&report.cohort.suite_content_sha256) {
+        return Err(ReportError::InvalidData("suiteContentSha256"));
+    }
+    for (position, target) in report.targets.iter().enumerate() {
+        if target.target_position != u32::try_from(position).unwrap_or(u32::MAX) {
+            return Err(ReportError::InvalidData("targetPosition"));
+        }
+        validate_reported_model(&target.model_or_route)?;
+        validate_optional_reasoning_effort(target.reasoning_effort.as_deref())?;
+        validate_model_provenance(target.model_source, target.model_verification)?;
+        validate_text(&target.provider_family, "providerFamily", 32, true)?;
+        validate_optional_text(
+            target.public_adapter_version.as_deref(),
+            "publicAdapterVersion",
+            160,
+        )?;
+        validate_text(
+            &target.adapter_contract_version,
+            "adapterContractVersion",
+            64,
+            true,
+        )?;
+    }
+    if report
+        .analysis
+        .baseline_snapshot_sha256
+        .as_deref()
+        .is_some_and(|hash| !is_lower_hex_sha256(hash))
+        || report
+            .baseline
+            .content_sha256
+            .as_deref()
+            .is_some_and(|hash| !is_lower_hex_sha256(hash))
+    {
+        return Err(ReportError::InvalidData("baselineSnapshotSha256"));
+    }
+    if report.analysis.baseline_snapshot_sha256 != report.baseline.content_sha256 {
+        return Err(ReportError::InvalidData("baselineSnapshotSha256"));
+    }
+    let baseline_shape_is_valid = if report.baseline.available {
+        report.baseline.baseline_as_of.is_some()
+            && report
+                .baseline
+                .history_window_days
+                .is_some_and(|value| value > 0)
+            && report
+                .baseline
+                .maximum_historical_batches
+                .is_some_and(|value| value > 0)
+            && report.baseline.content_sha256.is_some()
+    } else {
+        report.baseline.baseline_as_of.is_none()
+            && report.baseline.history_window_days.is_none()
+            && report.baseline.maximum_historical_batches.is_none()
+            && report.baseline.selected_batch_count == 0
+            && report.baseline.exclusion_counts.is_empty()
+            && report.baseline.content_sha256.is_none()
+    };
+    if !baseline_shape_is_valid
+        || report.methodology.interpretation_status != PUBLIC_INTERPRETATION_STATUS
+        || report.methodology.statement != PUBLIC_METHODOLOGY_STATEMENT
+    {
+        return Err(ReportError::InvalidData("baseline"));
+    }
+    for (position, target) in report.analysis.targets.iter().enumerate() {
+        if target.target_position != u32::try_from(position).unwrap_or(u32::MAX)
+            || target.candidate_member_count > report.cohort.planned_member_count
+            || !target
+                .matched_task_deltas
+                .iter()
+                .all(|item| !item.task_id.is_empty() && item.task_id.len() <= 128)
+        {
+            return Err(ReportError::InvalidData("analysisTargets"));
+        }
+    }
+    serde_json::to_vec(report)?;
+    Ok(())
 }
 
 pub fn build_public_report(

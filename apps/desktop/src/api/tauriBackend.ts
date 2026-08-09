@@ -125,6 +125,10 @@ export const tauriBackend: Backend = {
       undefined,
       isSafeBatchRecordList,
     ),
+  exportPublicBatchReport: (batchId) =>
+    invoke<string | null>("export_public_batch_report", batchIdInput(batchId)),
+  deleteBatch: (batchId, deleteOwnedRuns) =>
+    invoke<boolean>("delete_batch", { input: { batchId, deleteOwnedRuns } }),
   authorizeBatchExecution: (input) =>
     invokeValidated<ScanExecutionAuthorization>(
       "authorize_batch_execution",

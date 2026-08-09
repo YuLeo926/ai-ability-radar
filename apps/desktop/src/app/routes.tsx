@@ -8,6 +8,7 @@ import { NotFoundPage } from "../pages/NotFoundPage";
 import { ResultPage } from "../pages/ResultPage";
 import { BatchRunPage } from "../pages/BatchRunPage";
 import { BatchSetupPage } from "../pages/BatchSetupPage";
+import { BatchResultPage } from "../pages/BatchResultPage";
 
 export function AppRoutes() {
   return (
@@ -22,7 +23,7 @@ export function AppRoutes() {
         <Route path="batch/:batchId" element={<BatchRunPage />} />
         <Route
           path="batch/:batchId/result"
-          element={<BatchRunPage resultMode />}
+          element={<BatchResultPage />}
         />
         <Route path="*" element={<NotFoundPage />} />
       </Route>

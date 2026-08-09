@@ -254,6 +254,7 @@ export interface Backend {
   listRuns(): Promise<RunRecord[]>;
   getRunDetail(runId: string): Promise<RunDetail | null>;
   exportPublicReport(runId: string): Promise<string | null>;
+  exportPublicBatchReport(batchId: string): Promise<string | null>;
   deleteRawArtifacts(runId: string): Promise<void>;
   deleteRun(runId: string): Promise<boolean>;
   deleteTargetHistory(
@@ -270,6 +271,7 @@ export interface Backend {
   getBatch(batchId: string): Promise<ScanBatchRecord | null>;
   getBatchAnalysis(batchId: string): Promise<BatchAnalysis>;
   listBatches(): Promise<ScanBatchRecord[]>;
+  deleteBatch(batchId: string, deleteOwnedRuns: boolean): Promise<boolean>;
   authorizeBatchExecution(
     input: AuthorizeBatchExecutionInput,
   ): Promise<ScanExecutionAuthorization>;
@@ -302,6 +304,8 @@ type BatchBackendMethods = Pick<
   | "getBatch"
   | "getBatchAnalysis"
   | "listBatches"
+  | "exportPublicBatchReport"
+  | "deleteBatch"
   | "authorizeBatchExecution"
   | "estimateBatchRetry"
   | "authorizeBatchRetry"
@@ -325,6 +329,8 @@ export const unsupportedBatchBackend: BatchBackendMethods = {
   getBatch: unsupportedBatchCall,
   getBatchAnalysis: unsupportedBatchCall,
   listBatches: unsupportedBatchCall,
+  exportPublicBatchReport: unsupportedBatchCall,
+  deleteBatch: unsupportedBatchCall,
   authorizeBatchExecution: unsupportedBatchCall,
   estimateBatchRetry: unsupportedBatchCall,
   authorizeBatchRetry: unsupportedBatchCall,

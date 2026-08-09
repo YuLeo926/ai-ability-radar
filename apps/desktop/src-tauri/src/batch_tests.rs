@@ -874,3 +874,34 @@ fn retry_authorization_binds_failure_budget_attempt_and_expiry() {
     assert_eq!(resumed.members[0].ordinal, 0);
     assert_eq!(resumed.members[0].attempt_number, 1);
 }
+
+#[test]
+fn active_batch_delete_is_rejected() {
+    let directory = tempdir().unwrap();
+    let repository = RunRepository::open(&directory.path().join("ability.db")).unwrap();
+    let client_pack = pack("client-quick-v1");
+    let cli_pack = pack("cli-quick-v1");
+    let context = context(&repository, &client_pack, &cli_pack);
+    let created = create_batch(&context, guided_plan());
+    authorize_batch_execution_at(
+        &context,
+        AuthorizeBatchExecutionInput {
+            batch_id: created.id,
+            acknowledgement_hash: created.plan.acknowledgement_hash.clone(),
+        },
+        issued_at() + Duration::seconds(2),
+    )
+    .unwrap();
+    start_batch_at(
+        &context,
+        BatchIdInput {
+            batch_id: created.id,
+        },
+        issued_at() + Duration::seconds(3),
+    )
+    .unwrap();
+
+    assert!(repository.unlink_batch(created.id).is_err());
+    assert!(repository.delete_batch(created.id).is_err());
+    assert!(repository.get_batch(created.id).unwrap().is_some());
+}

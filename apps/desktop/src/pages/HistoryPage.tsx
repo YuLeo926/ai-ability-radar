@@ -12,6 +12,7 @@ import type {
 import { formatReasoningEffort } from "../domain/reasoningEffort";
 import { formatModelProvenance } from "../domain/modelProvenance";
 import { formatReportedModel } from "../domain/reportedModel";
+import type { ScanBatchRecord, ScanBatchTarget } from "../domain/batch";
 import "./ResultsHistory.css";
 
 const targetLabels: Record<TargetKind, string> = {
@@ -24,7 +25,7 @@ const targetLabels: Record<TargetKind, string> = {
 type HistoryState =
   | { kind: "loading" }
   | { kind: "error" }
-  | { kind: "ready"; runs: RunRecord[] };
+  | { kind: "ready"; runs: RunRecord[]; batches: ScanBatchRecord[] };
 
 interface HistoryGroup {
   key: string;
@@ -745,6 +746,139 @@ function HistorySeries({
   );
 }
 
+function batchSourceLabel(target: ScanBatchTarget): string {
+  switch (target.target.modelSource) {
+    case "windows_accessibility":
+      return "界面可见模型";
+    case "cli_requested":
+      return "请求模型";
+    case "default_route":
+      return "提供方默认路由";
+    case "manual":
+      return "用户确认模型";
+    case "cli_reported":
+      return "CLI 报告模型";
+    case "legacy_unknown":
+      return "来源未确认";
+  }
+}
+
+const batchStatusLabels: Record<ScanBatchRecord["status"], string> = {
+  created: "待开始",
+  running: "运行中",
+  paused: "已暂停",
+  completed: "已完成",
+  cancelled: "已取消",
+  interrupted: "已中断",
+};
+
+const batchModeLabels: Record<ScanBatchRecord["plan"]["mode"], string> = {
+  quick_comparison: "轻量对比",
+  standard: "标准扫描",
+  full: "完整基线扫描",
+};
+
+function BatchHistoryCard({
+  batch,
+  onDeleted,
+}: {
+  batch: ScanBatchRecord;
+  onDeleted: () => void;
+}) {
+  const backend = useBackend();
+  const [confirming, setConfirming] = useState(false);
+  const [deleteOwnedRuns, setDeleteOwnedRuns] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const active = batch.status === "running"
+    || batch.members.some((member) => ["reserved", "launching", "running"].includes(member.status));
+  const surface = batch.plan.costEstimate.executionSurface;
+
+  async function removeBatch() {
+    if (busy || active) return;
+    setBusy(true);
+    setError("");
+    try {
+      const removed = await backend.deleteBatch(batch.id, deleteOwnedRuns);
+      if (!removed) throw new Error("batch was not removed");
+      onDeleted();
+    } catch {
+      setBusy(false);
+      setError("无法安全删除这次批次；记录仍保留，请重启应用后重试。");
+    }
+  }
+
+  return (
+    <article aria-label={`${surface === "guided_client" ? "客户端" : "CLI"}批次，${batchStatusLabels[batch.status]}`} className="history-batch-card">
+      <header>
+        <div><span className="history-batch-code">{batchModeLabels[batch.plan.mode]}</span><h3>{batch.plan.targets.map((target) => targetLabels[target.target.kind]).join(" × ")}</h3></div>
+        <span className={`history-batch-status status-${batch.status}`}>{batchStatusLabels[batch.status]}</span>
+      </header>
+      <dl className="history-batch-facts">
+        <div><dt>进度</dt><dd>{batch.terminalMemberCount} / {batch.plannedMemberCount}</dd></div>
+        <div><dt>题包</dt><dd>{batch.plan.suiteId} · {batch.plan.suiteVersion}</dd></div>
+        <div><dt>更新时间</dt><dd>{new Date(batch.updatedAt).toLocaleString()}</dd></div>
+      </dl>
+      <ul className="history-batch-targets">
+        {batch.plan.targets.map((target, position) => (
+          <li key={`${target.target.kind}-${position}`}><span>T{position + 1}</span><strong>{formatReportedModel(target.target.kind, target.target.reportedModel)}</strong><small>{batchSourceLabel(target)}</small></li>
+        ))}
+      </ul>
+      <div className="history-batch-actions">
+        <Link className="evidence-button" to={`/batch/${batch.id}/result`}>查看证据矩阵</Link>
+        <button className="evidence-button subtle" disabled={active} onClick={() => setConfirming(true)} type="button">{active ? "运行中不可删除" : "管理此批次"}</button>
+      </div>
+      {confirming ? (
+        <div aria-label="确认删除批次" className="history-batch-delete" role="group">
+          <strong>从本机历史中移除这次批次？</strong>
+          <p>默认只移除批次视图，批次关联的单次运行仍会保留在下方历史中。</p>
+          <label><input checked={deleteOwnedRuns} onChange={(event) => setDeleteOwnedRuns(event.target.checked)} type="checkbox" /><span><strong>同时删除该批次创建的单次运行</strong><small>也会删除这些运行的原始回答、日志和本地工作区；操作采用可恢复隔离流程。</small></span></label>
+          <div><button className="evidence-button danger" disabled={busy} onClick={() => void removeBatch()} type="button">{busy ? "正在处理…" : deleteOwnedRuns ? "删除批次及其单次运行" : "仅移除批次视图"}</button><button className="evidence-button subtle" disabled={busy} onClick={() => { setConfirming(false); setDeleteOwnedRuns(false); setError(""); }} type="button">取消</button></div>
+          {error ? <p role="alert">{error}</p> : null}
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
+function BatchHistory({
+  batches,
+  onDeleted,
+}: {
+  batches: ScanBatchRecord[];
+  onDeleted: () => void;
+}) {
+  if (batches.length === 0) return null;
+  const cohorts = [
+    {
+      surface: "guided_client" as const,
+      title: "客户端批次",
+      description: "依赖逐题新对话确认；不与 CLI 自动执行结果合并比较。",
+    },
+    {
+      surface: "automated_cli" as const,
+      title: "CLI 批次",
+      description: "使用机器强制隔离的会话和工作区；不与客户端手动结果合并比较。",
+    },
+  ];
+  return (
+    <section aria-labelledby="batch-history-title" className="history-batch-section">
+      <header><p className="eyebrow">批次证据 · 执行面严格分组</p><h2 id="batch-history-title">批次扫描历史</h2><p>这两组的执行方法不同，因此分开呈现、分开形成基线。</p></header>
+      <div className="history-batch-cohorts">
+        {cohorts.map((cohort) => {
+          const records = batches.filter((batch) => batch.plan.costEstimate.executionSurface === cohort.surface);
+          return (
+            <section aria-labelledby={`batch-cohort-${cohort.surface}`} className="history-batch-cohort" key={cohort.surface}>
+              <header><div><span>{cohort.surface === "guided_client" ? "CLIENT" : "CLI"}</span><h3 id={`batch-cohort-${cohort.surface}`}>{cohort.title}</h3></div><p>{cohort.description}</p></header>
+              {records.length ? <div className="history-batch-grid">{records.map((batch) => <BatchHistoryCard batch={batch} key={batch.id} onDeleted={onDeleted} />)}</div> : <p className="history-batch-empty">这一执行面还没有批次记录。</p>}
+            </section>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 export function HistoryPage() {
   const backend = useBackend();
   const t = useT();
@@ -755,12 +889,17 @@ export function HistoryPage() {
     let current = true;
     setState({ kind: "loading" });
     void Promise.resolve()
-      .then(() => backend.listRuns())
-      .then((runs) => {
+      .then(() => Promise.all([
+        backend.listRuns(),
+        typeof backend.listBatches === "function"
+          ? backend.listBatches().catch(() => [] as ScanBatchRecord[])
+          : Promise.resolve([] as ScanBatchRecord[]),
+      ]))
+      .then(([runs, batches]) => {
         if (!current) return;
         setState(
-          isSafeRunRecordList(runs)
-            ? { kind: "ready", runs }
+          isSafeRunRecordList(runs) && Array.isArray(batches)
+            ? { kind: "ready", runs, batches }
             : { kind: "error" },
         );
       })
@@ -832,7 +971,7 @@ export function HistoryPage() {
     );
   }
 
-  if (groups.length === 0) {
+  if (groups.length === 0 && state.batches.length === 0) {
     return (
       <main
         className="evidence-page history-page"
@@ -874,6 +1013,11 @@ export function HistoryPage() {
       </header>
 
       <LocalDataControls />
+
+      <BatchHistory
+        batches={state.batches}
+        onDeleted={() => setAttempt((value) => value + 1)}
+      />
 
       <div className="history-series-list">
         {groups.map((group, index) => (

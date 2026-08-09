@@ -14,15 +14,16 @@ mod data_management_tests;
 use app_state::AppState;
 use batch_commands::{
     authorize_batch_execution, authorize_batch_retry, begin_guided_batch_member, cancel_batch,
-    create_acknowledged_batch, decline_guided_batch_attestation, estimate_batch,
+    create_acknowledged_batch, decline_guided_batch_attestation, delete_batch, estimate_batch,
     estimate_batch_retry, get_batch, get_batch_analysis, get_next_guided_member, list_batches,
     pause_batch, resume_batch, start_batch, submit_guided_batch_answer,
 };
 use commands::{
     cancel_run, delete_raw_artifacts, delete_run, delete_target_history, detect_client_selection,
-    export_full_backup, export_public_report, get_bootstrap, get_data_settings, get_run_detail,
-    interrupt_manual_run, list_runs, next_manual_step, resume_cli_run, resume_manual_run,
-    set_raw_retention, start_cli_run, start_manual_run, submit_manual_answer,
+    export_full_backup, export_public_batch_report, export_public_report, get_bootstrap,
+    get_data_settings, get_run_detail, interrupt_manual_run, list_runs, next_manual_step,
+    resume_cli_run, resume_manual_run, set_raw_retention, start_cli_run, start_manual_run,
+    submit_manual_answer,
 };
 use tauri::Manager;
 
@@ -42,6 +43,7 @@ macro_rules! command_inventory {
             list_runs,
             get_run_detail,
             export_public_report,
+            export_public_batch_report,
             delete_raw_artifacts,
             delete_run,
             delete_target_history,
@@ -53,6 +55,7 @@ macro_rules! command_inventory {
             get_batch,
             get_batch_analysis,
             list_batches,
+            delete_batch,
             authorize_batch_execution,
             estimate_batch_retry,
             authorize_batch_retry,
@@ -121,6 +124,7 @@ mod tests {
                 "list_runs",
                 "get_run_detail",
                 "export_public_report",
+                "export_public_batch_report",
                 "delete_raw_artifacts",
                 "delete_run",
                 "delete_target_history",
@@ -132,6 +136,7 @@ mod tests {
                 "get_batch",
                 "get_batch_analysis",
                 "list_batches",
+                "delete_batch",
                 "authorize_batch_execution",
                 "estimate_batch_retry",
                 "authorize_batch_retry",

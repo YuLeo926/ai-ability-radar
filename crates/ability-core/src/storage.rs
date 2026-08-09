@@ -109,6 +109,34 @@ pub struct ScanBatchRecord {
     pub members: Vec<ScanBatchMemberRecord>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanDeletionPhase {
+    IntentRecorded,
+    ArtifactsQuarantined,
+    DatabaseCommitted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ScanDeletionIntent {
+    pub id: Uuid,
+    pub batch_id: Uuid,
+    pub run_id: Uuid,
+    pub quarantine_token: Uuid,
+    pub target: TargetKind,
+    pub phase: ScanDeletionPhase,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ScanDeletionIntentPayload {
+    target: TargetKind,
+    phase: ScanDeletionPhase,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BatchReservation {
@@ -2186,11 +2214,18 @@ impl RunRepository {
             transaction.commit()?;
             return Ok(false);
         }
+        let batch = load_batch(&transaction, batch_id)?
+            .ok_or_else(|| StorageError::InvalidData("batch does not exist".into()))?;
+        reject_active_batch_delete(&batch)?;
         if owned_runs != 0 {
             return Err(StorageError::InvalidData(
                 "batch with owned runs requires the recoverable data-lifecycle delete path".into(),
             ));
         }
+        transaction.execute(
+            "DELETE FROM scan_batch_members WHERE batch_id=?1",
+            [batch_id.to_string()],
+        )?;
         let changed = transaction.execute(
             "DELETE FROM scan_batches WHERE id=?1",
             [batch_id.to_string()],
@@ -2199,6 +2234,198 @@ impl RunRepository {
         transaction.commit()?;
         checkpoint_after_delete(&connection)?;
         Ok(changed == 1)
+    }
+
+    pub fn unlink_batch(&self, batch_id: Uuid) -> Result<bool, StorageError> {
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(batch) = load_batch(&transaction, batch_id)? else {
+            transaction.commit()?;
+            return Ok(false);
+        };
+        reject_active_batch_delete(&batch)?;
+        transaction.execute(
+            "UPDATE scan_batch_members SET run_id=NULL WHERE batch_id=?1",
+            [batch_id.to_string()],
+        )?;
+        transaction.execute(
+            "DELETE FROM scan_batch_members WHERE batch_id=?1",
+            [batch_id.to_string()],
+        )?;
+        let changed = transaction.execute(
+            "DELETE FROM scan_batches WHERE id=?1",
+            [batch_id.to_string()],
+        )?;
+        clean_orphan_identities(&transaction)?;
+        transaction.commit()?;
+        checkpoint_after_delete(&connection)?;
+        Ok(changed == 1)
+    }
+
+    pub fn delete_batch_with_owned_runs(
+        &self,
+        batch_id: Uuid,
+        expected_run_ids: &[Uuid],
+    ) -> Result<bool, StorageError> {
+        let mut expected = expected_run_ids.to_vec();
+        expected.sort_unstable();
+        if expected.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(StorageError::InvalidData(
+                "batch deletion run snapshot contains duplicates".into(),
+            ));
+        }
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(batch) = load_batch(&transaction, batch_id)? else {
+            transaction.commit()?;
+            return Ok(false);
+        };
+        reject_active_batch_delete(&batch)?;
+        let mut actual = batch
+            .members
+            .iter()
+            .filter_map(|member| member.run_id)
+            .collect::<Vec<_>>();
+        actual.sort_unstable();
+        if actual != expected {
+            return Err(StorageError::InvalidData(
+                "batch deletion run snapshot changed".into(),
+            ));
+        }
+        transaction.execute(
+            "DELETE FROM scan_batch_members WHERE batch_id=?1",
+            [batch_id.to_string()],
+        )?;
+        transaction.execute(
+            "DELETE FROM scan_batches WHERE id=?1",
+            [batch_id.to_string()],
+        )?;
+        for run_id in &expected {
+            let Some(status) = run_status_in_transaction(&transaction, *run_id)? else {
+                return Err(StorageError::RunNotFound(*run_id));
+            };
+            reject_active_delete(status)?;
+            if transaction.execute("DELETE FROM runs WHERE id=?1", [run_id.to_string()])? != 1 {
+                return Err(StorageError::RunNotFound(*run_id));
+            }
+        }
+        clean_orphan_identities(&transaction)?;
+        transaction.commit()?;
+        checkpoint_after_delete(&connection)?;
+        Ok(true)
+    }
+
+    pub fn insert_scan_deletion_intent(
+        &self,
+        intent: &ScanDeletionIntent,
+    ) -> Result<(), StorageError> {
+        let connection = self.connection.lock();
+        connection.execute(
+            "INSERT INTO scan_deletion_intents(
+                id,batch_id,run_id,quarantine_token,phase_json,created_at,updated_at
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                intent.id.to_string(),
+                intent.batch_id.to_string(),
+                intent.run_id.to_string(),
+                intent.quarantine_token.to_string(),
+                serde_json::to_string(&ScanDeletionIntentPayload {
+                    target: intent.target,
+                    phase: intent.phase,
+                })?,
+                intent.created_at.to_rfc3339(),
+                intent.updated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_scan_deletion_intent_phase(
+        &self,
+        id: Uuid,
+        phase: ScanDeletionPhase,
+        now: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        let connection = self.connection.lock();
+        let payload_json: String = connection
+            .query_row(
+                "SELECT phase_json FROM scan_deletion_intents WHERE id=?1",
+                [id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                StorageError::InvalidData("scan deletion intent does not exist".into())
+            })?;
+        let mut payload: ScanDeletionIntentPayload = serde_json::from_str(&payload_json)?;
+        payload.phase = phase;
+        let changed = connection.execute(
+            "UPDATE scan_deletion_intents SET phase_json=?2,updated_at=?3 WHERE id=?1",
+            params![
+                id.to_string(),
+                serde_json::to_string(&payload)?,
+                now.to_rfc3339(),
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::InvalidData(
+                "scan deletion intent does not exist".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn list_scan_deletion_intents(&self) -> Result<Vec<ScanDeletionIntent>, StorageError> {
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(
+            "SELECT id,batch_id,run_id,quarantine_token,phase_json,created_at,updated_at
+             FROM scan_deletion_intents ORDER BY created_at ASC,id ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })?;
+        let mut intents = Vec::new();
+        for row in rows {
+            let (id, batch_id, run_id, token, phase, created_at, updated_at) = row?;
+            let payload: ScanDeletionIntentPayload = serde_json::from_str(&phase)?;
+            intents.push(ScanDeletionIntent {
+                id: parse_uuid(id, "scan deletion intent id")?,
+                batch_id: parse_uuid(batch_id, "scan deletion batch id")?,
+                run_id: parse_uuid(
+                    run_id.ok_or_else(|| {
+                        StorageError::InvalidData("scan deletion run id is missing".into())
+                    })?,
+                    "scan deletion run id",
+                )?,
+                quarantine_token: parse_uuid(
+                    token.ok_or_else(|| {
+                        StorageError::InvalidData("scan deletion token is missing".into())
+                    })?,
+                    "scan deletion token",
+                )?,
+                target: payload.target,
+                phase: payload.phase,
+                created_at: DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&Utc),
+                updated_at: DateTime::parse_from_rfc3339(&updated_at)?.with_timezone(&Utc),
+            });
+        }
+        Ok(intents)
+    }
+
+    pub fn delete_scan_deletion_intent(&self, id: Uuid) -> Result<bool, StorageError> {
+        let connection = self.connection.lock();
+        Ok(connection.execute(
+            "DELETE FROM scan_deletion_intents WHERE id=?1",
+            [id.to_string()],
+        )? == 1)
     }
 
     pub fn clear_artifact_references(&self, run_id: Uuid) -> Result<usize, StorageError> {
@@ -3716,6 +3943,23 @@ fn reject_active_delete(status: RunStatus) -> Result<(), StorageError> {
     } else {
         Ok(())
     }
+}
+
+fn reject_active_batch_delete(batch: &ScanBatchRecord) -> Result<(), StorageError> {
+    if batch.status == BatchStatus::Running
+        || batch.members.iter().any(|member| member.status.is_active())
+    {
+        Err(StorageError::InvalidData(
+            "active batch cannot be deleted".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn parse_uuid(value: String, field: &str) -> Result<Uuid, StorageError> {
+    Uuid::parse_str(&value)
+        .map_err(|_| StorageError::InvalidData(format!("stored {field} is invalid")))
 }
 
 fn raw_retention_days_from(connection: &Connection) -> Result<Option<u32>, StorageError> {

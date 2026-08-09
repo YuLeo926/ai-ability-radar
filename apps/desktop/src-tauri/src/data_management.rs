@@ -1,12 +1,14 @@
 use crate::app_state::RunOperationRegistry;
 use ability_core::{
-    canonical_windows_zip_name, ArtifactStore, ArtifactStoreError, RunRepository, StorageError,
+    canonical_windows_zip_name, ArtifactStore, ArtifactStoreError, BatchMemberStatus, BatchStatus,
+    RunRepository, RunStatus, ScanDeletionIntent, ScanDeletionPhase, StorageError,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum DataError {
@@ -41,6 +43,121 @@ pub(crate) fn prune_expired_artifacts(
         removed = removed.checked_add(1).ok_or(DataError::InvalidLayout)?;
     }
     Ok(removed)
+}
+
+pub(crate) fn delete_batch_data(
+    repository: &RunRepository,
+    store: &ArtifactStore,
+    operations: &RunOperationRegistry,
+    batch_id: Uuid,
+    delete_owned_runs: bool,
+    now: DateTime<Utc>,
+) -> Result<bool, DataError> {
+    if !delete_owned_runs {
+        return repository
+            .unlink_batch(batch_id)
+            .map_err(DataError::Storage);
+    }
+    let Some(batch) = repository.get_batch(batch_id)? else {
+        return Ok(false);
+    };
+    if batch.status == BatchStatus::Running
+        || batch.members.iter().any(|member| {
+            matches!(
+                member.status,
+                BatchMemberStatus::Reserved
+                    | BatchMemberStatus::Launching
+                    | BatchMemberStatus::Running
+            )
+        })
+    {
+        return Err(DataError::Busy);
+    }
+    let mut bindings = Vec::new();
+    for run_id in batch.members.iter().filter_map(|member| member.run_id) {
+        let run = repository
+            .get_run(run_id)?
+            .ok_or(StorageError::RunNotFound(run_id))?;
+        if run.status == RunStatus::Running {
+            return Err(DataError::Busy);
+        }
+        bindings.push((run_id, run.target.kind));
+    }
+    bindings.sort_unstable_by_key(|binding| binding.0);
+    bindings.dedup_by_key(|binding| binding.0);
+    if bindings.is_empty() {
+        return repository
+            .delete_batch(batch_id)
+            .map_err(DataError::Storage);
+    }
+    let _claim = operations
+        .claim(bindings.iter().map(|binding| binding.0))
+        .map_err(|_| DataError::Busy)?;
+    let quarantine_token = Uuid::new_v4();
+    let intents = bindings
+        .iter()
+        .map(|(run_id, target)| ScanDeletionIntent {
+            id: Uuid::new_v4(),
+            batch_id,
+            run_id: *run_id,
+            quarantine_token,
+            target: *target,
+            phase: ScanDeletionPhase::IntentRecorded,
+            created_at: now,
+            updated_at: now,
+        })
+        .collect::<Vec<_>>();
+    for intent in &intents {
+        repository.insert_scan_deletion_intent(intent)?;
+    }
+    for intent in &intents {
+        store.quarantine_run_artifacts(intent.quarantine_token, intent.run_id)?;
+        repository.update_scan_deletion_intent_phase(
+            intent.id,
+            ScanDeletionPhase::ArtifactsQuarantined,
+            now,
+        )?;
+    }
+    let run_ids = bindings.iter().map(|binding| binding.0).collect::<Vec<_>>();
+    repository.delete_batch_with_owned_runs(batch_id, &run_ids)?;
+    for intent in &intents {
+        repository.update_scan_deletion_intent_phase(
+            intent.id,
+            ScanDeletionPhase::DatabaseCommitted,
+            now,
+        )?;
+    }
+    for intent in &intents {
+        store.delete_quarantined_run_artifacts(
+            intent.quarantine_token,
+            intent.run_id,
+            intent.target,
+        )?;
+        repository.delete_scan_deletion_intent(intent.id)?;
+    }
+    Ok(true)
+}
+
+pub(crate) fn reconcile_batch_deletions(
+    repository: &RunRepository,
+    store: &ArtifactStore,
+) -> Result<u32, DataError> {
+    let intents = repository.list_scan_deletion_intents()?;
+    let mut reconciled = 0_u32;
+    for intent in intents {
+        if repository.get_batch(intent.batch_id)?.is_some() {
+            store.restore_quarantined_run_artifacts(intent.quarantine_token, intent.run_id)?;
+        } else {
+            store.delete_quarantined_run_artifacts(
+                intent.quarantine_token,
+                intent.run_id,
+                intent.target,
+            )?;
+        }
+        repository.delete_scan_deletion_intent(intent.id)?;
+        reconciled = reconciled.checked_add(1).ok_or(DataError::InvalidLayout)?;
+    }
+    Ok(reconciled)
 }
 
 #[derive(Serialize)]

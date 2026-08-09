@@ -11,6 +11,7 @@ import {
   INVALID_LEGACY_EFFORT_CASES,
 } from "../test/reasoningEffortCases";
 import { HistoryPage } from "./HistoryPage";
+import type { ScanBatchRecord, ScanBatchTarget } from "../domain/batch";
 
 function makeRun(overrides: Partial<RunRecord> = {}): RunRecord {
   return {
@@ -102,6 +103,122 @@ function makeBackend(listRuns: Backend["listRuns"]): Backend {
   };
 }
 
+function makeBatch(
+  surface: "guided_client" | "automated_cli",
+  id: string,
+): ScanBatchRecord {
+  const client = surface === "guided_client";
+  const kind = client ? "chat_gpt_client" : "codex_cli";
+  const secondKind = client ? "claude_client" : "claude_code";
+  const firstTarget: ScanBatchTarget = {
+    target: {
+      kind,
+      reportedModel: client ? "GPT-5.6" : "gpt-5.6",
+      reasoningEffort: "high",
+      modelSource: client ? "windows_accessibility" as const : "cli_requested" as const,
+      modelVerification: "user_confirmed" as const,
+    },
+    routeIdentity: {
+      kind,
+      modelOrRoute: client ? "gpt-5.6" : "gpt-5.6",
+      reasoningEffort: "high",
+      executionSurface: surface,
+      isDefaultRoute: false,
+    },
+    executionAdapterIdentity: {
+      executionSurface: surface,
+      providerFamily: "openai",
+      launchKind: client ? "guided_client" as const : "native_exe" as const,
+      publicVersion: client ? null : "1.2.3",
+      adapterContractVersion: client ? "guided-client-v1" : "codex-cli-v1",
+    },
+  };
+  const secondTarget: ScanBatchTarget = {
+    target: {
+      kind: secondKind,
+      reportedModel: client ? "Claude Sonnet 4.6" : "default",
+      reasoningEffort: "high",
+      modelSource: client ? "manual" as const : "default_route" as const,
+      modelVerification: client ? "user_confirmed" as const : "unverified" as const,
+    },
+    routeIdentity: {
+      kind: secondKind,
+      modelOrRoute: client ? "claude sonnet 4.6" : "default",
+      reasoningEffort: "high",
+      executionSurface: surface,
+      isDefaultRoute: !client,
+    },
+    executionAdapterIdentity: {
+      executionSurface: surface,
+      providerFamily: "anthropic",
+      launchKind: client ? "guided_client" as const : "native_exe" as const,
+      publicVersion: client ? null : "1.2.3",
+      adapterContractVersion: client ? "guided-client-v1" : "claude-code-v1",
+    },
+  };
+  return {
+    id,
+    plan: {
+      suiteId: client ? "client-quick" : "cli-quick",
+      suiteVersion: "1.0.0",
+      suiteContentSha256: "a".repeat(64),
+      scoringRuleVersion: "ability-v1",
+      mode: "quick_comparison",
+      seed: 1,
+      status: "created",
+      schedulePolicyVersion: 1,
+      taskSessionPolicyVersion: 1,
+      sessionIsolationPolicy: client
+        ? "user_attested_fresh_conversation_per_task"
+        : "machine_enforced_fresh_session_and_workspace_per_task",
+      targets: [firstTarget, secondTarget],
+      sealedTaskBudgets: [
+        { maxTurns: client ? 1 : 20, timeBudgetSecs: client ? 270 : 1_800 },
+        { maxTurns: client ? 1 : 20, timeBudgetSecs: client ? 270 : 1_800 },
+      ],
+      costEstimate: {
+        policyVersion: 1,
+        executionSurface: surface,
+        mode: "quick_comparison",
+        targetCount: 2,
+        repetitionsPerTarget: 1,
+        tasksPerMemberRun: 2,
+        plannedMemberRuns: 2,
+        taskLaunches: 4,
+        guidedInteractions: client ? 4 : 0,
+        maxProviderTurns: client ? 4 : 80,
+        summedTaskBudgetSecs: client ? 1_080 : 7_200,
+        expectedElapsedSecsMin: 1_200,
+        expectedElapsedSecsMax: 1_800,
+        providerExecutionCeilingSecs: client ? 1_680 : 7_800,
+        authorizationWallClockSecs: client ? 14_400 : 28_800,
+        issuedAt: "2026-08-09T02:00:00Z",
+        initialAcknowledgementExpiresAt: "2026-08-09T02:15:00Z",
+        tokenQuotaAmount: null,
+        automaticRetryBudget: 0,
+      },
+      acknowledgementHash: "b".repeat(64),
+    },
+    baselineSnapshot: null,
+    status: "completed",
+    cancelRequested: false,
+    plannedMemberCount: 2,
+    terminalMemberCount: 2,
+    createdAt: "2026-08-09T02:00:00Z",
+    updatedAt: "2026-08-09T03:00:00Z",
+    members: [0, 1].map((position) => ({
+      ordinal: position,
+      targetPosition: position,
+      repetitionIndex: 0,
+      runId: `20000000-0000-4000-8000-${String(position + 1).padStart(12, "0")}`,
+      status: "completed" as const,
+      failureKind: null,
+      attemptNumber: 1,
+      updatedAt: "2026-08-09T03:00:00Z",
+    })),
+  };
+}
+
 test.each([
   ["chat_gpt_client", `/manual/chat_gpt_client?resume=private-run-1`],
   ["claude_client", `/manual/claude_client?resume=private-run-1`],
@@ -165,6 +282,62 @@ test("target history deletion is two-step, cancel makes zero calls, and confirma
     await screen.findByRole("heading", { name: /还没有体检记录/ }),
   ).toBeInTheDocument();
   expect(listRuns).toHaveBeenCalledTimes(2);
+});
+
+describe("batch history", () => {
+  test("keeps client and CLI cohorts visibly separate", async () => {
+    const backend = {
+      ...makeBackend(async () => []),
+      listBatches: async () => [
+        makeBatch("guided_client", "10000000-0000-4000-8000-000000000001"),
+        makeBatch("automated_cli", "10000000-0000-4000-8000-000000000002"),
+      ],
+    };
+    renderHistory(backend);
+
+    expect(await screen.findByRole("heading", { name: "批次扫描历史" })).toBeInTheDocument();
+    const client = screen.getByRole("region", { name: "客户端批次" });
+    const cli = screen.getByRole("region", { name: "CLI 批次" });
+    expect(client).toHaveTextContent("不与 CLI 自动执行结果合并比较");
+    expect(cli).toHaveTextContent("不与客户端手动结果合并比较");
+    expect(within(client).getByText("界面可见模型")).toBeInTheDocument();
+    expect(within(cli).getByText("请求模型")).toBeInTheDocument();
+    expect(within(cli).getByText("提供方默认路由")).toBeInTheDocument();
+  });
+
+  test("defaults to unlink-only and requires a separate choice to delete owned runs", async () => {
+    const user = userEvent.setup();
+    const deleteBatch = vi.fn(async () => true);
+    const record = makeBatch("guided_client", "10000000-0000-4000-8000-000000000003");
+    renderHistory({
+      ...makeBackend(async () => []),
+      listBatches: async () => [record],
+      deleteBatch,
+    });
+
+    await user.click(await screen.findByRole("button", { name: "管理此批次" }));
+    const confirmation = screen.getByRole("group", { name: "确认删除批次" });
+    expect(confirmation).toHaveTextContent("默认只移除批次视图");
+    await user.click(within(confirmation).getByRole("button", { name: "仅移除批次视图" }));
+    await waitFor(() => expect(deleteBatch).toHaveBeenCalledWith(record.id, false));
+  });
+
+  test("passes explicit owned-run deletion only after checkbox confirmation", async () => {
+    const user = userEvent.setup();
+    const deleteBatch = vi.fn(async () => true);
+    const record = makeBatch("automated_cli", "10000000-0000-4000-8000-000000000004");
+    renderHistory({
+      ...makeBackend(async () => []),
+      listBatches: async () => [record],
+      deleteBatch,
+    });
+
+    await user.click(await screen.findByRole("button", { name: "管理此批次" }));
+    const confirmation = screen.getByRole("group", { name: "确认删除批次" });
+    await user.click(within(confirmation).getByRole("checkbox"));
+    await user.click(within(confirmation).getByRole("button", { name: "删除批次及其单次运行" }));
+    await waitFor(() => expect(deleteBatch).toHaveBeenCalledWith(record.id, true));
+  });
 });
 
 test("failed stale target confirmation keeps history visible and never claims deletion", async () => {

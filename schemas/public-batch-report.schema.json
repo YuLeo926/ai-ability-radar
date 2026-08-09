@@ -1,0 +1,181 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AI Ability Radar public batch report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "reportId", "generatedAt", "cohort", "targets", "analysis", "baseline", "methodology"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "reportId": { "type": "string", "format": "uuid" },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "cohort": { "$ref": "#/$defs/cohort" },
+    "targets": { "type": "array", "minItems": 1, "maxItems": 4, "items": { "$ref": "#/$defs/target" } },
+    "analysis": { "$ref": "#/$defs/analysis" },
+    "baseline": { "$ref": "#/$defs/baseline" },
+    "methodology": { "$ref": "#/$defs/methodology" }
+  },
+  "$defs": {
+    "cohort": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "executionSurface", "suiteId", "suiteVersion", "suiteContentSha256", "scoringRuleVersion", "schedulePolicyVersion", "taskSessionPolicyVersion", "sessionIsolationPolicy", "status", "plannedMemberCount", "terminalMemberCount"],
+      "properties": {
+        "mode": { "enum": ["quick_comparison", "standard", "full"] },
+        "executionSurface": { "enum": ["guided_client", "automated_cli"] },
+        "suiteId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "suiteVersion": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "suiteContentSha256": { "$ref": "#/$defs/sha256" },
+        "scoringRuleVersion": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "schedulePolicyVersion": { "type": "integer", "minimum": 1 },
+        "taskSessionPolicyVersion": { "type": "integer", "minimum": 1 },
+        "sessionIsolationPolicy": { "enum": ["user_attested_fresh_conversation_per_task", "machine_enforced_fresh_session_and_workspace_per_task"] },
+        "status": { "const": "completed" },
+        "plannedMemberCount": { "type": "integer", "minimum": 1 },
+        "terminalMemberCount": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["targetPosition", "kind", "modelOrRoute", "reasoningEffort", "modelSource", "modelVerification", "providerFamily", "launchKind", "publicAdapterVersion", "adapterContractVersion"],
+      "properties": {
+        "targetPosition": { "type": "integer", "minimum": 0, "maximum": 3 },
+        "kind": { "$ref": "#/$defs/targetKind" },
+        "modelOrRoute": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "reasoningEffort": { "type": ["string", "null"], "minLength": 1, "maxLength": 64 },
+        "modelSource": { "enum": ["manual", "windows_accessibility", "cli_requested", "cli_reported", "default_route", "legacy_unknown"] },
+        "modelVerification": { "enum": ["user_confirmed", "provider_reported", "unverified", "legacy_unknown"] },
+        "providerFamily": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "launchKind": { "enum": ["guided_client", "native_exe", "reviewed_npm"] },
+        "publicAdapterVersion": { "type": ["string", "null"], "minLength": 1, "maxLength": 160 },
+        "adapterContractVersion": { "type": "string", "minLength": 1, "maxLength": 64 }
+      },
+      "oneOf": [
+        { "properties": { "modelSource": { "const": "manual" }, "modelVerification": { "const": "user_confirmed" } } },
+        { "properties": { "modelSource": { "const": "windows_accessibility" }, "modelVerification": { "const": "user_confirmed" } } },
+        { "properties": { "modelSource": { "const": "cli_requested" }, "modelVerification": { "const": "user_confirmed" } } },
+        { "properties": { "modelSource": { "const": "cli_reported" }, "modelVerification": { "const": "provider_reported" } } },
+        { "properties": { "modelSource": { "const": "default_route" }, "modelVerification": { "const": "unverified" } } },
+        { "properties": { "modelSource": { "const": "legacy_unknown" }, "modelVerification": { "const": "legacy_unknown" } } }
+      ]
+    },
+    "analysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["analysisVersion", "calibrationPolicyVersion", "baselineSnapshotSha256", "signal", "targets"],
+      "properties": {
+        "analysisVersion": { "type": "integer", "minimum": 1 },
+        "calibrationPolicyVersion": { "type": "integer", "minimum": 1 },
+        "baselineSnapshotSha256": { "anyOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+        "signal": { "$ref": "#/$defs/signal" },
+        "targets": { "type": "array", "minItems": 1, "maxItems": 4, "items": { "$ref": "#/$defs/targetAnalysis" } }
+      }
+    },
+    "targetAnalysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["targetPosition", "signal", "candidate", "baseline", "baselineBatchCount", "baselineUtcDayCount", "candidateMemberCount", "delta", "absoluteDrop", "relativeDrop", "deltaConfidenceInterval", "categoryCandidate", "categoryBaseline", "matchedTaskDeltas", "excludedCandidateMemberCount"],
+      "properties": {
+        "targetPosition": { "type": "integer", "minimum": 0, "maximum": 3 },
+        "signal": { "$ref": "#/$defs/signal" },
+        "candidate": { "anyOf": [{ "$ref": "#/$defs/distribution" }, { "type": "null" }] },
+        "baseline": { "anyOf": [{ "$ref": "#/$defs/distribution" }, { "type": "null" }] },
+        "baselineBatchCount": { "type": "integer", "minimum": 0 },
+        "baselineUtcDayCount": { "type": "integer", "minimum": 0 },
+        "candidateMemberCount": { "type": "integer", "minimum": 0 },
+        "delta": { "$ref": "#/$defs/nullableScoreDelta" },
+        "absoluteDrop": { "$ref": "#/$defs/nullableScoreDelta" },
+        "relativeDrop": { "type": ["number", "null"] },
+        "deltaConfidenceInterval": { "anyOf": [{ "$ref": "#/$defs/confidenceInterval" }, { "type": "null" }] },
+        "categoryCandidate": { "$ref": "#/$defs/categoryDistributions" },
+        "categoryBaseline": { "$ref": "#/$defs/categoryDistributions" },
+        "matchedTaskDeltas": { "type": "array", "items": { "$ref": "#/$defs/taskDelta" } },
+        "excludedCandidateMemberCount": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "baseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["available", "baselineAsOf", "historyWindowDays", "maximumHistoricalBatches", "selectedBatchCount", "exclusionCounts", "contentSha256"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "baselineAsOf": { "type": ["string", "null"], "format": "date-time" },
+        "historyWindowDays": { "type": ["integer", "null"], "minimum": 1 },
+        "maximumHistoricalBatches": { "type": ["integer", "null"], "minimum": 1 },
+        "selectedBatchCount": { "type": "integer", "minimum": 0 },
+        "exclusionCounts": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "candidate_batch": { "type": "integer", "minimum": 0 },
+            "duplicate_evidence_id": { "type": "integer", "minimum": 0 },
+            "not_completed_full": { "type": "integer", "minimum": 0 },
+            "missing_or_invalid_snapshot": { "type": "integer", "minimum": 0 },
+            "not_strictly_before_cutoff": { "type": "integer", "minimum": 0 },
+            "outside_history_window": { "type": "integer", "minimum": 0 },
+            "incompatible_identity": { "type": "integer", "minimum": 0 },
+            "older_batch_on_same_utc_day": { "type": "integer", "minimum": 0 },
+            "beyond_maximum_historical_batches": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "contentSha256": { "anyOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] }
+      }
+    },
+    "distribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "median", "medianAbsoluteDeviation"],
+      "properties": {
+        "count": { "type": "integer", "minimum": 1 },
+        "median": { "type": "number", "minimum": 0, "maximum": 100 },
+        "medianAbsoluteDeviation": { "type": "number", "minimum": 0, "maximum": 100 }
+      }
+    },
+    "confidenceInterval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lower", "upper", "confidenceLevel"],
+      "properties": {
+        "lower": { "type": "number" },
+        "upper": { "type": "number" },
+        "confidenceLevel": { "type": "number", "exclusiveMinimum": 0.5, "exclusiveMaximum": 1 }
+      }
+    },
+    "taskDelta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["taskId", "category", "candidateMedian", "baselineMedian", "delta"],
+      "properties": {
+        "taskId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "category": { "$ref": "#/$defs/category" },
+        "candidateMedian": { "type": "number", "minimum": 0, "maximum": 100 },
+        "baselineMedian": { "type": "number", "minimum": 0, "maximum": 100 },
+        "delta": { "type": "number", "minimum": -100, "maximum": 100 }
+      }
+    },
+    "categoryDistributions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "instruction_following": { "$ref": "#/$defs/distribution" },
+        "logic": { "$ref": "#/$defs/distribution" },
+        "code_review": { "$ref": "#/$defs/distribution" },
+        "cli_coding": { "$ref": "#/$defs/distribution" }
+      }
+    },
+    "methodology": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["interpretationStatus", "statement"],
+      "properties": {
+        "interpretationStatus": { "const": "not_evaluated" },
+        "statement": { "type": "string", "minLength": 1, "maxLength": 240 }
+      }
+    },
+    "targetKind": { "enum": ["chat_gpt_client", "claude_client", "codex_cli", "claude_code"] },
+    "signal": { "enum": ["insufficient_data", "stable", "watch", "likely_regression"] },
+    "category": { "enum": ["instruction_following", "logic", "code_review", "cli_coding"] },
+    "nullableScoreDelta": { "type": ["number", "null"], "minimum": -100, "maximum": 100 },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

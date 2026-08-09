@@ -381,7 +381,7 @@ function batchResponses() {
   };
 }
 
-test("uses the sixteen reviewed batch commands with exact nested camelCase payloads", async () => {
+test("uses the eighteen reviewed batch commands with exact nested camelCase payloads", async () => {
   const responses = batchResponses();
   bridge.invoke.mockImplementation(async (command: string) => {
     switch (command) {
@@ -399,6 +399,10 @@ test("uses the sixteen reviewed batch commands with exact nested camelCase paylo
         return responses.analysis;
       case "list_batches":
         return [responses.record];
+      case "export_public_batch_report":
+        return "public-report-id";
+      case "delete_batch":
+        return true;
       case "authorize_batch_execution":
       case "authorize_batch_retry":
         return responses.authorization;
@@ -453,6 +457,8 @@ test("uses the sixteen reviewed batch commands with exact nested camelCase paylo
   await tauriBackend.getBatch(batchId);
   await tauriBackend.getBatchAnalysis(batchId);
   await tauriBackend.listBatches();
+  await tauriBackend.exportPublicBatchReport(batchId);
+  await tauriBackend.deleteBatch(batchId, false);
   await tauriBackend.authorizeBatchExecution({
     batchId,
     acknowledgementHash: "b".repeat(64),
@@ -474,6 +480,8 @@ test("uses the sixteen reviewed batch commands with exact nested camelCase paylo
     ["get_batch", { input: { batchId } }],
     ["get_batch_analysis", { input: { batchId } }],
     ["list_batches"],
+    ["export_public_batch_report", { input: { batchId } }],
+    ["delete_batch", { input: { batchId, deleteOwnedRuns: false } }],
     [
       "authorize_batch_execution",
       { input: { batchId, acknowledgementHash: "b".repeat(64) } },

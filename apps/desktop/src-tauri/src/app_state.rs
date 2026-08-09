@@ -266,6 +266,11 @@ impl AppState {
         let artifact_root = paths.app_data.join("artifacts");
         fs::create_dir_all(&artifact_root).map_err(|error| error.to_string())?;
         let run_operations = RunOperationRegistry::default();
+        crate::data_management::reconcile_batch_deletions(
+            &repository,
+            &ArtifactStore::new(artifact_root.clone()),
+        )
+        .map_err(|error| error.to_string())?;
         let cleanup_pending = Arc::new(AtomicBool::new(
             crate::data_management::prune_expired_artifacts(
                 &repository,

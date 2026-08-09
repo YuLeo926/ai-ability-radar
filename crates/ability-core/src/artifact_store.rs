@@ -1,5 +1,5 @@
 use crate::{BackupRunBinding, TargetKind};
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::PathBuf;
 use thiserror::Error;
@@ -85,6 +85,74 @@ impl ArtifactStore {
         Self { root }
     }
 
+    pub fn quarantine_run_artifacts(
+        &self,
+        quarantine_token: Uuid,
+        run_id: Uuid,
+    ) -> Result<bool, ArtifactStoreError> {
+        let source = self.root.join("runs").join(run_id.to_string());
+        let quarantine_root = self
+            .root
+            .join(".delete-quarantine")
+            .join(quarantine_token.to_string());
+        let destination = quarantine_root.join("runs").join(run_id.to_string());
+        if destination.exists() {
+            return if source.exists() {
+                Err(ArtifactStoreError::UnexpectedEntry)
+            } else {
+                Ok(true)
+            };
+        }
+        if !source.exists() {
+            return Ok(false);
+        }
+        reject_reparse_or_non_directory(&source)?;
+        create_private_directory_chain(&self.root, &quarantine_root.join("runs"))?;
+        fs::rename(&source, &destination).map_err(ArtifactStoreError::Io)?;
+        Ok(true)
+    }
+
+    pub fn restore_quarantined_run_artifacts(
+        &self,
+        quarantine_token: Uuid,
+        run_id: Uuid,
+    ) -> Result<(), ArtifactStoreError> {
+        let source = self
+            .root
+            .join(".delete-quarantine")
+            .join(quarantine_token.to_string())
+            .join("runs")
+            .join(run_id.to_string());
+        let destination = self.root.join("runs").join(run_id.to_string());
+        if !source.exists() {
+            return Ok(());
+        }
+        if destination.exists() {
+            return Err(ArtifactStoreError::UnexpectedEntry);
+        }
+        reject_reparse_or_non_directory(&source)?;
+        create_private_directory_chain(&self.root, &self.root.join("runs"))?;
+        fs::rename(&source, &destination).map_err(ArtifactStoreError::Io)?;
+        cleanup_quarantine_parents(&self.root, quarantine_token);
+        Ok(())
+    }
+
+    pub fn delete_quarantined_run_artifacts(
+        &self,
+        quarantine_token: Uuid,
+        run_id: Uuid,
+        target: TargetKind,
+    ) -> Result<bool, ArtifactStoreError> {
+        let quarantine_root = self
+            .root
+            .join(".delete-quarantine")
+            .join(quarantine_token.to_string());
+        let quarantine = Self::new(quarantine_root);
+        let removed = quarantine.delete_run_artifacts(run_id, target)?;
+        cleanup_quarantine_parents(&self.root, quarantine_token);
+        Ok(removed)
+    }
+
     #[cfg(windows)]
     pub fn delete_run_artifacts(
         &self,
@@ -140,6 +208,56 @@ impl ArtifactStore {
     ) -> Result<Vec<ArtifactBackupFile>, ArtifactStoreError> {
         Err(ArtifactStoreError::UnsupportedPlatform)
     }
+}
+
+fn reject_reparse_or_non_directory(path: &std::path::Path) -> Result<(), ArtifactStoreError> {
+    let metadata = fs::symlink_metadata(path).map_err(ArtifactStoreError::Io)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(ArtifactStoreError::UnsafeLayout);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(ArtifactStoreError::UnsafeLayout);
+        }
+    }
+    Ok(())
+}
+
+fn create_private_directory_chain(
+    trusted_root: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<(), ArtifactStoreError> {
+    if !destination.starts_with(trusted_root) {
+        return Err(ArtifactStoreError::UnsafeLayout);
+    }
+    let mut current = trusted_root.to_path_buf();
+    reject_reparse_or_non_directory(&current)?;
+    for component in destination
+        .strip_prefix(trusted_root)
+        .map_err(|_| ArtifactStoreError::UnsafeLayout)?
+        .components()
+    {
+        current.push(component);
+        if current.exists() {
+            reject_reparse_or_non_directory(&current)?;
+        } else {
+            fs::create_dir(&current).map_err(ArtifactStoreError::Io)?;
+            reject_reparse_or_non_directory(&current)?;
+        }
+    }
+    Ok(())
+}
+
+fn cleanup_quarantine_parents(root: &std::path::Path, quarantine_token: Uuid) {
+    let token = root
+        .join(".delete-quarantine")
+        .join(quarantine_token.to_string());
+    let _ = fs::remove_dir(token.join("runs"));
+    let _ = fs::remove_dir(&token);
+    let _ = fs::remove_dir(root.join(".delete-quarantine"));
 }
 
 #[cfg(windows)]

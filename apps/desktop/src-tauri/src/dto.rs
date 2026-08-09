@@ -96,6 +96,14 @@ pub struct BatchIdInput {
     pub batch_id: Uuid,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeleteBatchInput {
+    #[serde(deserialize_with = "deserialize_canonical_batch_uuid")]
+    pub batch_id: Uuid,
+    pub delete_owned_runs: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AuthorizeBatchExecutionInput {

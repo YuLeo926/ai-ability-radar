@@ -6,7 +6,7 @@ use crate::dto::{
     AuthorizeBatchExecutionInput, AuthorizeBatchRetryInput, BatchEstimateDto,
     BatchExecutionAuthorizationDto, BatchIdInput, BatchPlanInput, BatchRetryEstimateDto,
     BatchTargetInput, CreateAcknowledgedBatchInput, DeclineGuidedBatchAttestationInput,
-    EstimateBatchRetryInput, GuidedMemberDecision, NextGuidedMemberDto,
+    DeleteBatchInput, EstimateBatchRetryInput, GuidedMemberDecision, NextGuidedMemberDto,
     SubmitGuidedBatchAnswerInput, TaskResultDto,
 };
 use ability_core::{
@@ -876,6 +876,25 @@ pub fn get_batch_analysis(
 #[tauri::command]
 pub fn list_batches(state: State<'_, AppState>) -> Result<Vec<ScanBatchRecord>, String> {
     list_batch_records(&BatchCommandContext::from_state(&state))
+}
+
+#[tauri::command]
+pub fn delete_batch(state: State<'_, AppState>, input: DeleteBatchInput) -> Result<bool, String> {
+    let _claim = claim_mutation(&state)?;
+    crate::data_management::delete_batch_data(
+        &state.repository,
+        &ability_core::ArtifactStore::new(state.artifact_root.clone()),
+        &state.run_operations,
+        input.batch_id,
+        input.delete_owned_runs,
+        Utc::now(),
+    )
+    .map_err(|error| match error {
+        crate::data_management::DataError::Busy => {
+            "运行中的批次不能删除，请先等待完成或取消。".into()
+        }
+        _ => "无法安全删除这次批次；本地恢复记录已保留，可重启后重试。".into(),
+    })
 }
 
 #[tauri::command]

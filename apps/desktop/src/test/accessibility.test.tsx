@@ -742,10 +742,20 @@ describe("Task 21 accessibility baseline", () => {
     const completed = accessibleBatchRecord(true);
     const result = renderRoute(
       `/batch/${completed.id}/result`,
-      fakeBackend({ getBatch: vi.fn(async () => completed) }),
+      fakeBackend({
+        getBatch: vi.fn(async () => completed),
+        getBatchAnalysis: vi.fn<Backend["getBatchAnalysis"]>(async () => ({
+          candidateBatchId: completed.id,
+          analysisVersion: 1,
+          calibrationPolicyVersion: 1,
+          baselineSnapshotSha256: null,
+          signal: "insufficient_data",
+          targets: [],
+        })),
+      }),
     );
     await screen.findByRole("heading", {
-      name: "证据不足，暂不判断是否降智",
+      name: "客户端证据矩阵",
     });
     await expectNoSeriousAxeViolations(result.container);
   });

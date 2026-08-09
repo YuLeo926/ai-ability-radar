@@ -5,7 +5,7 @@ use crate::app_state::{
 };
 use crate::client_selection::{self, ClientSelectionDetection};
 use crate::dto::{
-    BootstrapDto, CliRunEventDto, DataSettingsDto, DeleteTargetHistoryInput,
+    BatchIdInput, BootstrapDto, CliRunEventDto, DataSettingsDto, DeleteTargetHistoryInput,
     DetectClientSelectionInput, ExportReportInput, FullBackupInput, PackSummaryDto, ResumeRunInput,
     ResumeTargetSelectionInput, RunDetailDto, RunErrorEvent, RunIdInput, SetRetentionInput,
     StartRunInput, SubmitAnswerInput, TaskResultDto,
@@ -981,9 +981,57 @@ pub async fn export_public_report(
     )
 }
 
+#[tauri::command]
+pub async fn export_public_batch_report(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    input: BatchIdInput,
+) -> Result<Option<String>, String> {
+    let selected = app
+        .dialog()
+        .file()
+        .set_title("导出匿名批次证据")
+        .add_filter("JSON report", &["json"])
+        .set_file_name(default_batch_report_file_name(input.batch_id))
+        .blocking_save_file();
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let destination = selected
+        .into_path()
+        .map_err(|_| "仅支持保存到本地 JSON 文件。".to_string())?;
+    let _local_data = state
+        .local_data_gate
+        .claim_mutating()
+        .map_err(|_| "本地数据正在备份，请稍后重试。".to_string())?;
+    validate_json_export_destination(&destination)?;
+    let batch = state
+        .repository
+        .get_batch(input.batch_id)
+        .map_err(|_| "无法读取这次批次体检，请稍后重试。".to_string())?
+        .ok_or_else(|| "没有找到这次批次体检。".to_string())?;
+    let analysis = state
+        .repository
+        .analyze_batch(
+            input.batch_id,
+            &ability_core::CalibrationPolicy::production_v1(),
+        )
+        .map_err(|_| "无法生成可信的批次分析。".to_string())?;
+    let report =
+        ability_core::build_public_batch_report(&batch, &analysis).map_err(public_report_error)?;
+    let json = serde_json::to_vec_pretty(&report).map_err(|_| "无法编码批次报告。".to_string())?;
+    write_new_report(&destination, &json)?;
+    Ok(Some(report.report_id.to_string()))
+}
+
 fn default_report_file_name(run_id: Uuid) -> String {
     let key = run_id.simple().to_string();
     format!("ability-radar-{}.html", &key[..8])
+}
+
+fn default_batch_report_file_name(batch_id: Uuid) -> String {
+    let key = batch_id.simple().to_string();
+    format!("ability-radar-batch-{}.json", &key[..8])
 }
 
 #[cfg(test)]
@@ -1284,6 +1332,20 @@ fn validate_export_destination(destination: &Path) -> Result<(), String> {
         return Err("报告必须保存为本机上的新 .html 文件。".into());
     }
 
+    Ok(())
+}
+
+fn validate_json_export_destination(destination: &Path) -> Result<(), String> {
+    let json_extension = destination
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("json"));
+    if !destination.is_absolute()
+        || !json_extension
+        || validate_destination_platform(destination).is_err()
+    {
+        return Err("报告必须保存为本机上的新 .json 文件。".into());
+    }
     Ok(())
 }
 

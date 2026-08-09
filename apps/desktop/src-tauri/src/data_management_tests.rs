@@ -1,8 +1,13 @@
 use crate::app_state::RunOperationRegistry;
-use crate::data_management::{create_full_backup, prune_expired_artifacts};
+use crate::data_management::{
+    create_full_backup, delete_batch_data, prune_expired_artifacts, reconcile_batch_deletions,
+};
 use ability_core::{
-    summarize_scores, ArtifactStore, Category, EnvironmentFingerprint, ModelSource,
-    ModelVerification, RunMode, RunRecord, RunRepository, RunStatus, TargetKind, TargetSelection,
+    build_batch_schedule, summarize_scores, AdapterLaunchKind, ArtifactStore,
+    BatchExecutionSurface, BatchMemberStatus, BatchMode, Category, EnvironmentFingerprint,
+    ExecutionAdapterIdentity, FailureKind, ModelSource, ModelVerification, PackLoader, RunMode,
+    RunRecord, RunRepository, RunStatus, ScanBatchPlan, ScanBatchRecord, ScanBatchTarget,
+    ScanDeletionIntent, ScanDeletionPhase, ScanExecutionAuthorization, TargetKind, TargetSelection,
     TaskOutcome, TaskResult,
 };
 use chrono::{DateTime, Duration, Utc};
@@ -13,6 +18,144 @@ use std::fs;
 use std::io::{self, Write};
 use tempfile::tempdir;
 use uuid::Uuid;
+
+fn pack_path(name: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .join("benchmark-packs")
+        .join(name)
+}
+
+fn terminal_batch(repository: &RunRepository) -> (ScanBatchRecord, RunRecord) {
+    let pack = PackLoader::load(&pack_path("client-quick-v1")).unwrap();
+    let target = ScanBatchTarget::new(
+        TargetSelection {
+            kind: TargetKind::ChatGptClient,
+            reported_model: "GPT-5.6".into(),
+            reasoning_effort: Some("high".into()),
+            model_source: ModelSource::Manual,
+            model_verification: ModelVerification::UserConfirmed,
+        },
+        BatchExecutionSurface::GuidedClient,
+        ExecutionAdapterIdentity::new(
+            BatchExecutionSurface::GuidedClient,
+            "openai",
+            AdapterLaunchKind::GuidedClient,
+            None,
+            "guided-client-v1",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let second_target = ScanBatchTarget::new(
+        TargetSelection {
+            kind: TargetKind::ClaudeClient,
+            reported_model: "Claude Sonnet 4.6".into(),
+            reasoning_effort: Some("high".into()),
+            model_source: ModelSource::Manual,
+            model_verification: ModelVerification::UserConfirmed,
+        },
+        BatchExecutionSurface::GuidedClient,
+        ExecutionAdapterIdentity::new(
+            BatchExecutionSurface::GuidedClient,
+            "anthropic",
+            AdapterLaunchKind::GuidedClient,
+            None,
+            "guided-client-v1",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let plan = ScanBatchPlan::new(
+        &pack,
+        "ability-v1",
+        BatchMode::QuickComparison,
+        7,
+        vec![target.clone(), second_target],
+        now(),
+    )
+    .unwrap();
+    let batch_id = Uuid::new_v4();
+    let schedule = build_batch_schedule(&plan).unwrap();
+    let run_target =
+        plan.targets[usize::try_from(schedule.members[0].target_position).unwrap()].clone();
+    let members = schedule
+        .members
+        .iter()
+        .map(|member| ability_core::BatchMemberSeed {
+            ordinal: member.ordinal,
+            target_position: member.target_position,
+            repetition_index: member.repetition_index,
+        })
+        .collect::<Vec<_>>();
+    repository
+        .insert_batch_plan(batch_id, &pack, &plan, &members, now())
+        .unwrap();
+    repository
+        .append_execution_authorization(&ScanExecutionAuthorization {
+            batch_id,
+            member_ordinal: None,
+            attempt_number: 1,
+            max_provider_turns: plan.cost_estimate.max_provider_turns,
+            max_task_budget_secs: plan.cost_estimate.summed_task_budget_secs,
+            acknowledgement_hash: plan.acknowledgement_hash.clone(),
+            allowed_failure_kind: None,
+            expires_at: now() + Duration::hours(4),
+            created_at: now(),
+        })
+        .unwrap();
+    let run = RunRecord {
+        id: Uuid::new_v4(),
+        target: run_target.target,
+        mode: RunMode::Quick,
+        suite_id: plan.suite_id.clone(),
+        suite_version: plan.suite_version.clone(),
+        status: RunStatus::Created,
+        started_at: now(),
+        finished_at: None,
+        total_tasks: u32::try_from(plan.sealed_task_budgets.len()).unwrap(),
+        completed_tasks: 0,
+        environment: EnvironmentFingerprint {
+            os_family: "windows".into(),
+            os_version: "11".into(),
+            app_version: "0.2.2".into(),
+            cli_version: None,
+            verifier_runtime_version: None,
+            suite_id: plan.suite_id.clone(),
+            suite_version: plan.suite_version.clone(),
+            suite_content_sha256: plan.suite_content_sha256.clone(),
+            scoring_rule_version: plan.scoring_rule_version.clone(),
+            execution_adapter_identity: Some(run_target.execution_adapter_identity),
+            resumed: false,
+        },
+        score: None,
+    };
+    repository
+        .reserve_next_runnable_member_and_run(batch_id, now(), &run)
+        .unwrap()
+        .unwrap();
+    repository
+        .mark_member_launching(batch_id, 0, run.id, now())
+        .unwrap();
+    repository
+        .mark_member_running(batch_id, 0, run.id, now())
+        .unwrap();
+    repository.cancel_batch(batch_id, now()).unwrap();
+    repository
+        .finish_batch_member(
+            batch_id,
+            0,
+            run.id,
+            BatchMemberStatus::Cancelled,
+            Some(FailureKind::UserCancelled),
+            now(),
+        )
+        .unwrap();
+    (
+        repository.get_batch(batch_id).unwrap().unwrap(),
+        repository.get_run(run.id).unwrap().unwrap(),
+    )
+}
 
 fn now() -> DateTime<Utc> {
     DateTime::parse_from_rfc3339("2026-07-19T12:00:00Z")
@@ -267,6 +410,124 @@ fn full_backup_has_exact_unique_safe_entries_manifest_and_readable_snapshot() {
     let target: Value = serde_json::from_str(&target_json).unwrap();
     assert_eq!(target["modelSource"], "legacy_unknown");
     assert_eq!(target["modelVerification"], "legacy_unknown");
+}
+
+#[test]
+fn batch_backup_contains_valid_links() {
+    let directory = tempdir().unwrap();
+    let repository = RunRepository::open(&directory.path().join("ability.db")).unwrap();
+    let (batch, run) = terminal_batch(&repository);
+    let artifact_root = directory.path().join("artifacts");
+    let tree = artifact_root.join("runs").join(run.id.to_string());
+    fs::create_dir_all(&tree).unwrap();
+    fs::write(tree.join("answer.txt"), "private batch answer").unwrap();
+    let store = ArtifactStore::new(artifact_root);
+    let snapshot_path = directory.path().join("private-batch-snapshot.sqlite");
+    let mut snapshot = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&snapshot_path)
+        .unwrap();
+    let mut archive = Vec::new();
+    create_full_backup(
+        &repository,
+        &store,
+        &snapshot_path,
+        &mut snapshot,
+        &mut archive,
+        now(),
+        "0.2.2",
+    )
+    .unwrap();
+    let entries = read_stored_zip(&archive);
+    let inspected = directory.path().join("inspected-batch.sqlite");
+    fs::write(&inspected, &entries["ability-radar.sqlite"]).unwrap();
+    let connection = Connection::open(inspected).unwrap();
+    connection.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+    let foreign_key_errors: i64 = connection
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(foreign_key_errors, 0);
+    let stored_hash: String = connection
+        .query_row(
+            "SELECT content_sha256 FROM scan_batches WHERE id=?1",
+            [batch.id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_hash, batch.plan.suite_content_sha256);
+    let linked_run: String = connection
+        .query_row(
+            "SELECT run_id FROM scan_batch_members WHERE batch_id=?1",
+            [batch.id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(linked_run, run.id.to_string());
+}
+
+#[test]
+fn batch_delete_reconciles_quarantine() {
+    let directory = tempdir().unwrap();
+    let repository = RunRepository::open(&directory.path().join("ability.db")).unwrap();
+    let (batch, run) = terminal_batch(&repository);
+    let artifact_root = directory.path().join("artifacts");
+    let tree = artifact_root.join("runs").join(run.id.to_string());
+    fs::create_dir_all(&tree).unwrap();
+    fs::write(tree.join("answer.txt"), "private batch answer").unwrap();
+    let store = ArtifactStore::new(artifact_root.clone());
+    let token = Uuid::new_v4();
+    let intent = ScanDeletionIntent {
+        id: Uuid::new_v4(),
+        batch_id: batch.id,
+        run_id: run.id,
+        quarantine_token: token,
+        target: run.target.kind,
+        phase: ScanDeletionPhase::IntentRecorded,
+        created_at: now(),
+        updated_at: now(),
+    };
+    repository.insert_scan_deletion_intent(&intent).unwrap();
+    store.quarantine_run_artifacts(token, run.id).unwrap();
+    repository
+        .update_scan_deletion_intent_phase(
+            intent.id,
+            ScanDeletionPhase::ArtifactsQuarantined,
+            now(),
+        )
+        .unwrap();
+    repository
+        .delete_batch_with_owned_runs(batch.id, &[run.id])
+        .unwrap();
+
+    assert_eq!(reconcile_batch_deletions(&repository, &store).unwrap(), 1);
+    assert!(repository.get_batch(batch.id).unwrap().is_none());
+    assert!(repository.get_run(run.id).unwrap().is_none());
+    assert!(repository.list_scan_deletion_intents().unwrap().is_empty());
+    assert!(!artifact_root.join("runs").join(run.id.to_string()).exists());
+    assert!(!artifact_root.join(".delete-quarantine").exists());
+    assert_eq!(reconcile_batch_deletions(&repository, &store).unwrap(), 0);
+}
+
+#[test]
+fn batch_unlink_preserves_owned_runs_and_owned_delete_removes_them() {
+    let directory = tempdir().unwrap();
+    let repository = RunRepository::open(&directory.path().join("ability.db")).unwrap();
+    let operations = RunOperationRegistry::default();
+    let store = ArtifactStore::new(directory.path().join("artifacts"));
+    let (batch, run) = terminal_batch(&repository);
+    assert!(delete_batch_data(&repository, &store, &operations, batch.id, false, now(),).unwrap());
+    assert!(repository.get_batch(batch.id).unwrap().is_none());
+    assert!(repository.get_run(run.id).unwrap().is_some());
+
+    let (batch, run) = terminal_batch(&repository);
+    assert!(delete_batch_data(&repository, &store, &operations, batch.id, true, now(),).unwrap());
+    assert!(repository.get_batch(batch.id).unwrap().is_none());
+    assert!(repository.get_run(run.id).unwrap().is_none());
+    assert!(repository.list_scan_deletion_intents().unwrap().is_empty());
 }
 
 #[test]
