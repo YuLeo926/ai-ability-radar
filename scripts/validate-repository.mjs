@@ -379,6 +379,7 @@ const requiredFiles = [
   "docs/security.md",
   "docs/troubleshooting.md",
   "docs/methodology.md",
+  "docs/batch-scan-methodology.md",
   "docs/licenses/npm-dependencies.json",
   "docs/licenses/rust-dependencies.json",
   "docs/release-checklist.md",
@@ -2973,6 +2974,27 @@ requireText("docs/methodology.md", [
   ["raw ZIP membership before extraction", /central directory.*Windows.*(?:member|成员).*(?:extract|提取)/si],
   ["classic EOCD zero-comment EOF contract", /classic EOCD.*EOF.*22.*archive comment length.*0.*结束于 EOF/si],
 ]);
+requireText("docs/batch-scan-methodology.md", [
+  ["client and CLI cohort separation", /客户端和 CLI.*必须分成两个 cohort/si],
+  ["client and CLI non-comparability", /客户端和 CLI.*不能.*直接比较/si],
+  ["requested visible and default model distinction", /请求模型.*可见模型.*provider default/si],
+  ["guided interaction boundary", /32 次人工交互/],
+  ["CLI provider-turn boundaries", /160.*480.*1,000/si],
+  ["initial acknowledgement boundary", /首次确认有效期为 15 分钟/],
+  ["execution window boundaries", /4 小时.*8 小时.*24 小时.*72 小时/si],
+  ["unknown token quota boundary", /token\/配额.*未知/si],
+  ["full-only baseline", /完整模式.*唯一.*历史基线/si],
+  ["frozen baseline", /原子冻结基线快照/],
+  ["baseline history window", /90 天/],
+  ["baseline batch maximum", /最多 12 个/],
+  ["baseline minimum batches", /至少需要 5 个匹配历史完整批次/],
+  ["baseline minimum UTC days", /至少 3 个 UTC 日期/],
+  ["run-level bootstrap", /2,000 次.*运行级 bootstrap.*95%/si],
+  ["likely regression disabled", /很可能退化.*v0\.2\.2.*保持关闭/si],
+  ["public aggregate export omits raw data", /公开批次.*只允许聚合.*不包含.*原始回答/si],
+  ["four-phase recoverable delete", /持久待办.*隔离重命名.*数据库事务提交.*最终清理/si],
+  ["zero-provider-call CI", /CI.*本地假入口.*模型请求数为零/si],
+]);
 const methodology = read("docs/methodology.md");
 if (/已知推理值保留输入大小写/.test(methodology)) {
   fail("docs/methodology.md contradicts the known reasoning lowercase canonical rule");
@@ -3062,6 +3084,7 @@ const markdownPaths = [
   "docs/security.md",
   "docs/troubleshooting.md",
   "docs/methodology.md",
+  "docs/batch-scan-methodology.md",
 ];
 for (const path of markdownPaths) {
   const source = read(path);

@@ -760,6 +760,28 @@ test("troubleshooting rejects an unconditional no-restart claim", () => {
   assertRejected(result, /troubleshooting\.md.*(?:no-restart|无需重启)/i);
 });
 
+test("batch methodology requires separate non-comparable client and CLI cohorts", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, "docs", "batch-scan-methodology.md"), (source) =>
+      source.replace(
+        "客户端和 CLI 使用不同题型、交互方式与隔离边界，必须分成两个 cohort（证据组）。即使界面上出现同名",
+        "客户端和 CLI 可以放入同一个可比较的证据组。即使界面上出现同名",
+      ));
+  });
+  assertRejected(result, /batch-scan-methodology\.md.*cohort/i);
+});
+
+test("batch methodology keeps likely-regression output disabled in v0.2.2", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, "docs", "batch-scan-methodology.md"), (source) =>
+      source.replace(
+        "“很可能退化”在 v0.2.2 的生产政策中明确保持关闭",
+        "“很可能退化”在 v0.2.2 的生产政策中默认启用",
+      ));
+  });
+  assertRejected(result, /batch-scan-methodology\.md.*likely regression disabled|很可能退化/i);
+});
+
 test("methodology requires all four provider effort matrices", () => {
   const result = runNegativeFixture((fixture) => {
     replace(join(fixture, "docs", "methodology.md"), (source) =>
