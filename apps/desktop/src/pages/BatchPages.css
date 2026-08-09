@@ -61,6 +61,7 @@
 }
 
 .batch-mode-panel,
+.batch-surface-panel,
 .batch-estimate-panel,
 .batch-target-editor,
 .batch-schedule-rail,
@@ -71,8 +72,10 @@
   box-shadow: var(--shadow-sm);
 }
 
-.batch-mode-panel {
+.batch-mode-panel,
+.batch-surface-panel {
   display: grid;
+  margin-bottom: var(--space-3);
   padding: var(--space-5);
   grid-template-columns: minmax(14rem, 0.65fr) minmax(0, 1fr);
   align-items: center;
@@ -80,6 +83,7 @@
 }
 
 .batch-mode-panel > div:first-child,
+.batch-surface-panel > div:first-child,
 .batch-section-heading > div,
 .batch-estimate-copy,
 .batch-rail-heading,
@@ -89,13 +93,19 @@
   gap: var(--space-2);
 }
 
-.batch-mode-options {
+.batch-mode-options,
+.batch-surface-options {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--space-2);
 }
 
-.batch-mode-options label {
+.batch-surface-options {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.batch-mode-options label,
+.batch-surface-options label {
   display: flex;
   min-width: 0;
   padding: var(--space-3);
@@ -105,7 +115,8 @@
   background: var(--panel-raised);
 }
 
-.batch-mode-options label:first-child {
+.batch-mode-options label:has(input:checked),
+.batch-surface-options label:has(input:checked) {
   border-color: var(--brand);
   background: var(--brand-soft);
 }
@@ -116,6 +127,7 @@
 }
 
 .batch-mode-options input,
+.batch-surface-options input,
 .batch-acknowledgement input,
 .batch-task-attestation input {
   width: 1.2rem;
@@ -125,12 +137,14 @@
   accent-color: var(--brand);
 }
 
-.batch-mode-options label > span {
+.batch-mode-options label > span,
+.batch-surface-options label > span {
   display: grid;
   gap: var(--space-1);
 }
 
-.batch-mode-options small {
+.batch-mode-options small,
+.batch-surface-options small {
   color: var(--text-muted);
 }
 
@@ -172,6 +186,34 @@
 .batch-task-heading > div {
   display: grid;
   gap: var(--space-1);
+}
+
+.batch-cli-availability {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.batch-cli-availability span {
+  padding: 0.25rem 0.55rem;
+  border: 1px solid currentColor;
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+
+.batch-cli-availability .ready {
+  color: var(--success);
+}
+
+.batch-cli-availability .blocked {
+  color: var(--danger);
+}
+
+.batch-cli-availability small,
+.batch-default-route-note {
+  color: var(--text-muted);
 }
 
 .batch-coordinate {
@@ -513,6 +555,83 @@
   gap: var(--space-3);
 }
 
+.batch-cli-state {
+  align-content: start;
+}
+
+.batch-cli-deferred {
+  display: grid;
+  padding: var(--space-4);
+  border: 1px solid var(--warning);
+  gap: var(--space-3);
+  background: var(--warning-soft);
+}
+
+.batch-cli-deferred > ul {
+  display: grid;
+  padding: 0;
+  gap: var(--space-3);
+  list-style: none;
+}
+
+.batch-cli-deferred > ul > li {
+  display: grid;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+  background: var(--panel);
+}
+
+.batch-cli-deferred li > span {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.batch-cli-deferred li small {
+  color: var(--text-muted);
+}
+
+.batch-retry-review {
+  display: grid;
+  grid-column: 1 / -1;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+  gap: var(--space-3);
+}
+
+.batch-retry-review dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.batch-retry-review dl > div {
+  display: grid;
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  gap: var(--space-1);
+}
+
+.batch-retry-review dt {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.batch-retry-review dd {
+  margin: 0;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-weight: 750;
+}
+
+.batch-retry-review > label {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: start;
+  gap: var(--space-2);
+}
+
 .batch-page button:focus-visible,
 .batch-page a:focus-visible,
 .batch-page input:focus-visible,
@@ -547,6 +666,7 @@
   .batch-hero,
   .batch-run-header,
   .batch-mode-panel,
+  .batch-surface-panel,
   .batch-section-heading,
   .batch-estimate-panel,
   .batch-comparability-note {
@@ -558,6 +678,7 @@
   }
 
   .batch-mode-options,
+  .batch-surface-options,
   .batch-target-fields,
   .batch-cost-grid,
   .batch-result-counts,
@@ -581,6 +702,11 @@
   }
 
   .batch-decline-confirm {
+    grid-template-columns: 1fr;
+  }
+
+  .batch-cli-deferred > ul > li,
+  .batch-retry-review dl {
     grid-template-columns: 1fr;
   }
 }

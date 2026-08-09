@@ -1,5 +1,6 @@
 mod app_state;
 mod batch_commands;
+mod batch_runner;
 mod client_selection;
 mod commands;
 mod data_management;

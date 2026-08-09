@@ -1,9 +1,16 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { expect, test, vi } from "vitest";
 import { BackendProvider } from "../api/BackendContext";
-import type { Backend } from "../api/backend";
+import type { Backend, Bootstrap } from "../api/backend";
 import { unsupportedBatchBackend } from "../api/backend";
 import type {
   BatchEstimate,
@@ -23,7 +30,7 @@ function estimateFor(input: BatchPlanInput): BatchEstimate {
       modelOrRoute: target.target.reportedModel.trim().toLowerCase(),
       reasoningEffort: target.target.reasoningEffort ?? null,
       executionSurface: target.executionSurface,
-      isDefaultRoute: false,
+      isDefaultRoute: target.target.modelSource === "default_route",
     },
     executionAdapterIdentity: target.executionAdapterIdentity,
   }));
@@ -73,35 +80,102 @@ function estimateFor(input: BatchPlanInput): BatchEstimate {
 }
 
 function recordFor(estimate: BatchEstimate): ScanBatchRecord {
+  const repetitions = estimate.plan.costEstimate.repetitionsPerTarget;
+  const members = Array.from(
+    { length: estimate.plan.targets.length * repetitions },
+    (_, ordinal) => ({
+      ordinal,
+      targetPosition: ordinal % estimate.plan.targets.length,
+      repetitionIndex: Math.floor(ordinal / estimate.plan.targets.length),
+      runId: null,
+      status: "planned" as const,
+      failureKind: null,
+      attemptNumber: 0,
+      updatedAt: "2026-07-31T12:00:01Z",
+    }),
+  );
   return {
     id: "39d9f772-2e12-4b2d-af13-94c32d36f2d3",
     plan: estimate.plan,
     status: "created",
     cancelRequested: false,
-    plannedMemberCount: 2,
+    plannedMemberCount: members.length,
     terminalMemberCount: 0,
     createdAt: "2026-07-31T12:00:01Z",
     updatedAt: "2026-07-31T12:00:01Z",
-    members: [
+    members,
+  };
+}
+
+function cliEstimateFor(input: BatchPlanInput): BatchEstimate {
+  const base = estimateFor(input);
+  const repetitions = input.mode === "standard" ? 3 : 1;
+  const plannedMemberRuns = input.targets.length * repetitions;
+  const tasksPerMemberRun = 2;
+  return {
+    ...base,
+    plan: {
+      ...base.plan,
+      suiteId: "cli-quick-v1",
+      mode: input.mode,
+      sessionIsolationPolicy:
+        "machine_enforced_fresh_session_and_workspace_per_task",
+      sealedTaskBudgets: Array.from({ length: tasksPerMemberRun }, () => ({
+        maxTurns: 20,
+        timeBudgetSecs: 1_800,
+      })),
+      costEstimate: {
+        ...base.plan.costEstimate,
+        executionSurface: "automated_cli",
+        mode: input.mode,
+        repetitionsPerTarget: repetitions,
+        tasksPerMemberRun,
+        plannedMemberRuns,
+        taskLaunches: plannedMemberRuns * tasksPerMemberRun,
+        guidedInteractions: 0,
+        maxProviderTurns: plannedMemberRuns * 40,
+        summedTaskBudgetSecs: plannedMemberRuns * 3_600,
+        automaticRetryBudget: 0,
+      },
+    },
+  };
+}
+
+function cliBootstrap(): Bootstrap {
+  return {
+    clientPack: {
+      id: "client-quick-v1",
+      version: "1.0.0",
+      title: "客户端快速体检",
+      taskCount: 8,
+      estimatedMinutes: "10–15",
+    },
+    cliPack: {
+      id: "cli-quick-v1",
+      version: "1.0.0",
+      title: "CLI 快速体检",
+      taskCount: 2,
+      estimatedMinutes: "30–60",
+    },
+    batchCapabilities: ["guided_quick_v1", "cli_standard_v1"],
+    targets: [
       {
-        ordinal: 0,
-        targetPosition: 0,
-        repetitionIndex: 0,
-        runId: null,
-        status: "planned",
-        failureKind: null,
-        attemptNumber: 0,
-        updatedAt: "2026-07-31T12:00:01Z",
+        kind: "codex_cli",
+        installed: true,
+        version: "codex-cli 1.2.3",
+        authState: "ready",
+        status: "ready",
+        source: "native_exe",
+        prerequisites: [],
       },
       {
-        ordinal: 1,
-        targetPosition: 1,
-        repetitionIndex: 0,
-        runId: null,
-        status: "planned",
-        failureKind: null,
-        attemptNumber: 0,
-        updatedAt: "2026-07-31T12:00:01Z",
+        kind: "claude_code",
+        installed: true,
+        version: "1.2.3 (Claude Code)",
+        authState: "ready",
+        status: "ready",
+        source: "native_exe",
+        prerequisites: [],
       },
     ],
   };
@@ -303,12 +377,16 @@ test("exposes only Quick Comparison, explains mixed surfaces, and starts the ack
   fillModels();
   await screen.findByText("16", { selector: "dd" });
 
-  const modes = screen.getAllByRole("radio");
+  const modes = within(
+    screen.getByRole("radiogroup", { name: "批量扫描模式" }),
+  ).getAllByRole("radio");
   expect(modes).toHaveLength(3);
   expect(modes[0]).toBeChecked();
   expect(modes[1]).toBeDisabled();
   expect(modes[2]).toBeDisabled();
-  expect(screen.getByText("为什么这里不能混入 CLI？")).toBeInTheDocument();
+  expect(
+    screen.getByText("为什么客户端与 CLI 分开建批次？"),
+  ).toBeInTheDocument();
 
   const user = userEvent.setup();
   await user.click(
@@ -321,6 +399,92 @@ test("exposes only Quick Comparison, explains mixed surfaces, and starts the ack
       plan: expect.objectContaining({ mode: "quick_comparison" }),
     }),
   );
+  expect(authorizeBatchExecution).toHaveBeenCalledOnce();
+  expect(startBatch).toHaveBeenCalledOnce();
+});
+
+test("creates a Standard automated CLI plan from trusted local launch identities", async () => {
+  const estimateBatch = vi.fn(async (input: BatchPlanInput) =>
+    cliEstimateFor(input),
+  );
+  const createAcknowledgedBatch = vi.fn<Backend["createAcknowledgedBatch"]>(
+    async (input) => recordFor(cliEstimateFor(input.plan)),
+  );
+  const authorizeBatchExecution = vi.fn<Backend["authorizeBatchExecution"]>(
+    async (input) => ({
+      batchId: input.batchId,
+      memberOrdinal: null,
+      attemptNumber: 1,
+      maxTaskLaunches: 12,
+      maxProviderTurns: 240,
+      maxTaskBudgetSecs: 21_600,
+      maxGuidedInteractions: 0,
+      acknowledgementHash: input.acknowledgementHash,
+      allowedFailureKind: null,
+      expiresAt: "2026-08-01T12:00:00Z",
+      createdAt: "2026-07-31T12:00:01Z",
+    }),
+  );
+  const startBatch = vi.fn<Backend["startBatch"]>(async (batchId) => ({
+    ...recordFor(
+      cliEstimateFor(
+        estimateBatch.mock.calls[estimateBatch.mock.calls.length - 1]![0],
+      ),
+    ),
+    id: batchId,
+    status: "running",
+  }));
+  renderSetup(
+    fakeBackend({
+      getBootstrap: vi.fn(async () => cliBootstrap()),
+      estimateBatch,
+      createAcknowledgedBatch,
+      authorizeBatchExecution,
+      startBatch,
+    }),
+  );
+
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("radio", { name: /CLI 自动/ }));
+  expect(await screen.findByText("codex-cli 1.2.3")).toBeInTheDocument();
+  expect(screen.getByText("1.2.3 (Claude Code)")).toBeInTheDocument();
+  await user.click(screen.getByRole("radio", { name: /标准/ }));
+
+  await waitFor(() =>
+    expect(estimateBatch).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        mode: "standard",
+        targets: [
+          expect.objectContaining({
+            executionSurface: "automated_cli",
+            target: expect.objectContaining({
+              kind: "codex_cli",
+              modelSource: "default_route",
+              modelVerification: "unverified",
+            }),
+            executionAdapterIdentity: expect.objectContaining({
+              launchKind: "native_exe",
+              publicVersion: "codex-cli 1.2.3",
+            }),
+          }),
+          expect.objectContaining({
+            target: expect.objectContaining({ kind: "claude_code" }),
+            executionAdapterIdentity: expect.objectContaining({
+              publicVersion: "1.2.3 (Claude Code)",
+            }),
+          }),
+        ],
+      }),
+    ),
+  );
+  expect(screen.getByRole("radio", { name: /完整/ })).toBeDisabled();
+
+  await user.click(
+    screen.getByRole("checkbox", { name: /我已核对这次扫描的目标/ }),
+  );
+  await user.click(screen.getByRole("button", { name: "确认并建立扫描" }));
+  await screen.findByText("进入批量运行页");
+  expect(createAcknowledgedBatch).toHaveBeenCalledOnce();
   expect(authorizeBatchExecution).toHaveBeenCalledOnce();
   expect(startBatch).toHaveBeenCalledOnce();
 });

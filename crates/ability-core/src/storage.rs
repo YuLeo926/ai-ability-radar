@@ -537,6 +537,40 @@ impl RunRepository {
             .map_err(StorageError::from)
     }
 
+    pub fn is_batch_owned_run(&self, run_id: Uuid) -> Result<bool, StorageError> {
+        let count: i64 = self.connection.lock().query_row(
+            "SELECT COUNT(*) FROM scan_batch_members WHERE run_id=?1",
+            [run_id.to_string()],
+            |row| row.get(0),
+        )?;
+        Ok(count != 0)
+    }
+
+    pub fn is_active_batch_member_run(
+        &self,
+        batch_id: Uuid,
+        member_ordinal: u32,
+        run_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        let count: i64 = self.connection.lock().query_row(
+            "SELECT COUNT(*)
+             FROM scan_batch_members m
+             JOIN scan_batches b ON b.id=m.batch_id
+             JOIN runs r ON r.id=m.run_id
+             WHERE m.batch_id=?1 AND m.ordinal=?2 AND m.run_id=?3
+               AND m.status_json=?4 AND r.status_json=?5 AND b.cancel_requested=0",
+            params![
+                batch_id.to_string(),
+                i64::from(member_ordinal),
+                run_id.to_string(),
+                serde_json::to_string(&BatchMemberStatus::Running)?,
+                serde_json::to_string(&RunStatus::Running)?,
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(count == 1)
+    }
+
     pub fn get_task_results(&self, run_id: Uuid) -> Result<Vec<TaskResult>, StorageError> {
         let connection = self.connection.lock();
         let mut statement = connection.prepare(
@@ -1393,17 +1427,41 @@ impl RunRepository {
         run_id: Uuid,
         at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
+        self.mark_member_running_retrying_exact_marker(batch_id, ordinal, run_id, None, at)
+    }
+
+    pub fn mark_member_running_retrying_exact_marker(
+        &self,
+        batch_id: Uuid,
+        ordinal: u32,
+        run_id: Uuid,
+        expected_marker: Option<&TaskResult>,
+        at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        if let Some(marker) = expected_marker {
+            validate_retry_marker(marker)?;
+            if marker.run_id != run_id {
+                return Err(StorageError::InvalidData(
+                    "retry marker belongs to a different batch run".into(),
+                ));
+            }
+        }
         let mut connection = self.connection.lock();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        load_batch(&transaction, batch_id)?
+        let batch = load_batch(&transaction, batch_id)?
             .ok_or_else(|| StorageError::InvalidData("batch does not exist".into()))?;
-        require_member_state(
+        let member = require_member_state(
             &transaction,
             batch_id,
             ordinal,
             Some(run_id),
             BatchMemberStatus::Launching,
         )?;
+        if !active_member_authorization(&transaction, &batch.plan, batch_id, &member, at)? {
+            return Err(StorageError::InvalidData(
+                "launching member execution authorization is no longer active".into(),
+            ));
+        }
         let run =
             run_in_transaction(&transaction, run_id)?.ok_or(StorageError::RunNotFound(run_id))?;
         if !matches!(run.status, RunStatus::Created | RunStatus::Interrupted) {
@@ -1411,17 +1469,70 @@ impl RunRepository {
                 "launching member run is not startable".into(),
             ));
         }
+        let mut completed_tasks = run.completed_tasks;
+        if let Some(expected_marker) = expected_marker {
+            if run.status != RunStatus::Interrupted || member.attempt_number < 2 {
+                return Err(StorageError::InvalidData(
+                    "retry marker requires an explicitly reauthorized interrupted member".into(),
+                ));
+            }
+            let authorization = authorization_in_transaction(
+                &transaction,
+                batch_id,
+                i64::from(ordinal),
+                member.attempt_number,
+            )?
+            .ok_or_else(|| {
+                StorageError::InvalidData(
+                    "retry marker has no exact member-scoped authorization".into(),
+                )
+            })?;
+            if authorization.allowed_failure_kind != expected_marker.failure_kind {
+                return Err(StorageError::InvalidData(
+                    "retry marker no longer matches the authorized durable failure".into(),
+                ));
+            }
+            let stored_marker = task_results_in_transaction(&transaction, run_id)?
+                .into_iter()
+                .find(|result| result.task_id == expected_marker.task_id)
+                .ok_or_else(|| {
+                    StorageError::InvalidData("retry marker changed before batch resume".into())
+                })?;
+            if stored_marker != *expected_marker {
+                return Err(StorageError::InvalidData(
+                    "retry marker changed before batch resume".into(),
+                ));
+            }
+            let changed = transaction.execute(
+                "DELETE FROM task_results WHERE run_id=?1 AND task_id=?2",
+                params![run_id.to_string(), &expected_marker.task_id],
+            )?;
+            if changed != 1 {
+                return Err(StorageError::InvalidData(
+                    "retry marker changed before batch resume".into(),
+                ));
+            }
+            completed_tasks = completed_tasks.checked_sub(1).ok_or_else(|| {
+                StorageError::InvalidData("retry marker count is inconsistent".into())
+            })?;
+        } else if run.status == RunStatus::Created && run.completed_tasks != 0 {
+            return Err(StorageError::InvalidData(
+                "fresh batch run contains unexpected checkpoints".into(),
+            ));
+        }
         let mut environment = run.environment;
         if run.status == RunStatus::Interrupted {
             environment.resumed = true;
         }
         let changed = transaction.execute(
-            "UPDATE runs SET status_json=?2,finished_at=NULL,score_json=NULL,environment_json=?3
-             WHERE id=?1 AND status_json=?4",
+            "UPDATE runs SET status_json=?2,finished_at=NULL,score_json=NULL,environment_json=?3,
+                             completed_tasks=?4
+             WHERE id=?1 AND status_json=?5",
             params![
                 run_id.to_string(),
                 serde_json::to_string(&RunStatus::Running)?,
                 serde_json::to_string(&environment)?,
+                i64::from(completed_tasks),
                 serde_json::to_string(&run.status)?,
             ],
         )?;
@@ -1480,9 +1591,15 @@ impl RunRepository {
                 "only the exact runnable or active member can be deferred".into(),
             ));
         }
+        let mut effective_failure_kind = failure_kind;
         if let Some(run_id) = run_id {
             let run = run_in_transaction(&transaction, run_id)?
                 .ok_or(StorageError::RunNotFound(run_id))?;
+            if let Some(marker_failure) =
+                durable_retry_failure_in_transaction(&transaction, run_id)?
+            {
+                effective_failure_kind = marker_failure;
+            }
             if matches!(run.status, RunStatus::Created | RunStatus::Running) {
                 transaction.execute(
                     "UPDATE runs SET status_json=?2,finished_at=?3,score_json=NULL
@@ -1506,7 +1623,7 @@ impl RunRepository {
             ordinal,
             member.status,
             BatchMemberStatus::Deferred,
-            Some(failure_kind),
+            Some(effective_failure_kind),
             at,
         )?;
         update_batch_status_in_transaction(&transaction, batch_id, at)?;
@@ -1702,6 +1819,67 @@ impl RunRepository {
         Ok(())
     }
 
+    pub fn save_cli_batch_task_result(
+        &self,
+        batch_id: Uuid,
+        ordinal: u32,
+        result: &TaskResult,
+    ) -> Result<(), StorageError> {
+        validate_task_result(result)?;
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let member = require_member_state(
+            &transaction,
+            batch_id,
+            ordinal,
+            Some(result.run_id),
+            BatchMemberStatus::Running,
+        )?;
+        let batch = load_batch(&transaction, batch_id)?
+            .ok_or_else(|| StorageError::InvalidData("batch does not exist".into()))?;
+        if batch.cancel_requested {
+            return Err(StorageError::InvalidData(
+                "cancelled batch cannot accept new CLI task evidence".into(),
+            ));
+        }
+        if batch.plan.session_isolation_policy
+            != crate::SessionIsolationPolicy::MachineEnforcedFreshSessionAndWorkspacePerTask
+            || batch.plan.task_session_policy_version != 1
+        {
+            return Err(StorageError::InvalidData(
+                "CLI checkpoint requires the reviewed machine-isolation policy".into(),
+            ));
+        }
+        let surface_json: String = transaction.query_row(
+            "SELECT t.execution_surface_json
+             FROM scan_batch_members m
+             JOIN scan_batch_targets t
+               ON t.batch_id=m.batch_id AND t.position=m.target_position
+             WHERE m.batch_id=?1 AND m.ordinal=?2",
+            params![batch_id.to_string(), i64::from(ordinal)],
+            |row| row.get(0),
+        )?;
+        let surface: crate::BatchExecutionSurface = serde_json::from_str(&surface_json)?;
+        if surface != crate::BatchExecutionSurface::AutomatedCli {
+            return Err(StorageError::InvalidData(
+                "machine-isolated CLI checkpoint belongs to a guided member".into(),
+            ));
+        }
+        if reviewed_task_category(&batch.plan, &result.task_id) != Some(result.category) {
+            return Err(StorageError::InvalidData(
+                "task id/category is not owned by the batch sealed pack".into(),
+            ));
+        }
+        if !active_member_authorization(&transaction, &batch.plan, batch_id, &member, Utc::now())? {
+            return Err(StorageError::InvalidData(
+                "CLI checkpoint has no active execution authorization".into(),
+            ));
+        }
+        save_task_result_in_transaction(&transaction, result)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn reconcile_batches_after_startup(
         &self,
         now: DateTime<Utc>,
@@ -1819,6 +1997,12 @@ impl RunRepository {
                         interrupt_run_in_transaction(&transaction, run_id, run.status, now)?;
                     }
                     _ => {}
+                }
+                if next == BatchMemberStatus::Deferred
+                    && let Some(marker_failure) =
+                        durable_retry_failure_in_transaction(&transaction, run_id)?
+                {
+                    failure = Some(marker_failure);
                 }
                 if next != member.status || failure != member.failure_kind {
                     update_member_state(
@@ -3131,6 +3315,24 @@ fn task_results_in_transaction(
     let rows = statement.query_map([run_id.to_string()], row_to_task_result)?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(StorageError::from)
+}
+
+fn durable_retry_failure_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    run_id: Uuid,
+) -> Result<Option<FailureKind>, StorageError> {
+    let mut markers = task_results_in_transaction(transaction, run_id)?
+        .into_iter()
+        .filter(|result| result.outcome == TaskOutcome::Invalid);
+    let Some(marker) = markers.next() else {
+        return Ok(None);
+    };
+    if markers.next().is_some() {
+        return Ok(None);
+    }
+    Ok(marker
+        .failure_kind
+        .filter(|failure| is_retryable_batch_failure(*failure)))
 }
 
 fn run_status_in_transaction(

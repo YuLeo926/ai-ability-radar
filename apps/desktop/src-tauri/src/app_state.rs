@@ -1,3 +1,4 @@
+use crate::batch_runner::BatchRunner;
 use ability_adapters::{
     AgentAdapter, AuthState, AvailabilityStatus, ClaudeCodeAdapter, CliRunService, CodexAdapter,
     NodeVerifier, PrerequisiteStatus, ProcessEnvironment, ProcessRunner, ProcessSpec,
@@ -215,6 +216,7 @@ pub struct AppState {
     pub(crate) repository: Arc<RunRepository>,
     pub(crate) manual_runs: Arc<ManualRunService>,
     pub(crate) cli_runs: Arc<CliRunService>,
+    pub(crate) batch_runner: Arc<BatchRunner>,
     pub(crate) client_pack: Arc<LoadedPack>,
     pub(crate) cli_pack: Arc<LoadedPack>,
     pub(crate) verifier: Arc<dyn WorkspaceVerifier>,
@@ -275,16 +277,25 @@ impl AppState {
         ));
         let verifier: Arc<dyn WorkspaceVerifier> =
             Arc::new(NodeVerifier::new(runner.clone(), layout.cli_pack));
+        let cli_runs = Arc::new(CliRunService::new(
+            repository.clone(),
+            artifact_root.clone(),
+        ));
+        let batch_runner = Arc::new(BatchRunner::new(
+            repository.clone(),
+            cli_runs.clone(),
+            cli_pack.clone(),
+            verifier.clone(),
+            run_operations.clone(),
+        ));
 
         Ok(Self {
             manual_runs: Arc::new(ManualRunService::new(
                 repository.clone(),
                 artifact_root.clone(),
             )),
-            cli_runs: Arc::new(CliRunService::new(
-                repository.clone(),
-                artifact_root.clone(),
-            )),
+            cli_runs,
+            batch_runner,
             repository,
             client_pack,
             cli_pack,

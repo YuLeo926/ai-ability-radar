@@ -986,7 +986,7 @@ pub fn validate_recovery_checkpoints(
     let expected_count = u32::try_from(pack.tasks.len())
         .map_err(|_| StorageError::InvalidData("task count exceeds supported range".into()))?;
     if !expected_target
-        || run.mode != RunMode::Quick
+        || !(run.mode == RunMode::Quick || (cli && run.mode == RunMode::Deep))
         || !pack.manifest.target_kinds.contains(&run.target.kind)
         || run.suite_id != pack.manifest.id
         || run.suite_version != pack.manifest.version

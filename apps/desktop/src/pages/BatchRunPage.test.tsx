@@ -167,6 +167,96 @@ function completedBatch(): ScanBatchRecord {
   };
 }
 
+function cliBatchRecord(paused = false): ScanBatchRecord {
+  const base = batchRecord();
+  return {
+    ...base,
+    status: paused ? "paused" : "running",
+    terminalMemberCount: paused ? 1 : 0,
+    plan: {
+      ...base.plan,
+      suiteId: "cli-quick",
+      mode: "standard",
+      sessionIsolationPolicy:
+        "machine_enforced_fresh_session_and_workspace_per_task",
+      targets: [
+        {
+          target: {
+            kind: "codex_cli",
+            reportedModel: "gpt-5.6-sol",
+            reasoningEffort: "max",
+            modelSource: "cli_requested",
+            modelVerification: "user_confirmed",
+          },
+          routeIdentity: {
+            kind: "codex_cli",
+            modelOrRoute: "gpt-5.6-sol",
+            reasoningEffort: "max",
+            executionSurface: "automated_cli",
+            isDefaultRoute: false,
+          },
+          executionAdapterIdentity: {
+            executionSurface: "automated_cli",
+            providerFamily: "openai",
+            launchKind: "native_exe",
+            publicVersion: "codex-cli 1.2.3",
+            adapterContractVersion: "codex-cli-v1",
+          },
+        },
+        {
+          target: {
+            kind: "claude_code",
+            reportedModel: "claude-sonnet-4-5",
+            reasoningEffort: "high",
+            modelSource: "cli_requested",
+            modelVerification: "user_confirmed",
+          },
+          routeIdentity: {
+            kind: "claude_code",
+            modelOrRoute: "claude-sonnet-4-5",
+            reasoningEffort: "high",
+            executionSurface: "automated_cli",
+            isDefaultRoute: false,
+          },
+          executionAdapterIdentity: {
+            executionSurface: "automated_cli",
+            providerFamily: "anthropic",
+            launchKind: "native_exe",
+            publicVersion: "1.2.3 (claude code)",
+            adapterContractVersion: "claude-code-v1",
+          },
+        },
+      ],
+      costEstimate: {
+        ...base.plan.costEstimate,
+        executionSurface: "automated_cli",
+        mode: "standard",
+        guidedInteractions: 0,
+        maxProviderTurns: 240,
+        summedTaskBudgetSecs: 21_600,
+        authorizationWallClockSecs: 86_400,
+      },
+    },
+    members: paused
+      ? [
+          {
+            ...base.members[0]!,
+            status: "deferred",
+            failureKind: "network",
+            attemptNumber: 1,
+          },
+          {
+            ...base.members[1]!,
+            runId: "6eac7183-954c-426d-9c69-86a96772da12",
+            status: "completed",
+            failureKind: null,
+            attemptNumber: 1,
+          },
+        ]
+      : base.members,
+  };
+}
+
 function activeDecision(
   record = batchRecord(),
 ): NextGuidedMember {
@@ -421,4 +511,96 @@ test("completion navigates to an insufficient_data result without a degradation 
   expect(screen.getByText("insufficient_data")).toBeInTheDocument();
   expect(screen.getByText(/明确没有下“降智”结论/)).toBeInTheDocument();
   expect(screen.queryByText(/确认降智|已经降智/)).not.toBeInTheDocument();
+});
+
+test("renders an automated CLI batch without calling guided-member commands", async () => {
+  const record = cliBatchRecord();
+  const getNextGuidedMember = vi.fn(async () => activeDecision());
+  const cancelBatch = vi.fn(async () => ({
+    ...record,
+    status: "cancelled" as const,
+    cancelRequested: true,
+    terminalMemberCount: 2,
+    members: record.members.map((member) => ({
+      ...member,
+      status: "cancelled" as const,
+      failureKind: "user_cancelled" as const,
+    })),
+  }));
+  renderRun(
+    fakeBackend({
+      getBatch: vi.fn(async () => record),
+      getNextGuidedMember,
+      cancelBatch,
+    }),
+  );
+
+  await screen.findByRole("heading", { name: "串行执行每个模型坐标" });
+  expect(screen.getByText(/全新临时会话与独立工作区/)).toBeInTheDocument();
+  expect(screen.getByText(/任一时刻最多只有一个成员/)).toBeInTheDocument();
+  expect(getNextGuidedMember).not.toHaveBeenCalled();
+  await userEvent.setup().click(
+    screen.getByRole("button", { name: "取消并阻止后续启动" }),
+  );
+  await waitFor(() => expect(cancelBatch).toHaveBeenCalledWith(batchId));
+});
+
+test("requires a fresh bounded authorization before retrying one deferred CLI member", async () => {
+  const record = cliBatchRecord(true);
+  const retryAuthorization = {
+    batchId,
+    memberOrdinal: 0,
+    attemptNumber: 2,
+    maxTaskLaunches: 2,
+    maxProviderTurns: 40,
+    maxTaskBudgetSecs: 3_600,
+    maxGuidedInteractions: 0,
+    acknowledgementHash: "c".repeat(64),
+    allowedFailureKind: "network" as const,
+    expiresAt: "2026-08-01T12:00:00Z",
+    createdAt: "2026-07-31T12:05:00Z",
+  };
+  const estimateBatchRetry = vi.fn<Backend["estimateBatchRetry"]>(async () => ({
+    authorization: retryAuthorization,
+  }));
+  const authorizeBatchRetry = vi.fn<Backend["authorizeBatchRetry"]>(
+    async () => retryAuthorization,
+  );
+  const resumeBatch = vi.fn(async () => ({ ...record, status: "running" as const }));
+  renderRun(
+    fakeBackend({
+      getBatch: vi.fn(async () => record),
+      estimateBatchRetry,
+      authorizeBatchRetry,
+      resumeBatch,
+    }),
+  );
+
+  await screen.findByRole("heading", { name: "扫描已安全暂停" });
+  expect(screen.getByText("网络故障")).toBeInTheDocument();
+  const user = userEvent.setup();
+  await user.click(
+    screen.getByRole("button", { name: "生成最新重试预算" }),
+  );
+  expect(await screen.findByText("60 分钟")).toBeInTheDocument();
+  const authorize = screen.getByRole("button", {
+    name: "授权同一运行继续",
+  });
+  expect(authorize).toBeDisabled();
+  await user.click(
+    screen.getByRole("checkbox", { name: /只恢复这一成员/ }),
+  );
+  expect(authorize).toBeEnabled();
+  await user.click(authorize);
+
+  await waitFor(() =>
+    expect(authorizeBatchRetry).toHaveBeenCalledWith({
+      batchId,
+      memberOrdinal: 0,
+      allowedFailureKind: "network",
+      estimateCreatedAt: "2026-07-31T12:05:00Z",
+      acknowledgementHash: "c".repeat(64),
+    }),
+  );
+  expect(resumeBatch).toHaveBeenCalledWith(batchId);
 });

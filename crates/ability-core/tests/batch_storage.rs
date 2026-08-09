@@ -523,6 +523,32 @@ fn running_crash_is_deferred_on_the_same_run_without_completion() {
 }
 
 #[test]
+fn startup_reconciliation_preserves_the_exact_durable_retry_failure() {
+    let directory = tempdir().unwrap();
+    let repository = RunRepository::open(&directory.path().join("ability.db")).unwrap();
+    let (batch_id, plan) = create_batch(&repository);
+    let run = reserve_and_start(&repository, batch_id, &plan, 0);
+    let mut marker = passing_result(run.id, "instruction-filter");
+    marker.outcome = TaskOutcome::Invalid;
+    marker.score = None;
+    marker.failure_kind = Some(FailureKind::Network);
+    marker.detail = "synthetic network failure".into();
+    repository
+        .save_guided_task_result_with_isolation(batch_id, 0, &marker, &attestation(&plan, 2))
+        .unwrap();
+
+    repository
+        .reconcile_batches_after_startup(plan.cost_estimate.issued_at + Duration::minutes(3))
+        .unwrap();
+
+    let batch = repository.get_batch(batch_id).unwrap().unwrap();
+    assert_eq!(batch.members[0].status, BatchMemberStatus::Deferred);
+    assert_eq!(batch.members[0].run_id, Some(run.id));
+    assert_eq!(batch.members[0].failure_kind, Some(FailureKind::Network));
+    assert_eq!(repository.get_task_results(run.id).unwrap(), vec![marker]);
+}
+
+#[test]
 fn batch_status_is_derived_from_members() {
     let directory = tempdir().unwrap();
     let repository = RunRepository::open(&directory.path().join("ability.db")).unwrap();

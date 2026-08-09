@@ -3,10 +3,10 @@ use crate::{
     WorkspaceVerifier,
 };
 use ability_core::{
-    ArtifactStore, EnvironmentFingerprint, FailureKind, GraderSpec, LoadedPack, LoadedTask,
-    RecoveryArtifactCheckpoint, RunMode, RunRecord, RunRepository, RunStatus, StorageError,
-    TargetKind, TargetSelection, TaskOutcome, TaskResult, summarize_scores, validate_recovery,
-    validate_recovery_checkpoints,
+    ArtifactStore, BatchMemberStatus, BatchReservation, EnvironmentFingerprint, FailureKind,
+    GraderSpec, LoadedPack, LoadedTask, RecoveryArtifactCheckpoint, RunMode, RunRecord,
+    RunRepository, RunStatus, StorageError, TargetKind, TargetSelection, TaskOutcome, TaskResult,
+    summarize_scores, validate_recovery, validate_recovery_checkpoints,
 };
 #[cfg(test)]
 use ability_core::{ModelSource, ModelVerification};
@@ -97,6 +97,35 @@ pub struct CliRunService {
 #[cfg(test)]
 type WorkspaceCopyHook = Arc<dyn Fn(&Path) + Send + Sync>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CliBatchExecutionBinding {
+    pub batch_id: Uuid,
+    pub member_ordinal: u32,
+    pub run_id: Uuid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CliExecutionScope {
+    Single(Uuid),
+    Batch(CliBatchExecutionBinding),
+}
+
+impl CliExecutionScope {
+    fn run_id(self) -> Uuid {
+        match self {
+            Self::Single(run_id) => run_id,
+            Self::Batch(binding) => binding.run_id,
+        }
+    }
+
+    fn batch_binding(self) -> Option<CliBatchExecutionBinding> {
+        match self {
+            Self::Single(_) => None,
+            Self::Batch(binding) => Some(binding),
+        }
+    }
+}
+
 impl CliRunService {
     pub fn new(repository: Arc<RunRepository>, artifact_root: PathBuf) -> Self {
         Self {
@@ -140,6 +169,77 @@ impl CliRunService {
         run.status = RunStatus::Running;
         self.repository.insert_run(&run)?;
         Ok(run)
+    }
+
+    pub fn prepare_owned_batch_run(
+        &self,
+        pack: &LoadedPack,
+        reservation: &BatchReservation,
+        current_environment: &EnvironmentFingerprint,
+    ) -> Result<Option<TaskResult>, CliRunError> {
+        validate_artifact_root(&self.artifact_root)?;
+        let run = &reservation.run;
+        if reservation.member.status != BatchMemberStatus::Reserved
+            || reservation.member.run_id != Some(run.id)
+            || !matches!(run.status, RunStatus::Created | RunStatus::Interrupted)
+        {
+            return Err(CliRunError::NotResumable);
+        }
+        validate_pack(pack, run.target.kind)?;
+        if run.suite_id != pack.manifest.id
+            || run.suite_version != pack.manifest.version
+            || run.environment.suite_id != pack.manifest.id
+            || run.environment.suite_version != pack.manifest.version
+            || run.environment.suite_content_sha256 != pack.content_sha256
+            || run.environment.execution_adapter_identity
+                != current_environment.execution_adapter_identity
+        {
+            return Err(CliRunError::PackMismatch);
+        }
+
+        let results = self.repository.get_task_results(run.id)?;
+        let retry_marker = if run.status == RunStatus::Interrupted {
+            validate_cli_recovery_with_retry_marker(
+                run,
+                &results,
+                &run.target,
+                pack,
+                current_environment,
+            )?
+        } else {
+            if run.completed_tasks != 0
+                || !results.is_empty()
+                || run.environment != *current_environment
+                || current_environment.resumed
+            {
+                return Err(CliRunError::UnexpectedCheckpoint);
+            }
+            None
+        };
+
+        if run.status == RunStatus::Interrupted {
+            let pack_task_ids = pack
+                .tasks
+                .iter()
+                .map(|task| task.definition.id.clone())
+                .collect::<Vec<_>>();
+            let checkpoints = results
+                .iter()
+                .filter(|result| {
+                    retry_marker
+                        .as_ref()
+                        .is_none_or(|marker| marker.task_id != result.task_id)
+                })
+                .map(|result| RecoveryArtifactCheckpoint {
+                    task_id: result.task_id.clone(),
+                    raw_artifact: result.answer_rel_path.is_some(),
+                })
+                .collect::<Vec<_>>();
+            ArtifactStore::new(self.artifact_root.clone())
+                .prepare_recovery_artifacts(run.id, run.target.kind, &pack_task_ids, &checkpoints)
+                .map_err(|_| CliRunError::NotResumable)?;
+        }
+        Ok(retry_marker)
     }
 
     pub fn resume(
@@ -221,6 +321,57 @@ impl CliRunService {
         cancellation: CancellationToken,
         events: UnboundedSender<RunEvent>,
     ) -> Result<(), CliRunError> {
+        self.execute_with_binding(
+            CliExecutionScope::Single(run_id),
+            pack,
+            adapter,
+            verifier,
+            cancellation,
+            events,
+        )
+        .await
+    }
+
+    pub async fn execute_owned_batch_member(
+        &self,
+        binding: CliBatchExecutionBinding,
+        pack: Arc<LoadedPack>,
+        adapter: Arc<dyn AgentAdapter>,
+        verifier: Arc<dyn WorkspaceVerifier>,
+        cancellation: CancellationToken,
+        events: UnboundedSender<RunEvent>,
+    ) -> Result<(), CliRunError> {
+        self.execute_with_binding(
+            CliExecutionScope::Batch(binding),
+            pack,
+            adapter,
+            verifier,
+            cancellation,
+            events,
+        )
+        .await
+    }
+
+    async fn execute_with_binding(
+        &self,
+        scope: CliExecutionScope,
+        pack: Arc<LoadedPack>,
+        adapter: Arc<dyn AgentAdapter>,
+        verifier: Arc<dyn WorkspaceVerifier>,
+        cancellation: CancellationToken,
+        events: UnboundedSender<RunEvent>,
+    ) -> Result<(), CliRunError> {
+        let run_id = scope.run_id();
+        let batch = scope.batch_binding();
+        if let Some(binding) = batch
+            && !self.repository.is_active_batch_member_run(
+                binding.batch_id,
+                binding.member_ordinal,
+                run_id,
+            )?
+        {
+            return Err(CliRunError::NotResumable);
+        }
         let run = match self.repository.get_run(run_id) {
             Ok(Some(run)) => run,
             Ok(None) => return Err(CliRunError::Storage(StorageError::RunNotFound(run_id))),
@@ -268,8 +419,7 @@ impl CliRunService {
         let mut completed_tasks =
             u32::try_from(completed_ids.len()).map_err(|_| CliRunError::CountOverflow)?;
         if cancellation.is_cancelled() {
-            self.repository
-                .finish_without_score(run_id, RunStatus::Cancelled)?;
+            self.finish_without_score_for_execution(run_id, RunStatus::Cancelled, batch)?;
             send_event(
                 &events,
                 run_id,
@@ -286,8 +436,7 @@ impl CliRunService {
                 continue;
             }
             if cancellation.is_cancelled() {
-                self.repository
-                    .finish_without_score(run_id, RunStatus::Cancelled)?;
+                self.finish_without_score_for_execution(run_id, RunStatus::Cancelled, batch)?;
                 send_event(
                     &events,
                     run_id,
@@ -321,8 +470,7 @@ impl CliRunService {
                         total_tasks,
                     ));
                 }
-                self.repository
-                    .finish_without_score(run_id, RunStatus::Cancelled)?;
+                self.finish_without_score_for_execution(run_id, RunStatus::Cancelled, batch)?;
                 send_event(
                     &events,
                     run_id,
@@ -440,7 +588,15 @@ impl CliRunService {
                 result.failure_kind = Some(FailureKind::UserCancelled);
                 result.detail = "user_cancelled_after_task_work".into();
             }
-            if let Err(error) = self.repository.save_task_result(&result) {
+            let checkpoint = match batch {
+                Some(binding) => self.repository.save_cli_batch_task_result(
+                    binding.batch_id,
+                    binding.member_ordinal,
+                    &result,
+                ),
+                None => self.repository.save_task_result(&result),
+            };
+            if let Err(error) = checkpoint {
                 return Err(self.interrupt_after_error(
                     run_id,
                     CliRunError::Storage(error),
@@ -471,8 +627,7 @@ impl CliRunService {
             );
 
             if result.outcome == TaskOutcome::Cancelled || cancellation.is_cancelled() {
-                self.repository
-                    .finish_without_score(run_id, RunStatus::Cancelled)?;
+                self.finish_without_score_for_execution(run_id, RunStatus::Cancelled, batch)?;
                 send_event(
                     &events,
                     run_id,
@@ -484,8 +639,7 @@ impl CliRunService {
                 return Ok(());
             }
             if result.outcome == TaskOutcome::Invalid {
-                self.repository
-                    .finish_without_score(run_id, RunStatus::Interrupted)?;
+                self.finish_without_score_for_execution(run_id, RunStatus::Interrupted, batch)?;
                 send_event(
                     &events,
                     run_id,
@@ -707,6 +861,26 @@ impl CliRunService {
         completed_tasks: u32,
         total_tasks: u32,
     ) -> CliRunError {
+        match self.repository.is_batch_owned_run(run_id) {
+            Ok(true) => {
+                send_event(
+                    events,
+                    run_id,
+                    RunEventKind::RunFinished,
+                    None,
+                    completed_tasks,
+                    total_tasks,
+                );
+                return original;
+            }
+            Ok(false) => {}
+            Err(terminalization) => {
+                return CliRunError::TerminalizationFailed {
+                    original: Box::new(original),
+                    terminalization,
+                };
+            }
+        }
         match self
             .repository
             .finish_without_score(run_id, RunStatus::Interrupted)
@@ -726,6 +900,20 @@ impl CliRunService {
                 original: Box::new(original),
                 terminalization,
             },
+        }
+    }
+
+    fn finish_without_score_for_execution(
+        &self,
+        run_id: Uuid,
+        status: RunStatus,
+        batch: Option<CliBatchExecutionBinding>,
+    ) -> Result<(), CliRunError> {
+        if batch.is_some() {
+            Ok(())
+        } else {
+            self.repository.finish_without_score(run_id, status)?;
+            Ok(())
         }
     }
 }

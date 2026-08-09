@@ -1,7 +1,8 @@
 use ability_adapters::{
-    AdapterCompletion, AdapterError, AgentAdapter, AuthState, AvailabilityStatus, CliRunError,
-    CliRunService, ExecutionRequest, LaunchSource, PrerequisiteStatus, RunEvent, RunEventKind,
-    TargetAvailability, VerificationGrade, WorkspaceVerifier, adapter_error_grade,
+    AdapterCompletion, AdapterError, AgentAdapter, AuthState, AvailabilityStatus,
+    CliBatchExecutionBinding, CliRunError, CliRunService, ExecutionRequest, LaunchSource,
+    PrerequisiteStatus, RunEvent, RunEventKind, TargetAvailability, VerificationGrade,
+    WorkspaceVerifier, adapter_error_grade,
 };
 use ability_core::{
     EnvironmentFingerprint, FailureKind, LoadedPack, ModelSource, ModelVerification, PackLoader,
@@ -416,6 +417,44 @@ async fn copies_starter_runs_agent_verifies_checkpoints_and_emits_ordered_events
             (RunEventKind::TaskFinished, Some("task-2"), 2, 2),
             (RunEventKind::RunFinished, None, 2, 2),
         ]
+    );
+}
+
+#[tokio::test]
+async fn owned_batch_execution_rejects_an_unbound_run_before_any_adapter_side_effect() {
+    let fixture = Fixture::new(1);
+    let run = fixture.prepare();
+    let adapter = Arc::new(FakeAdapter::new(
+        TargetKind::CodexCli,
+        [AdapterStep::Complete { duration_ms: 1 }],
+    ));
+    let verifier = Arc::new(FakeVerifier::new([VerifierStep::Grade(passed_grade(1))]));
+    let (sender, receiver) = mpsc::unbounded_channel();
+
+    let result = fixture
+        .service
+        .execute_owned_batch_member(
+            CliBatchExecutionBinding {
+                batch_id: Uuid::new_v4(),
+                member_ordinal: 0,
+                run_id: run.id,
+            },
+            fixture.pack.clone(),
+            adapter.clone(),
+            verifier.clone(),
+            CancellationToken::new(),
+            sender,
+        )
+        .await;
+
+    assert!(matches!(result, Err(CliRunError::NotResumable)));
+    assert_eq!(adapter.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(verifier.calls.load(Ordering::SeqCst), 0);
+    assert!(!fixture.artifact_root.exists());
+    assert!(collect_events(receiver).is_empty());
+    assert_eq!(
+        fixture.repository.get_run(run.id).unwrap().unwrap().status,
+        RunStatus::Running
     );
 }
 

@@ -1,4 +1,7 @@
-use crate::app_state::AppState;
+use crate::app_state::{
+    fresh_provider_adapters, probe_node, supported_node_lts, AppState, LocalDataMutationClaim,
+};
+use crate::batch_runner::BatchRunEvent;
 use crate::dto::{
     AuthorizeBatchExecutionInput, AuthorizeBatchRetryInput, BatchEstimateDto,
     BatchExecutionAuthorizationDto, BatchIdInput, BatchPlanInput, BatchRetryEstimateDto,
@@ -15,8 +18,11 @@ use ability_core::{
     TargetSelection,
 };
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 use std::sync::Arc;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 pub(crate) const BATCH_CAPABILITIES: [BatchFeatureLevel; 2] = [
@@ -89,6 +95,7 @@ fn validate_reviewed_adapter(input: &BatchTargetInput) -> Result<(), String> {
                     adapter.launch_kind,
                     AdapterLaunchKind::NativeExe | AdapterLaunchKind::ReviewedNpm
                 )
+                && adapter.public_version.is_some()
         }
     };
     if adapter.execution_surface != input.execution_surface
@@ -719,6 +726,90 @@ fn claim_mutation(state: &AppState) -> Result<crate::app_state::LocalDataMutatio
         .map_err(|_| "local data is busy; retry after the current backup or mutation".into())
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchRunErrorEvent {
+    batch_id: String,
+    message: &'static str,
+}
+
+const SAFE_BATCH_BACKGROUND_ERROR: &str =
+    "CLI 批量扫描已安全暂停；不会自动重放，也不会把基础设施故障计为能力下降。";
+
+async fn launch_cli_batch_if_needed(
+    app: AppHandle,
+    state: &AppState,
+    batch: &ScanBatchRecord,
+    local_data: LocalDataMutationClaim,
+) -> Result<(), String> {
+    if batch_surface(batch)? != BatchExecutionSurface::AutomatedCli {
+        return Ok(());
+    }
+    if batch.plan.mode == BatchMode::Full {
+        return Err("Full CLI batches are not enabled in this phase".into());
+    }
+
+    let cancellation = CancellationToken::new();
+    let registration = state
+        .cancellations
+        .register(batch.id, cancellation.clone())
+        .map_err(|_| "this CLI batch is already running locally".to_string())?;
+    let node = probe_node(state.runner.clone()).await;
+    let node_version = node
+        .version
+        .filter(|version| node.available && supported_node_lts(version));
+    let Some(node_version) = node_version else {
+        for member in batch
+            .members
+            .iter()
+            .filter(|member| member.status == BatchMemberStatus::Planned)
+        {
+            state
+                .repository
+                .defer_batch_member(
+                    batch.id,
+                    member.ordinal,
+                    member.run_id,
+                    ability_core::FailureKind::RuntimeMissing,
+                    Utc::now(),
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        return Ok(());
+    };
+
+    let adapters = fresh_provider_adapters(state.runner.clone());
+    let runner = state.batch_runner.clone();
+    let repository = state.repository.clone();
+    let batch_id = batch.id;
+    let (sender, mut receiver) = mpsc::unbounded_channel::<BatchRunEvent>();
+    let event_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        while let Some(event) = receiver.recv().await {
+            let _ = event_app.emit("batch://event", event);
+        }
+    });
+    tauri::async_runtime::spawn(async move {
+        let _local_data = local_data;
+        let _registration = registration;
+        if runner
+            .run(batch_id, adapters, node_version, cancellation, sender)
+            .await
+            .is_err()
+        {
+            let _ = repository.reconcile_batches_after_startup(Utc::now());
+            let _ = app.emit(
+                "batch://error",
+                BatchRunErrorEvent {
+                    batch_id: batch_id.to_string(),
+                    message: SAFE_BATCH_BACKGROUND_ERROR,
+                },
+            );
+        }
+    });
+    Ok(())
+}
+
 #[tauri::command]
 pub fn estimate_batch(
     state: State<'_, AppState>,
@@ -781,21 +872,27 @@ pub fn authorize_batch_retry(
 }
 
 #[tauri::command]
-pub fn start_batch(
+pub async fn start_batch(
+    app: AppHandle,
     state: State<'_, AppState>,
     input: BatchIdInput,
 ) -> Result<ScanBatchRecord, String> {
-    let _claim = claim_mutation(&state)?;
-    start_batch_at(&BatchCommandContext::from_state(&state), input, Utc::now())
+    let claim = claim_mutation(&state)?;
+    let batch = start_batch_at(&BatchCommandContext::from_state(&state), input, Utc::now())?;
+    launch_cli_batch_if_needed(app, &state, &batch, claim).await?;
+    Ok(batch)
 }
 
 #[tauri::command]
-pub fn resume_batch(
+pub async fn resume_batch(
+    app: AppHandle,
     state: State<'_, AppState>,
     input: BatchIdInput,
 ) -> Result<ScanBatchRecord, String> {
-    let _claim = claim_mutation(&state)?;
-    resume_batch_at(&BatchCommandContext::from_state(&state), input, Utc::now())
+    let claim = claim_mutation(&state)?;
+    let batch = resume_batch_at(&BatchCommandContext::from_state(&state), input, Utc::now())?;
+    launch_cli_batch_if_needed(app, &state, &batch, claim).await?;
+    Ok(batch)
 }
 
 #[tauri::command]
@@ -813,6 +910,7 @@ pub fn cancel_batch(
     input: BatchIdInput,
 ) -> Result<ScanBatchRecord, String> {
     let _claim = claim_mutation(&state)?;
+    state.cancellations.cancel(input.batch_id);
     cancel_batch_at(&BatchCommandContext::from_state(&state), input, Utc::now())
 }
 

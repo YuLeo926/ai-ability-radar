@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useBackend } from "../api/BackendContext";
-import type { ManualStep } from "../api/backend";
+import type { FailureKind, ManualStep } from "../api/backend";
 import type {
+  BatchRetryEstimate,
   NextGuidedMember,
   ScanBatchMemberRecord,
   ScanBatchRecord,
@@ -42,6 +43,11 @@ type ProgressState =
       batch: ScanBatchRecord;
       next: NextGuidedMember;
       message: string;
+    }
+  | {
+      kind: "cli";
+      batch: ScanBatchRecord;
+      message: string;
     };
 
 const targetLabels = {
@@ -61,6 +67,20 @@ const memberStatusLabels: Record<ScanBatchMemberRecord["status"], string> = {
   invalid: "证据无效",
   unavailable: "不可用",
   cancelled: "已取消",
+};
+
+const failureLabels: Record<FailureKind, string> = {
+  cli_missing: "未检测到受支持的 CLI 入口",
+  runtime_missing: "运行时不可用",
+  auth_expired: "登录或授权失效",
+  quota_exhausted: "额度已用尽",
+  network: "网络故障",
+  user_cancelled: "用户取消",
+  app_interrupted: "应用或执行器中断",
+  infrastructure_timeout: "基础设施超时",
+  agent_budget_exceeded: "任务回合预算耗尽",
+  verifier_error: "本地验证器故障",
+  wrong_answer: "答案未通过客观评分",
 };
 
 function visibleError(reason: unknown, fallback: string): string {
@@ -120,6 +140,8 @@ function TargetFacts({ target }: { target: ScanBatchTarget }) {
 }
 
 function ScheduleRail({ batch }: { batch: ScanBatchRecord }) {
+  const automated =
+    batch.plan.costEstimate.executionSurface === "automated_cli";
   return (
     <aside aria-labelledby="batch-schedule-title" className="batch-schedule-rail">
       <div className="batch-rail-heading">
@@ -155,15 +177,23 @@ function ScheduleRail({ batch }: { batch: ScanBatchRecord }) {
       </ol>
       <div className="batch-isolation-legend">
         <span aria-hidden="true" className="batch-attestation-dot" />
-        <p>
-          新对话隔离由<strong>用户逐题确认</strong>，不是机器验证。
-        </p>
+        {automated ? (
+          <p>
+            每道 CLI 任务使用<strong>全新临时会话与独立工作区</strong>，由执行器强制隔离。
+          </p>
+        ) : (
+          <p>
+            新对话隔离由<strong>用户逐题确认</strong>，不是机器验证。
+          </p>
+        )}
       </div>
     </aside>
   );
 }
 
 function BatchResult({ batch }: { batch: ScanBatchRecord }) {
+  const automated =
+    batch.plan.costEstimate.executionSurface === "automated_cli";
   return (
     <main className="page batch-page batch-result-page" id="page-content" tabIndex={-1}>
       <header className="batch-result-hero">
@@ -181,7 +211,11 @@ function BatchResult({ batch }: { batch: ScanBatchRecord }) {
           <p className="section-kicker">解释边界</p>
           <h2 id="result-overview-title">这一页明确没有下“降智”结论</h2>
           <ul>
-            <li>客户端隔离来自用户确认，不是机器可验证证据。</li>
+            <li>
+              {automated
+                ? "CLI 任务使用机器强制的新会话与独立工作区。"
+                : "客户端隔离来自用户确认，不是机器可验证证据。"}
+            </li>
             <li>模型名称和推理档位是当时显示或用户确认的产品元数据。</li>
             <li>需要更多重复次数和可靠统计后，才可讨论趋势或回归。</li>
           </ul>
@@ -212,6 +246,11 @@ export function BatchRunPage({ resultMode = false }: { resultMode?: boolean }) {
   const [answer, setAnswer] = useState("");
   const [attested, setAttested] = useState(false);
   const [declineConfirm, setDeclineConfirm] = useState(false);
+  const [retryReview, setRetryReview] = useState<{
+    member: ScanBatchMemberRecord;
+    estimate: BatchRetryEstimate;
+  } | null>(null);
+  const [retryAcknowledged, setRetryAcknowledged] = useState(false);
 
   const loadProgress = useCallback(async () => {
     const id = ++requestId.current;
@@ -220,6 +259,8 @@ export function BatchRunPage({ resultMode = false }: { resultMode?: boolean }) {
     setAnswer("");
     setAttested(false);
     setDeclineConfirm(false);
+    setRetryReview(null);
+    setRetryAcknowledged(false);
     try {
       const batch = await backend.getBatch(batchId);
       if (!batch) {
@@ -232,6 +273,22 @@ export function BatchRunPage({ resultMode = false }: { resultMode?: boolean }) {
         batch.terminalMemberCount === batch.plannedMemberCount
       ) {
         navigate(`/batch/${batch.id}/result`, { replace: true });
+        return;
+      }
+
+      if (batch.plan.costEstimate.executionSurface === "automated_cli") {
+        const active = batch.members.find((member) =>
+          ["reserved", "launching", "running"].includes(member.status),
+        );
+        setState({
+          kind: "cli",
+          batch,
+          message: active
+            ? "CLI 正在按持久化顺序执行；当前成员结束并写入证据后，才会启动下一个。"
+            : batch.status === "paused" || batch.status === "interrupted"
+              ? "扫描已安全暂停。基础设施故障不会扣分，也不会自动重试。"
+              : "正在等待本机执行器认领下一成员。",
+        });
         return;
       }
 
@@ -318,6 +375,42 @@ export function BatchRunPage({ resultMode = false }: { resultMode?: boolean }) {
     }
   }, [backend, batchId]);
 
+  const refreshCliProgress = useCallback(async () => {
+    const id = ++requestId.current;
+    try {
+      const batch = await backend.getBatch(batchId);
+      if (!batch) throw new Error("没有找到这次本地扫描。");
+      if (!mounted.current || requestId.current !== id) return;
+      if (
+        batch.status === "completed" ||
+        batch.status === "cancelled" ||
+        batch.terminalMemberCount === batch.plannedMemberCount
+      ) {
+        navigate(`/batch/${batch.id}/result`, { replace: true });
+        return;
+      }
+      const active = batch.members.find((member) =>
+        ["reserved", "launching", "running"].includes(member.status),
+      );
+      setState({
+        kind: "cli",
+        batch,
+        message: active
+          ? "CLI 正在按持久化顺序执行；当前成员结束并写入证据后，才会启动下一个。"
+          : batch.status === "paused" || batch.status === "interrupted"
+            ? "扫描已安全暂停。基础设施故障不会扣分，也不会自动重试。"
+            : "正在等待本机执行器认领下一成员。",
+      });
+    } catch (reason: unknown) {
+      if (mounted.current && requestId.current === id) {
+        setState({
+          kind: "error",
+          message: visibleError(reason, "无法刷新 CLI 批次状态。"),
+        });
+      }
+    }
+  }, [backend, batchId, navigate]);
+
   useEffect(() => {
     mounted.current = true;
     if (resultMode) {
@@ -331,6 +424,20 @@ export function BatchRunPage({ resultMode = false }: { resultMode?: boolean }) {
       pending.current = false;
     };
   }, [loadProgress, loadResult, resultMode]);
+
+  useEffect(() => {
+    if (
+      resultMode ||
+      state.kind !== "cli" ||
+      state.batch.status !== "running"
+    ) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void refreshCliProgress();
+    }, 800);
+    return () => window.clearInterval(timer);
+  }, [refreshCliProgress, resultMode, state]);
 
   async function beginMember() {
     if (state.kind !== "ready" || pending.current) return;
@@ -445,6 +552,97 @@ export function BatchRunPage({ resultMode = false }: { resultMode?: boolean }) {
     }
   }
 
+  async function cancelCliBatch() {
+    if (state.kind !== "cli" || pending.current) return;
+    pending.current = true;
+    try {
+      await backend.cancelBatch(state.batch.id);
+      if (mounted.current) {
+        pending.current = false;
+        await refreshCliProgress();
+      }
+    } catch (reason: unknown) {
+      if (mounted.current) {
+        pending.current = false;
+        setState({
+          ...state,
+          message: visibleError(reason, "无法取消这次 CLI 批量扫描。"),
+        });
+      }
+    }
+  }
+
+  async function reviewCliRetry(member: ScanBatchMemberRecord) {
+    if (
+      state.kind !== "cli" ||
+      pending.current ||
+      member.status !== "deferred" ||
+      !member.failureKind
+    ) {
+      return;
+    }
+    pending.current = true;
+    setRetryAcknowledged(false);
+    try {
+      const estimate = await backend.estimateBatchRetry({
+        batchId: state.batch.id,
+        memberOrdinal: member.ordinal,
+        expectedFailureKind: member.failureKind,
+      });
+      if (mounted.current) {
+        pending.current = false;
+        setRetryReview({ member, estimate });
+      }
+    } catch (reason: unknown) {
+      if (mounted.current) {
+        pending.current = false;
+        setState({
+          ...state,
+          message: visibleError(reason, "无法生成这次重试的最新预算。"),
+        });
+      }
+    }
+  }
+
+  async function authorizeCliRetry() {
+    if (
+      state.kind !== "cli" ||
+      !retryReview ||
+      !retryAcknowledged ||
+      pending.current
+    ) {
+      return;
+    }
+    const { authorization } = retryReview.estimate;
+    if (!authorization.allowedFailureKind) return;
+    pending.current = true;
+    try {
+      await backend.authorizeBatchRetry({
+        batchId: authorization.batchId,
+        memberOrdinal: retryReview.member.ordinal,
+        allowedFailureKind: authorization.allowedFailureKind,
+        estimateCreatedAt: authorization.createdAt,
+        acknowledgementHash: authorization.acknowledgementHash,
+      });
+      await backend.resumeBatch(state.batch.id);
+      if (mounted.current) {
+        pending.current = false;
+        setRetryReview(null);
+        setRetryAcknowledged(false);
+        await refreshCliProgress();
+      }
+    } catch (reason: unknown) {
+      if (mounted.current) {
+        pending.current = false;
+        setRetryAcknowledged(false);
+        setState({
+          ...state,
+          message: visibleError(reason, "重试授权已失效或无法启动；请重新估算。"),
+        });
+      }
+    }
+  }
+
   if (resultMode && resultBatch) {
     return <BatchResult batch={resultBatch} />;
   }
@@ -473,13 +671,32 @@ export function BatchRunPage({ resultMode = false }: { resultMode?: boolean }) {
   }
 
   const batch = state.batch;
+  const automated =
+    batch.plan.costEstimate.executionSurface === "automated_cli";
+  const activeCliMember = automated
+    ? batch.members.find((member) =>
+        ["reserved", "launching", "running"].includes(member.status),
+      )
+    : undefined;
+  const activeCliTarget = activeCliMember
+    ? targetForMember(batch, activeCliMember)
+    : null;
 
   return (
     <main className="page batch-page batch-run-page" id="page-content" tabIndex={-1}>
       <header className="batch-run-header">
         <div>
-          <p className="eyebrow">Quick Comparison · 批次 {batch.id.slice(0, 8)}</p>
-          <h1>按持久化顺序完成每个客户端</h1>
+          <p className="eyebrow">
+            {automated
+              ? `${batch.plan.mode === "standard" ? "Standard" : "Quick Comparison"} · 自动 CLI`
+              : "Quick Comparison · 用户引导"}
+            {" · "}批次 {batch.id.slice(0, 8)}
+          </p>
+          <h1>
+            {automated
+              ? "串行执行每个模型坐标"
+              : "按持久化顺序完成每个客户端"}
+          </h1>
         </div>
         <span className="batch-live-status">
           <span aria-hidden="true" /> 本地批次 {batch.status}
@@ -490,6 +707,156 @@ export function BatchRunPage({ resultMode = false }: { resultMode?: boolean }) {
         <ScheduleRail batch={batch} />
 
         <section aria-label="当前扫描步骤" className="batch-workspace">
+          {state.kind === "cli" ? (
+            <div className="batch-workspace-state batch-cli-state">
+              <p className="batch-coordinate">
+                Phase C · 单并发队列 · {batch.terminalMemberCount} / {batch.plannedMemberCount}
+              </p>
+              <h2>
+                {activeCliTarget
+                  ? `正在运行 ${targetLabels[activeCliTarget.target.kind]}`
+                  : batch.status === "paused" || batch.status === "interrupted"
+                    ? "扫描已安全暂停"
+                    : "等待下一成员"}
+              </h2>
+              {activeCliTarget ? <TargetFacts target={activeCliTarget} /> : null}
+              <p aria-live="polite" role="status">{state.message}</p>
+              <div className="batch-attestation-note">
+                <strong>机器强制隔离</strong>
+                <p>
+                  每道题都会建立新的提供商会话和工具自有临时工作区；任一时刻最多只有一个成员跨越模型调用边界。
+                </p>
+              </div>
+              {batch.members.some((member) => member.status === "deferred") ? (
+                <div className="batch-cli-deferred">
+                  <strong>有成员等待人工复核</strong>
+                  <p>
+                    登录、额度、网络或运行时故障不会计入分数。当前版本不会自动重试，需重新核对预算并授权。
+                  </p>
+                  <ul>
+                    {batch.members
+                      .filter(
+                        (member) =>
+                          member.status === "deferred" && member.failureKind,
+                      )
+                      .map((member) => {
+                        const target = targetForMember(batch, member);
+                        const reviewed =
+                          retryReview?.member.ordinal === member.ordinal;
+                        return (
+                          <li key={member.ordinal}>
+                            <span>
+                              <strong>
+                                {target
+                                  ? targetLabels[target.target.kind]
+                                  : "未知目标"}
+                              </strong>
+                              <small>
+                                {member.failureKind
+                                  ? failureLabels[member.failureKind]
+                                  : "基础设施故障"}
+                              </small>
+                            </span>
+                            {!reviewed ? (
+                              <button
+                                className="secondary"
+                                disabled={pending.current}
+                                onClick={() => void reviewCliRetry(member)}
+                                type="button"
+                              >
+                                生成最新重试预算
+                              </button>
+                            ) : null}
+                            {reviewed && retryReview ? (
+                              <div className="batch-retry-review">
+                                <dl>
+                                  <div>
+                                    <dt>最多任务启动</dt>
+                                    <dd>
+                                      {retryReview.estimate.authorization.maxTaskLaunches}
+                                    </dd>
+                                  </div>
+                                  <div>
+                                    <dt>最多提供商回合</dt>
+                                    <dd>
+                                      {retryReview.estimate.authorization.maxProviderTurns}
+                                    </dd>
+                                  </div>
+                                  <div>
+                                    <dt>任务预算上限</dt>
+                                    <dd>
+                                      {Math.ceil(
+                                        retryReview.estimate.authorization
+                                          .maxTaskBudgetSecs / 60,
+                                      )} 分钟
+                                    </dd>
+                                  </div>
+                                </dl>
+                                <label>
+                                  <input
+                                    checked={retryAcknowledged}
+                                    disabled={pending.current}
+                                    onChange={(event) =>
+                                      setRetryAcknowledged(event.target.checked)
+                                    }
+                                    type="checkbox"
+                                  />
+                                  <span>
+                                    我已核对本次只恢复这一成员，并接受再次使用自己的订阅额度。
+                                  </span>
+                                </label>
+                                <div className="batch-task-actions">
+                                  <button
+                                    disabled={
+                                      pending.current || !retryAcknowledged
+                                    }
+                                    onClick={() => void authorizeCliRetry()}
+                                    type="button"
+                                  >
+                                    授权同一运行继续
+                                  </button>
+                                  <button
+                                    className="secondary"
+                                    disabled={pending.current}
+                                    onClick={() => {
+                                      setRetryReview(null);
+                                      setRetryAcknowledged(false);
+                                    }}
+                                    type="button"
+                                  >
+                                    暂不重试
+                                  </button>
+                                </div>
+                              </div>
+                            ) : null}
+                          </li>
+                        );
+                      })}
+                  </ul>
+                </div>
+              ) : null}
+              <div className="batch-task-actions">
+                <button
+                  className="secondary"
+                  onClick={() => void refreshCliProgress()}
+                  type="button"
+                >
+                  刷新持久化状态
+                </button>
+                {batch.status === "running" ? (
+                  <button
+                    className="danger"
+                    disabled={pending.current}
+                    onClick={() => void cancelCliBatch()}
+                    type="button"
+                  >
+                    取消并阻止后续启动
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+
           {state.kind === "ready" && state.next.member && state.next.target ? (
             <>
               <p className="batch-coordinate">
