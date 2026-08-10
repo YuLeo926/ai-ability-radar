@@ -68,6 +68,7 @@ impl NodeVerifier {
             current_dir: workspace,
             env,
             environment: ProcessEnvironment::Clear,
+            stdin: None,
             timeout: Duration::from_secs(120),
         };
         match self.runner.run(spec, cancellation).await {
@@ -125,6 +126,8 @@ impl NodeVerifier {
             Err(ProcessError::Supervision(error)) => invalid(error.to_string(), 0),
             Err(ProcessError::Wait(error)) => invalid(error.to_string(), 0),
             Err(ProcessError::CaptureFailed) => invalid("verifier_output_capture_failed".into(), 0),
+            Err(ProcessError::StdinFailed) => invalid("verifier_input_write_failed".into(), 0),
+            Err(ProcessError::StdinLimit) => invalid("verifier_input_limit".into(), 0),
             Err(ProcessError::OutputLimit {
                 stream: OutputStream::Stdout,
             }) => invalid("verifier_stdout_limit".into(), 0),

@@ -1,6 +1,6 @@
 use ability_adapters::{
-    MAX_CAPTURE_BYTES_PER_STREAM, OutputStream, ProcessEnvironment, ProcessError, ProcessRunner,
-    ProcessSpec, TokioProcessRunner,
+    MAX_CAPTURE_BYTES_PER_STREAM, MAX_STDIN_BYTES, OutputStream, ProcessEnvironment, ProcessError,
+    ProcessRunner, ProcessSpec, TokioProcessRunner,
 };
 use std::collections::BTreeMap;
 #[cfg(windows)]
@@ -22,8 +22,65 @@ fn spec(script: impl Into<String>) -> ProcessSpec {
         current_dir: tempdir().unwrap().keep(),
         env: BTreeMap::new(),
         environment: ProcessEnvironment::Inherit,
+        stdin: None,
         timeout: Duration::from_secs(5),
     }
+}
+
+#[tokio::test]
+async fn bounded_stdin_is_not_exposed_in_arguments_or_debug_output() {
+    let secret = r#"{"prompt":"PRIVATE_STDIN_MARKER","token":"LOCAL_LOGIN_MARKER"}"#;
+    let mut process = spec("[Console]::Out.Write([Console]::In.ReadToEnd())");
+    process.stdin = Some(secret.as_bytes().to_vec());
+
+    assert!(
+        !process
+            .args
+            .iter()
+            .any(|argument| argument.contains(secret))
+    );
+    assert!(!format!("{process:?}").contains(secret));
+
+    let output = TokioProcessRunner
+        .run(process, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(output.stdout, secret);
+}
+
+#[tokio::test]
+async fn oversized_stdin_is_rejected_before_spawn() {
+    let mut process = spec("exit 0");
+    process.program = "definitely-not-a-program".into();
+    process.stdin = Some(vec![b'x'; MAX_STDIN_BYTES + 1]);
+
+    assert!(matches!(
+        TokioProcessRunner
+            .run(process, CancellationToken::new())
+            .await,
+        Err(ProcessError::StdinLimit)
+    ));
+}
+
+#[tokio::test]
+async fn cancellation_remains_responsive_while_child_stdin_is_backpressured() {
+    let token = CancellationToken::new();
+    let mut process = spec("Start-Sleep -Seconds 30");
+    process.stdin = Some(vec![b'x'; MAX_STDIN_BYTES]);
+    let run = tokio::spawn({
+        let token = token.clone();
+        async move { TokioProcessRunner.run(process, token).await }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    token.cancel();
+
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(10), run)
+            .await
+            .expect("cancelled stdin writer did not finish")
+            .unwrap(),
+        Err(ProcessError::Cancelled)
+    ));
 }
 
 #[test]
@@ -108,6 +165,7 @@ async fn provider_path_child_case() {
         current_dir: fixture_root.clone(),
         env,
         environment: ProcessEnvironment::Inherit,
+        stdin: None,
         timeout: Duration::from_secs(5),
     };
 
@@ -282,6 +340,7 @@ async fn preserves_argument_boundaries_and_overlays_environment() {
         current_dir: directory.path().to_path_buf(),
         env,
         environment: ProcessEnvironment::Inherit,
+        stdin: None,
         timeout: Duration::from_secs(5),
     };
 
@@ -329,6 +388,20 @@ fn process_spec_debug_redacts_environment_values() {
         .insert("ABILITY_RADAR_SECRET".into(), secret.into());
 
     assert!(!format!("{process:?}").contains(secret));
+}
+
+#[test]
+fn process_spec_debug_redacts_arguments_and_working_directory() {
+    let secret = "PRIVATE_PROCESS_ARGUMENT_MARKER";
+    let mut process = spec("exit 0");
+    process.program = secret.into();
+    process.args.push(secret.into());
+    process.current_dir = secret.into();
+
+    let debug = format!("{process:?}");
+    assert!(!debug.contains(secret));
+    assert!(debug.contains("arg_count"));
+    assert!(debug.contains("stdin_bytes"));
 }
 
 #[tokio::test]

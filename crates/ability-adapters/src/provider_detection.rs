@@ -71,6 +71,7 @@ async fn probe_launch_candidates_inner(
                     current_dir: std::env::temp_dir(),
                     env: BTreeMap::new(),
                     environment: ProcessEnvironment::Inherit,
+                    stdin: None,
                     timeout: SINGLE_PROBE_BUDGET,
                 },
                 CancellationToken::new(),

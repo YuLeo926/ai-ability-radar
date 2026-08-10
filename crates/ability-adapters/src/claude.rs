@@ -158,6 +158,10 @@ impl AgentAdapter for ClaudeCodeAdapter {
             Err(ProcessError::CaptureFailed) => {
                 infrastructure("process output capture failed".into())
             }
+            Err(ProcessError::StdinFailed) => infrastructure("process input write failed".into()),
+            Err(ProcessError::StdinLimit) => {
+                infrastructure("process input exceeded the request limit".into())
+            }
             Err(ProcessError::OutputLimit { stream }) => {
                 infrastructure(format!("process {stream:?} exceeded the capture limit"))
             }
@@ -180,6 +184,7 @@ fn detection_spec(launch: &LaunchCommand, args: Vec<String>) -> ProcessSpec {
         current_dir: std::env::temp_dir(),
         env: BTreeMap::new(),
         environment: ProcessEnvironment::Inherit,
+        stdin: None,
         timeout: Duration::from_secs(10),
     }
 }
@@ -240,6 +245,7 @@ fn execution_spec(launch: &LaunchCommand, request: ExecutionRequest) -> ProcessS
         current_dir: request.workspace,
         env: BTreeMap::new(),
         environment: ProcessEnvironment::Inherit,
+        stdin: None,
         timeout: Duration::from_secs(request.time_budget_secs),
     }
 }

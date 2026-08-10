@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -26,6 +26,8 @@ use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
 
 /// The maximum amount retained from stdout and stderr independently.
 pub const MAX_CAPTURE_BYTES_PER_STREAM: usize = 1024 * 1024;
+/// The maximum request body sent to a supervised child through stdin.
+pub const MAX_STDIN_BYTES: usize = 256 * 1024;
 
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 const JOB_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -37,6 +39,7 @@ pub struct ProcessSpec {
     pub current_dir: PathBuf,
     pub env: BTreeMap<String, String>,
     pub environment: ProcessEnvironment,
+    pub stdin: Option<Vec<u8>>,
     pub timeout: Duration,
 }
 
@@ -50,11 +53,12 @@ impl fmt::Debug for ProcessSpec {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ProcessSpec")
-            .field("program", &self.program)
-            .field("args", &self.args)
-            .field("current_dir", &self.current_dir)
+            .field("program_set", &!self.program.as_os_str().is_empty())
+            .field("arg_count", &self.args.len())
+            .field("current_dir_set", &!self.current_dir.as_os_str().is_empty())
             .field("env_keys", &self.env.keys().collect::<Vec<_>>())
             .field("environment", &self.environment)
+            .field("stdin_bytes", &self.stdin.as_ref().map(Vec::len))
             .field("timeout", &self.timeout)
             .finish()
     }
@@ -84,6 +88,10 @@ pub enum ProcessError {
     Wait(#[source] std::io::Error),
     #[error("process output capture failed")]
     CaptureFailed,
+    #[error("process input could not be written")]
+    StdinFailed,
+    #[error("process input exceeded the request limit")]
+    StdinLimit,
     #[error("process was cancelled")]
     Cancelled,
     #[error("process exceeded the agent budget")]
@@ -111,14 +119,22 @@ pub struct TokioProcessRunner;
 impl ProcessRunner for TokioProcessRunner {
     async fn run(
         &self,
-        spec: ProcessSpec,
+        mut spec: ProcessSpec,
         cancellation: CancellationToken,
     ) -> Result<ProcessOutput, ProcessError> {
         if cancellation.is_cancelled() {
             return Err(ProcessError::Cancelled);
         }
+        if spec
+            .stdin
+            .as_ref()
+            .is_some_and(|stdin| stdin.len() > MAX_STDIN_BYTES)
+        {
+            return Err(ProcessError::StdinLimit);
+        }
 
         let started = Instant::now();
+        let stdin_payload = spec.stdin.take();
         let mut supervisor = ProcessSupervisor::new().map_err(ProcessError::Supervision)?;
         let launch = if spec.environment == ProcessEnvironment::Clear {
             crate::command_locator::LaunchCommand {
@@ -139,8 +155,13 @@ impl ProcessRunner for TokioProcessRunner {
             .args(&launch.prefix_args)
             .args(&spec.args)
             .current_dir(&spec.current_dir)
-            .envs(&spec.env)
-            .stdin(Stdio::null())
+            .envs(&spec.env);
+        if stdin_payload.is_some() {
+            command.stdin(Stdio::piped());
+        } else {
+            command.stdin(Stdio::null());
+        }
+        command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
@@ -170,6 +191,29 @@ impl ProcessRunner for TokioProcessRunner {
                     .await;
             }
         };
+        let child_stdin = if stdin_payload.is_some() {
+            match child.stdin.take() {
+                Some(stdin) => Some(stdin),
+                None => {
+                    return finish_with_error(
+                        &mut child,
+                        &mut supervisor,
+                        ProcessError::StdinFailed,
+                    )
+                    .await;
+                }
+            }
+        } else {
+            None
+        };
+        let stdin_write = async move {
+            if let (Some(mut stdin), Some(payload)) = (child_stdin, stdin_payload) {
+                stdin.write_all(&payload).await?;
+                stdin.shutdown().await?;
+            }
+            Ok::<(), std::io::Error>(())
+        };
+        tokio::pin!(stdin_write);
 
         let (events, mut event_receiver) = mpsc::unbounded_channel();
         let captures = CaptureTasks::spawn(stdout, stderr, events);
@@ -181,9 +225,21 @@ impl ProcessRunner for TokioProcessRunner {
         let mut stdout = None;
         let mut stderr = None;
         let mut exit_code = None;
+        let mut stdin_done = false;
 
         loop {
             tokio::select! {
+                result = &mut stdin_write, if !stdin_done => {
+                    stdin_done = true;
+                    if result.is_err() {
+                        return finish_with_capture_error(
+                            &mut child,
+                            &mut supervisor,
+                            captures,
+                            ProcessError::StdinFailed,
+                        ).await;
+                    }
+                }
                 status = child.wait(), if exit_code.is_none() => {
                     exit_code = match status {
                         Ok(status) => Some(status.code()),
@@ -225,10 +281,10 @@ impl ProcessRunner for TokioProcessRunner {
                     captures,
                     ProcessError::TimedOut,
                 ).await,
-                _ = job_poll.tick(), if exit_code.is_some() && stdout.is_some() && stderr.is_some() => {}
+                _ = job_poll.tick(), if stdin_done && exit_code.is_some() && stdout.is_some() && stderr.is_some() => {}
             }
 
-            if exit_code.is_some() && stdout.is_some() && stderr.is_some() {
+            if stdin_done && exit_code.is_some() && stdout.is_some() && stderr.is_some() {
                 match supervisor.is_empty() {
                     Ok(true) => {
                         captures.join().await?;

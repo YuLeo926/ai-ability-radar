@@ -17,3 +17,14 @@
 根目录还精确覆盖了 `ai@6.0.237`、`adm-zip@0.6.0` 和 `sharp@0.35.3`。前者位于
 Promptfoo 声明的兼容版本范围内；后两者只修复本项目不使用的 Hugging Face 可选执行路径。保留这些锁定是为了让
 完整依赖树通过高危漏洞审计，不能在没有重新运行导入测试和 `npm audit --omit=dev` 的情况下升级或删除。
+
+## 进程协议
+
+桌面端只通过标准输入发送一条不超过 256 KiB 的 JSON 请求，命令参数不携带 prompt、登录数据或工作区文件内容。
+请求只允许 `provider`、`workspace`、`prompt`、`requested_model`、`reasoning_effort`、
+`time_budget_seconds`、`max_turns` 和 `run_id`。未知字段、相对或不存在的工作区、超限文本和不支持的档位会在
+provider 启动前失败。
+
+标准输出只写一行 `promptfoo-agent-v1` 结果 JSON，包含状态、最终文本、session ID、Token、工具摘要、
+模型证据和稳定的 provider 错误码。诊断只写入标准错误，且不回显异常正文。Promptfoo 缓存默认关闭，缓存命中不能作为
+有效能力结果。

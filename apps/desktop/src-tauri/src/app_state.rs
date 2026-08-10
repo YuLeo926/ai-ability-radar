@@ -385,6 +385,7 @@ pub async fn probe_node(runner: Arc<dyn ProcessRunner>) -> PrerequisiteStatus {
                 current_dir: std::env::temp_dir(),
                 env: BTreeMap::new(),
                 environment: ProcessEnvironment::Inherit,
+                stdin: None,
                 timeout: Duration::from_secs(10),
             },
             CancellationToken::new(),
@@ -609,6 +610,7 @@ mod tests {
                 current_dir: std::env::temp_dir(),
                 env: BTreeMap::new(),
                 environment: ProcessEnvironment::Inherit,
+                stdin: None,
                 timeout: Duration::from_secs(10),
             }]
         );
