@@ -4,7 +4,8 @@ import { isAbsolute } from "node:path";
 export const CONTRACT_VERSION = "promptfoo-agent-v1";
 export const MAX_REQUEST_BYTES = 256 * 1024;
 export const MAX_PROMPT_BYTES = 128 * 1024;
-export const MAX_FINAL_TEXT_BYTES = 1024 * 1024;
+// Leave room for the evidence envelope under the Rust runner's 1 MiB stdout cap.
+export const MAX_FINAL_TEXT_BYTES = 768 * 1024;
 
 const REQUEST_FIELDS = new Set([
   "provider",

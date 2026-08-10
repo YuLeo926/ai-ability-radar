@@ -460,6 +460,7 @@ test.each([
   ["runtime_missing", "缺少 Node.js 运行时"],
   ["entry_inaccessible", "入口不可访问"],
   ["version_probe_failed", "版本检测失败"],
+  ["version_unsupported", "版本过低，可能忽略推理档位"],
   ["needs_login", "需要先在终端登录"],
 ] as const)("renders %s as %s", async (status, copy) => {
   const bootstrap = readyBootstrap();

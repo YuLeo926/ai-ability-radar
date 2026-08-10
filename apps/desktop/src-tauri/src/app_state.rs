@@ -2,7 +2,8 @@ use crate::batch_runner::BatchRunner;
 use ability_adapters::{
     AgentAdapter, AuthState, AvailabilityStatus, ClaudeCodeAdapter, CliRunService, CodexAdapter,
     NodeVerifier, PrerequisiteStatus, ProcessEnvironment, ProcessRunner, ProcessSpec,
-    TargetAvailability, TokioProcessRunner, WorkspaceVerifier,
+    PromptfooAgentAdapter, PromptfooRuntime, TargetAvailability, TokioProcessRunner,
+    WorkspaceVerifier,
 };
 use ability_core::{
     ArtifactStore, LoadedPack, ManualRunService, PackLoader, PackRegistry, RunRepository,
@@ -346,16 +347,87 @@ fn manual_target(kind: TargetKind) -> TargetAvailability {
 pub(crate) fn fresh_provider_adapters(
     runner: Arc<dyn ProcessRunner>,
 ) -> BTreeMap<TargetKind, Arc<dyn AgentAdapter>> {
+    fresh_provider_adapters_for_contract(
+        runner,
+        PromptfooRuntime::source_checkout(),
+        ProviderExecutionContract::from_version("codex-cli-v1")
+            .expect("legacy Codex contract is reviewed"),
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProviderExecutionContract {
+    LegacyCliV1,
+    PromptfooAgentV1,
+}
+
+impl ProviderExecutionContract {
+    pub(crate) fn from_version(value: &str) -> Option<Self> {
+        match value {
+            "codex-cli-v1" | "claude-code-v1" => Some(Self::LegacyCliV1),
+            ability_adapters::PROMPTFOO_AGENT_CONTRACT_VERSION => Some(Self::PromptfooAgentV1),
+            _ => None,
+        }
+    }
+}
+
+pub(crate) fn fresh_provider_adapters_for_contract(
+    runner: Arc<dyn ProcessRunner>,
+    runtime: PromptfooRuntime,
+    contract: ProviderExecutionContract,
+) -> BTreeMap<TargetKind, Arc<dyn AgentAdapter>> {
     let mut adapters: BTreeMap<TargetKind, Arc<dyn AgentAdapter>> = BTreeMap::new();
-    adapters.insert(
-        TargetKind::CodexCli,
-        Arc::new(CodexAdapter::new(runner.clone())),
-    );
-    adapters.insert(
-        TargetKind::ClaudeCode,
-        Arc::new(ClaudeCodeAdapter::new(runner)),
-    );
+    match contract {
+        ProviderExecutionContract::LegacyCliV1 => {
+            adapters.insert(
+                TargetKind::CodexCli,
+                Arc::new(CodexAdapter::new(runner.clone())),
+            );
+            adapters.insert(
+                TargetKind::ClaudeCode,
+                Arc::new(ClaudeCodeAdapter::new(runner)),
+            );
+        }
+        ProviderExecutionContract::PromptfooAgentV1 => {
+            adapters.insert(
+                TargetKind::CodexCli,
+                Arc::new(
+                    PromptfooAgentAdapter::new(
+                        runner.clone(),
+                        runtime.clone(),
+                        TargetKind::CodexCli,
+                    )
+                    .expect("Codex CLI is a supported Promptfoo target"),
+                ),
+            );
+            adapters.insert(
+                TargetKind::ClaudeCode,
+                Arc::new(
+                    PromptfooAgentAdapter::new(runner, runtime, TargetKind::ClaudeCode)
+                        .expect("Claude Code is a supported Promptfoo target"),
+                ),
+            );
+        }
+    }
     adapters
+}
+
+pub(crate) fn public_adapter_version(
+    kind: TargetKind,
+    contract_version: &str,
+    version: Option<String>,
+) -> Option<String> {
+    if contract_version == ability_adapters::PROMPTFOO_AGENT_CONTRACT_VERSION {
+        let expected = match kind {
+            TargetKind::CodexCli => "promptfoo 0.122.0 codex-sdk 0.147.0 openai-codex-sdk",
+            TargetKind::ClaudeCode => {
+                "promptfoo 0.122.0 claude-agent-sdk 0.3.226 anthropic-claude-agent-sdk"
+            }
+            _ => return None,
+        };
+        return version.filter(|value| value == expected);
+    }
+    public_cli_version(version)
 }
 
 fn load_verified_packs(
@@ -590,6 +662,61 @@ mod tests {
                 public_cli_version(Some(raw.into())),
                 None,
                 "{raw:?} must not cross the bootstrap boundary"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_adapter_factory_keeps_legacy_and_promptfoo_contracts_separate() {
+        let runner: Arc<dyn ProcessRunner> = RecordingRunner::error(FakeResponse::Cancelled);
+        let legacy = fresh_provider_adapters_for_contract(
+            runner.clone(),
+            PromptfooRuntime::source_checkout(),
+            ProviderExecutionContract::LegacyCliV1,
+        );
+        let promptfoo = fresh_provider_adapters_for_contract(
+            runner,
+            PromptfooRuntime::source_checkout(),
+            ProviderExecutionContract::PromptfooAgentV1,
+        );
+
+        assert_eq!(
+            legacy[&TargetKind::CodexCli].contract_version(),
+            "codex-cli-v1"
+        );
+        assert_eq!(
+            legacy[&TargetKind::ClaudeCode].contract_version(),
+            "claude-code-v1"
+        );
+        assert!(promptfoo.values().all(|adapter| {
+            adapter.contract_version() == ability_adapters::PROMPTFOO_AGENT_CONTRACT_VERSION
+        }));
+    }
+
+    #[test]
+    fn promptfoo_public_identity_is_exact_and_rejects_paths_or_version_drift() {
+        let identity = "promptfoo 0.122.0 codex-sdk 0.147.0 openai-codex-sdk";
+        assert_eq!(
+            public_adapter_version(
+                TargetKind::CodexCli,
+                ability_adapters::PROMPTFOO_AGENT_CONTRACT_VERSION,
+                Some(identity.into()),
+            )
+            .as_deref(),
+            Some(identity)
+        );
+        for invalid in [
+            "promptfoo 0.123.0 codex-sdk 0.147.0 openai-codex-sdk",
+            r"C:\private\promptfoo.exe",
+            "promptfoo 0.122.0 codex-sdk 0.147.0 forged-provider",
+        ] {
+            assert_eq!(
+                public_adapter_version(
+                    TargetKind::CodexCli,
+                    ability_adapters::PROMPTFOO_AGENT_CONTRACT_VERSION,
+                    Some(invalid.into()),
+                ),
+                None
             );
         }
     }

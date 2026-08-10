@@ -4,6 +4,7 @@ mod cli_run;
 mod codex;
 mod command_locator;
 mod process;
+mod promptfoo;
 mod provider_detection;
 mod verifier;
 
@@ -12,6 +13,7 @@ pub use claude::*;
 pub use cli_run::*;
 pub use codex::*;
 pub use process::*;
+pub use promptfoo::*;
 pub use verifier::*;
 
 use ability_core::{FailureKind, TargetKind};
@@ -29,6 +31,7 @@ pub enum AvailabilityStatus {
     RuntimeMissing,
     EntryInaccessible,
     VersionProbeFailed,
+    VersionUnsupported,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +71,7 @@ pub struct PrerequisiteStatus {
 
 #[derive(Debug, Clone)]
 pub struct ExecutionRequest {
+    pub run_id: uuid::Uuid,
     pub prompt: String,
     pub workspace: PathBuf,
     pub time_budget_secs: u64,
@@ -76,12 +80,64 @@ pub struct ExecutionRequest {
     pub reasoning_effort: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct AgentTokenUsage {
+    pub input: Option<u64>,
+    pub output: Option<u64>,
+    pub total: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct AgentToolUsage {
+    pub name: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelEvidenceSource {
+    Provider,
+    RequestOnly,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct AgentModelEvidence {
+    pub requested_model: String,
+    pub observed_model: Option<String>,
+    pub source: ModelEvidenceSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct AgentProviderSummary {
+    pub unknown_fields: Vec<String>,
+    pub discarded_field_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct AgentExecutionEvidence {
+    pub contract_version: String,
+    pub run_id: uuid::Uuid,
+    pub final_text: String,
+    pub session_id: Option<String>,
+    pub tokens: AgentTokenUsage,
+    pub tool_summary: Vec<AgentToolUsage>,
+    pub model_evidence: AgentModelEvidence,
+    pub provider_summary: AgentProviderSummary,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdapterCompletion {
     Completed {
         duration_ms: u64,
         stdout: String,
         stderr: String,
+        evidence: Option<AgentExecutionEvidence>,
     },
 }
 
@@ -100,6 +156,7 @@ pub enum AdapterError {
 #[async_trait]
 pub trait AgentAdapter: Send + Sync {
     fn kind(&self) -> TargetKind;
+    fn contract_version(&self) -> &'static str;
     async fn detect(&self) -> TargetAvailability;
     async fn execute(
         &self,

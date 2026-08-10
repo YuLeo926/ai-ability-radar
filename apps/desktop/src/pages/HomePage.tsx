@@ -25,6 +25,7 @@ const statusCopy: Record<AvailabilityStatus, string | null> = {
   runtime_missing: "缺少 Node.js 运行时",
   entry_inaccessible: "入口不可访问",
   version_probe_failed: "版本检测失败",
+  version_unsupported: "版本过低，可能忽略推理档位",
 };
 
 const sourceCopy: Record<LaunchSource, string> = {

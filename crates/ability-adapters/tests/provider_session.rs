@@ -117,6 +117,7 @@ async fn provider_session_path_mutation_child() {
     let completion = adapter
         .execute(
             ExecutionRequest {
+                run_id: uuid::Uuid::nil(),
                 prompt: "local fake prompt".into(),
                 workspace: fixture.path().to_path_buf(),
                 time_budget_secs: 10,

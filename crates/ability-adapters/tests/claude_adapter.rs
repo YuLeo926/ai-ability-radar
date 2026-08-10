@@ -37,6 +37,7 @@ impl ProcessRunner for FakeRunner {
 
 fn request() -> ExecutionRequest {
     ExecutionRequest {
+        run_id: uuid::Uuid::nil(),
         prompt: "Fix the repository.".into(),
         workspace: PathBuf::from("C:/temp/task"),
         time_budget_secs: 600,

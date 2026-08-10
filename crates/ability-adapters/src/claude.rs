@@ -90,6 +90,10 @@ impl AgentAdapter for ClaudeCodeAdapter {
         TargetKind::ClaudeCode
     }
 
+    fn contract_version(&self) -> &'static str {
+        "claude-code-v1"
+    }
+
     async fn detect(&self) -> TargetAvailability {
         let _detection = self.detection_guard.lock().await;
         *self
@@ -257,6 +261,7 @@ fn complete_or_classify(output: ProcessOutput) -> Result<AdapterCompletion, Adap
             duration_ms: output.duration_ms,
             stdout: output.stdout,
             stderr: output.stderr,
+            evidence: None,
         }),
         StreamState::NonTerminal => failed_output(output),
         StreamState::Success | StreamState::Invalid => infrastructure_output(output),

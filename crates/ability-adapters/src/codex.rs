@@ -90,6 +90,10 @@ impl AgentAdapter for CodexAdapter {
         TargetKind::CodexCli
     }
 
+    fn contract_version(&self) -> &'static str {
+        "codex-cli-v1"
+    }
+
     async fn detect(&self) -> TargetAvailability {
         let _detection = self.detection_guard.lock().await;
         *self
@@ -156,6 +160,7 @@ impl AgentAdapter for CodexAdapter {
                     duration_ms: output.duration_ms,
                     stdout: output.stdout,
                     stderr: output.stderr,
+                    evidence: None,
                 })
             }
             Ok(output) => failed_output(output),

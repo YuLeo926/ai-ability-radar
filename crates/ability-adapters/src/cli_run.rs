@@ -493,6 +493,7 @@ impl CliRunService {
             );
 
             let request = ExecutionRequest {
+                run_id,
                 prompt: task.prompt.clone(),
                 workspace: workspace.clone(),
                 time_budget_secs: task.definition.time_budget_secs,
@@ -507,6 +508,7 @@ impl CliRunService {
                     duration_ms,
                     stdout,
                     stderr,
+                    evidence: _,
                 }) => {
                     let log_relative =
                         match self.write_agent_log(run_id, &task.definition.id, &stdout, &stderr) {
@@ -1483,6 +1485,10 @@ mod cancellation_copy_tests {
     impl AgentAdapter for CountingAdapter {
         fn kind(&self) -> TargetKind {
             TargetKind::CodexCli
+        }
+
+        fn contract_version(&self) -> &'static str {
+            "codex-cli-v1"
         }
 
         async fn detect(&self) -> TargetAvailability {

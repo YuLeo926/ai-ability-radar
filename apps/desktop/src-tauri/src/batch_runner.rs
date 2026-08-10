@@ -1,4 +1,4 @@
-use crate::app_state::{public_cli_version, RunOperationRegistry};
+use crate::app_state::{public_adapter_version, RunOperationRegistry};
 use ability_adapters::{
     AgentAdapter, AuthState, AvailabilityStatus, CliBatchExecutionBinding, CliRunError,
     CliRunService, LaunchSource, RunEvent, TargetAvailability, WorkspaceVerifier,
@@ -143,6 +143,11 @@ impl BatchRunner {
                 self.defer_without_run(&batch, &member, FailureKind::CliMissing, &events)?;
                 continue;
             };
+            if adapter.contract_version()
+                != target.execution_adapter_identity.adapter_contract_version
+            {
+                return Err(BatchRunnerError::TargetMismatch);
+            }
 
             let availability = if let Some(availability) = detected.get(&target.target.kind) {
                 availability.clone()
@@ -304,6 +309,7 @@ impl BatchRunner {
             AvailabilityStatus::VersionProbeFailed | AvailabilityStatus::Ready => {
                 Some(FailureKind::AppInterrupted)
             }
+            AvailabilityStatus::VersionUnsupported => Some(FailureKind::RuntimeMissing),
         };
         if let Some(failure) = failure {
             return Err(failure);
@@ -316,8 +322,12 @@ impl BatchRunner {
             Some(LaunchSource::ReviewedNpm) => AdapterLaunchKind::ReviewedNpm,
             None => return Err(FailureKind::CliMissing),
         };
-        let detected_version =
-            public_cli_version(availability.version.clone()).ok_or(FailureKind::AppInterrupted)?;
+        let detected_version = public_adapter_version(
+            target.target.kind,
+            &target.execution_adapter_identity.adapter_contract_version,
+            availability.version.clone(),
+        )
+        .ok_or(FailureKind::AppInterrupted)?;
         let detected_identity = ExecutionAdapterIdentity::new(
             BatchExecutionSurface::AutomatedCli,
             &target.execution_adapter_identity.provider_family,
@@ -584,6 +594,7 @@ struct AdapterMetrics {
 #[cfg(test)]
 struct FakeAdapter {
     kind: TargetKind,
+    contract_version: &'static str,
     availability: TargetAvailability,
     metrics: Arc<AdapterMetrics>,
     execute_failure: Option<FailureKind>,
@@ -595,6 +606,10 @@ struct FakeAdapter {
 impl AgentAdapter for FakeAdapter {
     fn kind(&self) -> TargetKind {
         self.kind
+    }
+
+    fn contract_version(&self) -> &'static str {
+        self.contract_version
     }
 
     async fn detect(&self) -> TargetAvailability {
@@ -634,6 +649,7 @@ impl AgentAdapter for FakeAdapter {
             duration_ms: 1,
             stdout: "synthetic completion".into(),
             stderr: String::new(),
+            evidence: None,
         })
     }
 }
@@ -815,6 +831,11 @@ fn fake_adapter(
     };
     Arc::new(FakeAdapter {
         kind,
+        contract_version: match kind {
+            TargetKind::CodexCli => "codex-cli-v1",
+            TargetKind::ClaudeCode => "claude-code-v1",
+            _ => unreachable!(),
+        },
         availability: TargetAvailability {
             kind,
             installed: status == AvailabilityStatus::Ready,
@@ -843,6 +864,11 @@ fn failing_adapter(
     };
     Arc::new(FakeAdapter {
         kind,
+        contract_version: match kind {
+            TargetKind::CodexCli => "codex-cli-v1",
+            TargetKind::ClaudeCode => "claude-code-v1",
+            _ => unreachable!(),
+        },
         availability: TargetAvailability {
             kind,
             installed: true,
@@ -867,6 +893,11 @@ fn cancellation_adapter(kind: TargetKind, metrics: Arc<AdapterMetrics>) -> Arc<d
     };
     Arc::new(FakeAdapter {
         kind,
+        contract_version: match kind {
+            TargetKind::CodexCli => "codex-cli-v1",
+            TargetKind::ClaudeCode => "claude-code-v1",
+            _ => unreachable!(),
+        },
         availability: TargetAvailability {
             kind,
             installed: true,
@@ -940,6 +971,55 @@ async fn executes_at_most_one_cli_member() {
             .len(),
         workspaces.len()
     );
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn rejects_an_adapter_whose_execution_contract_does_not_match_the_plan() {
+    let fixture = RunnerFixture::new();
+    let batch = fixture.create_batch(
+        BatchMode::Standard,
+        vec![
+            cli_target(TargetKind::CodexCli, "gpt-5.6-terra"),
+            cli_target(TargetKind::CodexCli, "gpt-5.6-sol"),
+        ],
+    );
+    let metrics = Arc::new(AdapterMetrics::default());
+    let adapters: BTreeMap<TargetKind, Arc<dyn AgentAdapter>> = BTreeMap::from([(
+        TargetKind::CodexCli,
+        Arc::new(FakeAdapter {
+            kind: TargetKind::CodexCli,
+            contract_version: "promptfoo-agent-v1",
+            availability: TargetAvailability {
+                kind: TargetKind::CodexCli,
+                installed: true,
+                version: Some("promptfoo 0.122.0 codex-sdk 0.147.0 openai-codex-sdk".into()),
+                auth_state: AuthState::Ready,
+                status: AvailabilityStatus::Ready,
+                source: Some(LaunchSource::ReviewedNpm),
+                prerequisites: Vec::new(),
+            },
+            metrics: metrics.clone(),
+            execute_failure: None,
+            wait_for_cancellation: false,
+        }) as Arc<dyn AgentAdapter>,
+    )]);
+    let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
+
+    let result = fixture
+        .runner
+        .run(
+            batch.id,
+            adapters,
+            "v22.0.0".into(),
+            CancellationToken::new(),
+            events,
+        )
+        .await;
+
+    assert!(matches!(result, Err(BatchRunnerError::TargetMismatch)));
+    assert_eq!(metrics.detects.load(Ordering::SeqCst), 0);
+    assert_eq!(metrics.calls.load(Ordering::SeqCst), 0);
 }
 
 #[cfg(test)]

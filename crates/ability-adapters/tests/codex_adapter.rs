@@ -40,6 +40,7 @@ impl ProcessRunner for FakeRunner {
 
 fn request() -> ExecutionRequest {
     ExecutionRequest {
+        run_id: uuid::Uuid::nil(),
         prompt: "Fix the repository and run its visible tests.".into(),
         workspace: PathBuf::from("C:/temp/task"),
         time_budget_secs: 600,

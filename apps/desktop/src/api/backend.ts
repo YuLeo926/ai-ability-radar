@@ -63,7 +63,8 @@ export type AvailabilityStatus =
   | "not_found"
   | "runtime_missing"
   | "entry_inaccessible"
-  | "version_probe_failed";
+  | "version_probe_failed"
+  | "version_unsupported";
 
 export type LaunchSource = "native_exe" | "reviewed_npm";
 

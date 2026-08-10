@@ -61,6 +61,14 @@ impl AgentAdapter for FakeAdapter {
         self.kind
     }
 
+    fn contract_version(&self) -> &'static str {
+        match self.kind {
+            TargetKind::CodexCli => "codex-cli-v1",
+            TargetKind::ClaudeCode => "claude-code-v1",
+            _ => unreachable!(),
+        }
+    }
+
     async fn detect(&self) -> TargetAvailability {
         TargetAvailability {
             kind: self.kind(),
@@ -104,6 +112,7 @@ impl AgentAdapter for FakeAdapter {
                     duration_ms,
                     stdout: "local agent stdout".into(),
                     stderr: "local agent stderr".into(),
+                    evidence: None,
                 })
             }
             AdapterStep::BudgetExhausted => Err(AdapterError::AgentBudgetExceeded),

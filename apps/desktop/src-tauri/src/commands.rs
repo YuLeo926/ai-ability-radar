@@ -305,6 +305,9 @@ fn validate_cli_readiness(
         AvailabilityStatus::VersionProbeFailed => {
             return Err("CLI 版本检测失败".into());
         }
+        AvailabilityStatus::VersionUnsupported => {
+            return Err("Codex CLI 版本过低，可能忽略所选推理档位，请升级后重试".into());
+        }
     }
     let cli_version = public_cli_version(availability.version)
         .ok_or_else(|| "CLI 返回了无效的版本信息".to_string())?;
@@ -2385,6 +2388,10 @@ mod tests {
             TargetKind::CodexCli
         }
 
+        fn contract_version(&self) -> &'static str {
+            "codex-cli-v1"
+        }
+
         async fn detect(&self) -> TargetAvailability {
             self.detect_calls.fetch_add(1, Ordering::SeqCst);
             TargetAvailability {
@@ -2408,6 +2415,7 @@ mod tests {
                 duration_ms: 1,
                 stdout: String::new(),
                 stderr: String::new(),
+                evidence: None,
             })
         }
     }
@@ -3016,6 +3024,10 @@ mod tests {
                 "检测到 CLI 入口，但当前应用无权启动",
             ),
             (AvailabilityStatus::VersionProbeFailed, "CLI 版本检测失败"),
+            (
+                AvailabilityStatus::VersionUnsupported,
+                "Codex CLI 版本过低，可能忽略所选推理档位，请升级后重试",
+            ),
         ] {
             let error = validate_cli_readiness(
                 TargetKind::CodexCli,
