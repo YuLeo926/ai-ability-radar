@@ -13,6 +13,11 @@ import {
 import { createFakeProviderHarness } from "./fixtures/fake-provider.mjs";
 
 const workspace = mkdtempSync(join(tmpdir(), "ability-radar-provider-"));
+const codexRuntime = Object.freeze({
+  ABILITY_RADAR_CODEX_ENTRY: "C:\\runtime\\codex.js",
+  ABILITY_RADAR_CODEX_WRAPPER: "C:\\runtime\\ability-codex-wrapper.exe",
+  ABILITY_RADAR_NODE_PROGRAM: "C:\\runtime\\node.exe",
+});
 
 function request(provider = "codex") {
   return {
@@ -28,7 +33,7 @@ function request(provider = "codex") {
 }
 
 test("provider descriptors use the pinned Promptfoo provider IDs and disable caching", () => {
-  const codex = buildProviderDescriptor(request("codex"));
+  const codex = buildProviderDescriptor(request("codex"), codexRuntime);
   const claude = buildProviderDescriptor(request("claude"));
 
   assert.equal(codex.id, "openai:codex-sdk");
@@ -54,6 +59,7 @@ test("provider executor disables Promptfoo cache and calls the loaded provider o
         },
       };
     },
+    environmentSource: codexRuntime,
   });
 
   const result = await execute(request());
@@ -94,7 +100,7 @@ test("fake provider failures cross the executor boundary and keep stable classif
     const execute = createProviderExecutor({
       loadProvider: harness.loadProvider,
       cacheController: { disableCache() {} },
-      environmentSource: {},
+      environmentSource: codexRuntime,
     });
     await assert.rejects(execute(request()), (error) => {
       assert.equal(normalizeProviderError(error), expected);

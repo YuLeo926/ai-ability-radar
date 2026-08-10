@@ -74,6 +74,46 @@ impl PromptfooRuntime {
             .join("codex.js")
     }
 
+    fn codex_isolation_wrapper(&self) -> Option<PathBuf> {
+        let executable = std::env::current_exe().ok()?;
+        let mut directory = executable.parent()?;
+        if matches!(
+            directory.file_name().and_then(|value| value.to_str()),
+            Some("deps" | "examples")
+        ) {
+            directory = directory.parent()?;
+        }
+        Some(directory.join(format!(
+            "ability-codex-wrapper{}",
+            std::env::consts::EXE_SUFFIX
+        )))
+    }
+
+    fn execution_environment(&self) -> Result<BTreeMap<String, String>, AdapterError> {
+        let wrapper = self
+            .codex_isolation_wrapper()
+            .and_then(|path| path_argument(&path))
+            .ok_or_else(|| AdapterError::Infrastructure {
+                kind: FailureKind::RuntimeMissing,
+                detail: "Codex isolation wrapper path is unavailable".into(),
+            })?;
+        let entry =
+            path_argument(&self.codex_cli_entry()).ok_or_else(|| AdapterError::Infrastructure {
+                kind: FailureKind::RuntimeMissing,
+                detail: "Bundled Codex entry path is unavailable".into(),
+            })?;
+        let node_program =
+            path_argument(&self.node_program).ok_or_else(|| AdapterError::Infrastructure {
+                kind: FailureKind::RuntimeMissing,
+                detail: "Node.js program path is unavailable".into(),
+            })?;
+        let mut environment = safe_runtime_environment();
+        environment.insert("ABILITY_RADAR_CODEX_WRAPPER".into(), wrapper);
+        environment.insert("ABILITY_RADAR_CODEX_ENTRY".into(), entry);
+        environment.insert("ABILITY_RADAR_NODE_PROGRAM".into(), node_program);
+        Ok(environment)
+    }
+
     fn claude_cli_binary(&self) -> Option<PathBuf> {
         let package = claude_platform_package()?;
         let executable = if cfg!(windows) {
@@ -373,7 +413,7 @@ impl AgentAdapter for PromptfooAgentAdapter {
                     program: self.runtime.node_program.clone(),
                     args: vec![runner],
                     current_dir: self.runtime.project_root.clone(),
-                    env: safe_runtime_environment(),
+                    env: self.runtime.execution_environment()?,
                     environment: ProcessEnvironment::Clear,
                     stdin: Some(stdin),
                     timeout: Duration::from_secs(promptfoo_request.time_budget_seconds),

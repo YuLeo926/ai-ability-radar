@@ -120,15 +120,7 @@ impl AgentAdapter for CodexAdapter {
             )
             .await
         {
-            Ok(output) if output.stdout.to_lowercase().contains("not logged in") => {
-                AuthState::NeedsLogin
-            }
-            Ok(output)
-                if output.exit_code == Some(0)
-                    && output.stdout.to_lowercase().contains("logged in") =>
-            {
-                AuthState::Ready
-            }
+            Ok(output) => codex_auth_state(&output),
             _ => AuthState::Unknown,
         };
 
@@ -189,6 +181,17 @@ impl AgentAdapter for CodexAdapter {
                 infrastructure("process duration exceeds the supported range".into())
             }
         }
+    }
+}
+
+fn codex_auth_state(output: &crate::ProcessOutput) -> AuthState {
+    let status = format!("{}\n{}", output.stdout, output.stderr).to_lowercase();
+    if status.contains("not logged in") {
+        AuthState::NeedsLogin
+    } else if output.exit_code == Some(0) && status.contains("logged in") {
+        AuthState::Ready
+    } else {
+        AuthState::Unknown
     }
 }
 

@@ -423,6 +423,14 @@ async fn executes_one_stdin_request_and_returns_structured_evidence() {
     let spec = runner.execution_spec();
     assert_eq!(spec.environment, ProcessEnvironment::Clear);
     assert_eq!(spec.args.len(), 1);
+    let wrapper_name = format!("ability-codex-wrapper{}", std::env::consts::EXE_SUFFIX);
+    assert!(spec.env["ABILITY_RADAR_CODEX_WRAPPER"].ends_with(&wrapper_name));
+    assert!(
+        spec.env["ABILITY_RADAR_CODEX_ENTRY"]
+            .replace('\\', "/")
+            .ends_with("node_modules/@openai/codex/bin/codex.js")
+    );
+    assert_eq!(spec.env["ABILITY_RADAR_NODE_PROGRAM"], "node");
     assert!(!spec.args.join(" ").contains("Fix the repository"));
     let sent: Value = serde_json::from_slice(spec.stdin.as_ref().unwrap()).unwrap();
     assert_eq!(sent["provider"], "codex");

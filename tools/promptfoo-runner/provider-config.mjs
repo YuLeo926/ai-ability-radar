@@ -10,6 +10,9 @@ const PROVIDER_IDS = Object.freeze({
   claude: "anthropic:claude-agent-sdk",
 });
 const SAFE_ENVIRONMENT_KEYS = new Set([
+  "ABILITY_RADAR_CODEX_ENTRY",
+  "ABILITY_RADAR_CODEX_WRAPPER",
+  "ABILITY_RADAR_NODE_PROGRAM",
   "APPDATA",
   "CLAUDE_CONFIG_DIR",
   "CODEX_HOME",
@@ -34,6 +37,19 @@ const SAFE_ENVIRONMENT_KEYS = new Set([
   "USER",
   "USERNAME",
   "USERPROFILE",
+]);
+const SAFE_SHELL_ENVIRONMENT_KEYS = Object.freeze([
+  "COMSPEC",
+  "LANG",
+  "LC_ALL",
+  "PATH",
+  "PATHEXT",
+  "SHELL",
+  "SYSTEMROOT",
+  "TEMP",
+  "TERM",
+  "TMP",
+  "TMPDIR",
 ]);
 const CLAUDE_ALLOWED_TOOLS = Object.freeze(["Read", "Grep", "Glob", "Edit", "Write", "Bash"]);
 const CLAUDE_ALLOWED_TOOL_SET = new Set(CLAUDE_ALLOWED_TOOLS);
@@ -81,10 +97,22 @@ export function sanitizeProviderEnvironment(source = {}) {
 }
 
 function codexConfig(request, environment) {
+  const wrapper = environment.ABILITY_RADAR_CODEX_WRAPPER;
+  const entry = environment.ABILITY_RADAR_CODEX_ENTRY;
+  const nodeProgram = environment.ABILITY_RADAR_NODE_PROGRAM;
+  if (!wrapper || !entry || !nodeProgram) {
+    throw new Error("Codex isolation runtime is unavailable");
+  }
+  const shellEnvironment = Object.fromEntries(
+    SAFE_SHELL_ENVIRONMENT_KEYS.flatMap((key) =>
+      typeof environment[key] === "string" ? [[key, environment[key]]] : [],
+    ),
+  );
   return {
     working_dir: request.workspace,
     additional_directories: [],
     skip_git_repo_check: true,
+    codex_path_override: wrapper,
     ...(request.requested_model === "default" ? {} : { model: request.requested_model }),
     ...(request.reasoning_effort === null ? {} : { model_reasoning_effort: request.reasoning_effort }),
     sandbox_mode: "workspace-write",
@@ -98,6 +126,32 @@ function codexConfig(request, environment) {
     enable_streaming: false,
     deep_tracing: false,
     cli_env: environment,
+    cli_config: {
+      agents: { enabled: false },
+      allow_login_shell: false,
+      analytics: { enabled: false },
+      check_for_update_on_startup: false,
+      feedback: { enabled: false },
+      features: {
+        apps: false,
+        hooks: false,
+        memories: false,
+        multi_agent: false,
+        remote_plugin: false,
+        skill_mcp_dependency_install: false,
+        web_search: false,
+      },
+      history: { persistence: "none" },
+      project_doc_max_bytes: 0,
+      sandbox_workspace_write: { network_access: false },
+      shell_environment_policy: {
+        inherit: "none",
+        ignore_default_excludes: false,
+        set: shellEnvironment,
+      },
+      tools: { view_image: false, web_search: false },
+      web_search: "disabled",
+    },
   };
 }
 

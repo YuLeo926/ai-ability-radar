@@ -397,17 +397,17 @@ impl ProcessRunner for ReadyDetectionRunner {
         spec: ProcessSpec,
         _cancellation: CancellationToken,
     ) -> Result<ProcessOutput, ProcessError> {
-        let stdout = if spec.args.as_slice() == ["--version"] {
-            "codex-cli 0.134.0"
+        let (stdout, stderr) = if spec.args.as_slice() == ["--version"] {
+            ("codex-cli 0.134.0", "")
         } else if spec.args.as_slice() == ["login", "status"] {
-            "Logged in using ChatGPT"
+            ("", "Logged in using ChatGPT")
         } else {
             panic!("unexpected detection command: {:?}", spec.args);
         };
         Ok(ProcessOutput {
             exit_code: Some(0),
             stdout: stdout.into(),
-            stderr: String::new(),
+            stderr: stderr.into(),
             duration_ms: 10,
         })
     }

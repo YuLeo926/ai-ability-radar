@@ -33,6 +33,9 @@ test("Codex descriptor locks workspace, model, full effort, permissions, and net
     PATH: "C:\\runtime",
     USERPROFILE: "C:\\Users\\tester",
     CODEX_HOME: "C:\\Users\\tester\\.codex",
+    ABILITY_RADAR_CODEX_ENTRY: "C:\\runtime\\codex.js",
+    ABILITY_RADAR_CODEX_WRAPPER: "C:\\runtime\\ability-codex-wrapper.exe",
+    ABILITY_RADAR_NODE_PROGRAM: "C:\\runtime\\node.exe",
     OPENAI_API_KEY: "must-not-pass",
     NODE_OPTIONS: "--require malicious.js",
     PRIVATE_PROVIDER_SECRET: "must-not-pass",
@@ -45,6 +48,7 @@ test("Codex descriptor locks workspace, model, full effort, permissions, and net
     working_dir: workspace,
     additional_directories: [],
     skip_git_repo_check: true,
+    codex_path_override: "C:\\runtime\\ability-codex-wrapper.exe",
     model: "gpt-5.6-terra",
     model_reasoning_effort: "ultra",
     sandbox_mode: "workspace-write",
@@ -58,9 +62,38 @@ test("Codex descriptor locks workspace, model, full effort, permissions, and net
     enable_streaming: false,
     deep_tracing: false,
     cli_env: {
+      ABILITY_RADAR_CODEX_ENTRY: "C:\\runtime\\codex.js",
+      ABILITY_RADAR_CODEX_WRAPPER: "C:\\runtime\\ability-codex-wrapper.exe",
+      ABILITY_RADAR_NODE_PROGRAM: "C:\\runtime\\node.exe",
       CODEX_HOME: "C:\\Users\\tester\\.codex",
       PATH: "C:\\runtime",
       USERPROFILE: "C:\\Users\\tester",
+    },
+    cli_config: {
+      agents: { enabled: false },
+      allow_login_shell: false,
+      analytics: { enabled: false },
+      check_for_update_on_startup: false,
+      feedback: { enabled: false },
+      features: {
+        apps: false,
+        hooks: false,
+        memories: false,
+        multi_agent: false,
+        remote_plugin: false,
+        skill_mcp_dependency_install: false,
+        web_search: false,
+      },
+      history: { persistence: "none" },
+      project_doc_max_bytes: 0,
+      sandbox_workspace_write: { network_access: false },
+      shell_environment_policy: {
+        inherit: "none",
+        ignore_default_excludes: false,
+        set: { PATH: "C:\\runtime" },
+      },
+      tools: { view_image: false, web_search: false },
+      web_search: "disabled",
     },
   });
   assert.doesNotMatch(JSON.stringify(descriptor), /must-not-pass|NODE_OPTIONS|OPENAI_API_KEY/);
@@ -70,7 +103,11 @@ test("Codex default route omits model and effort overrides", () => {
   const config = buildProviderDescriptor(request({
     requested_model: "default",
     reasoning_effort: null,
-  }), {}).options.config;
+  }), {
+    ABILITY_RADAR_CODEX_ENTRY: "C:\\runtime\\codex.js",
+    ABILITY_RADAR_CODEX_WRAPPER: "C:\\runtime\\ability-codex-wrapper.exe",
+    ABILITY_RADAR_NODE_PROGRAM: "C:\\runtime\\node.exe",
+  }).options.config;
   assert.equal(Object.hasOwn(config, "model"), false);
   assert.equal(Object.hasOwn(config, "model_reasoning_effort"), false);
 });
@@ -81,6 +118,9 @@ test("Codex execution uses a sanitized process environment and rejects cache hit
   const previousNodeOptions = process.env.NODE_OPTIONS;
   process.env.PRIVATE_PROVIDER_SECRET = "restore-after-call";
   process.env.NODE_OPTIONS = "--require malicious.js";
+  process.env.ABILITY_RADAR_CODEX_ENTRY = "C:\\runtime\\codex.js";
+  process.env.ABILITY_RADAR_CODEX_WRAPPER = "C:\\runtime\\ability-codex-wrapper.exe";
+  process.env.ABILITY_RADAR_NODE_PROGRAM = "C:\\runtime\\node.exe";
   try {
     const execute = createProviderExecutor({
       loadProvider: harness.loadProvider,
@@ -103,6 +143,9 @@ test("Codex execution uses a sanitized process environment and rejects cache hit
     } else {
       process.env.NODE_OPTIONS = previousNodeOptions;
     }
+    delete process.env.ABILITY_RADAR_CODEX_ENTRY;
+    delete process.env.ABILITY_RADAR_CODEX_WRAPPER;
+    delete process.env.ABILITY_RADAR_NODE_PROGRAM;
   }
 });
 
