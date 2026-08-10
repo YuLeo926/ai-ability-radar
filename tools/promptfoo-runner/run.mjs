@@ -1,6 +1,10 @@
 import { pathToFileURL } from "node:url";
 
-import { executeProviderRequest, normalizeProviderError } from "./provider-config.mjs";
+import {
+  executeProviderRequest,
+  normalizeProviderError,
+  summarizeProviderResult,
+} from "./provider-config.mjs";
 import {
   MAX_REQUEST_BYTES,
   ProtocolError,
@@ -8,27 +12,6 @@ import {
   createSuccessResponse,
   parseRunnerRequest,
 } from "./protocol.mjs";
-
-function nullableString(value) {
-  return typeof value === "string" && value.length > 0 ? value : null;
-}
-
-function summarizeResult(result) {
-  const tokenUsage = result?.tokenUsage ?? {};
-  return {
-    finalText: typeof result?.output === "string" ? result.output : "",
-    sessionId: nullableString(result?.metadata?.sessionId),
-    tokenUsage: {
-      input: Number.isSafeInteger(tokenUsage.input) ? tokenUsage.input :
-        Number.isSafeInteger(tokenUsage.prompt) ? tokenUsage.prompt : null,
-      output: Number.isSafeInteger(tokenUsage.output) ? tokenUsage.output :
-        Number.isSafeInteger(tokenUsage.completion) ? tokenUsage.completion : null,
-      total: Number.isSafeInteger(tokenUsage.total) ? tokenUsage.total : null,
-    },
-    toolSummary: Array.isArray(result?.metadata?.toolSummary) ? result.metadata.toolSummary : [],
-    observedModel: nullableString(result?.metadata?.model),
-  };
-}
 
 export async function runOnce({
   inputText,
@@ -42,7 +25,7 @@ export async function runOnce({
   try {
     request = parseRunnerRequest(inputText);
     const result = await executeProvider(request);
-    response = createSuccessResponse(request, summarizeResult(result));
+    response = createSuccessResponse(request, summarizeProviderResult(request, result));
     exitCode = 0;
   } catch (error) {
     const protocolFailure = error instanceof ProtocolError;

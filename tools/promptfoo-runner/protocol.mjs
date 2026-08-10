@@ -25,6 +25,7 @@ const RESPONSE_FIELDS = new Set([
   "tokens",
   "tool_summary",
   "model_evidence",
+  "provider_summary",
   "provider_error_code",
 ]);
 const CODEX_EFFORTS = new Set([null, "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
@@ -185,6 +186,10 @@ export function createSuccessResponse(request, result = {}) {
       observed_model: result.observedModel ?? null,
       source: result.observedModel ? "provider" : "request_only",
     },
+    provider_summary: result.providerSummary ?? {
+      unknown_fields: [],
+      discarded_field_count: 0,
+    },
     provider_error_code: null,
   });
 }
@@ -202,6 +207,10 @@ export function createErrorResponse({ runId = null, requestedModel = null, provi
       requested_model: requestedModel,
       observed_model: null,
       source: "unavailable",
+    },
+    provider_summary: {
+      unknown_fields: [],
+      discarded_field_count: 0,
     },
     provider_error_code: providerErrorCode,
   });
@@ -251,6 +260,19 @@ export function validateRunnerResponse(value) {
   safeLabel(value.model_evidence.observed_model, 120, "invalid_model_evidence", { nullable: true });
   if (!["provider", "request_only", "unavailable"].includes(value.model_evidence.source)) {
     throw new ProtocolError("invalid_model_evidence");
+  }
+  object(value.provider_summary, "invalid_provider_summary");
+  exactFields(value.provider_summary, new Set(["unknown_fields", "discarded_field_count"]));
+  if (
+    !Array.isArray(value.provider_summary.unknown_fields) ||
+    value.provider_summary.unknown_fields.length > 64 ||
+    value.provider_summary.unknown_fields.some(
+      (field) => typeof field !== "string" || !/^[A-Za-z][A-Za-z0-9_.-]{0,127}$/.test(field),
+    ) ||
+    !Number.isSafeInteger(value.provider_summary.discarded_field_count) ||
+    value.provider_summary.discarded_field_count < 0
+  ) {
+    throw new ProtocolError("invalid_provider_summary");
   }
   if (
     (value.status === "success" && value.provider_error_code !== null) ||

@@ -1,0 +1,135 @@
+import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+
+import {
+  RUNNER_PROJECT_ROOT,
+  buildProviderDescriptor,
+  createProviderExecutor,
+  summarizeProviderResult,
+} from "../provider-config.mjs";
+import { createFakeProviderHarness } from "./fixtures/fake-provider.mjs";
+
+const workspace = mkdtempSync(join(tmpdir(), "ability-radar-codex-"));
+
+function request(overrides = {}) {
+  return {
+    provider: "codex",
+    workspace,
+    prompt: "fix the repository",
+    requested_model: "gpt-5.6-terra",
+    reasoning_effort: "ultra",
+    time_budget_seconds: 900,
+    max_turns: null,
+    run_id: "45c1c4a5-67ad-422f-9022-7fe4b6838f2e",
+    ...overrides,
+  };
+}
+
+test("Codex descriptor locks workspace, model, full effort, permissions, and network", () => {
+  const descriptor = buildProviderDescriptor(request(), {
+    PATH: "C:\\runtime",
+    USERPROFILE: "C:\\Users\\tester",
+    CODEX_HOME: "C:\\Users\\tester\\.codex",
+    OPENAI_API_KEY: "must-not-pass",
+    NODE_OPTIONS: "--require malicious.js",
+    PRIVATE_PROVIDER_SECRET: "must-not-pass",
+  });
+
+  assert.equal(descriptor.id, "openai:codex-sdk");
+  assert.equal(descriptor.basePath, RUNNER_PROJECT_ROOT);
+  assert.equal(descriptor.cache, false);
+  assert.deepEqual(descriptor.options.config, {
+    working_dir: workspace,
+    additional_directories: [],
+    skip_git_repo_check: true,
+    model: "gpt-5.6-terra",
+    model_reasoning_effort: "ultra",
+    sandbox_mode: "workspace-write",
+    network_access_enabled: false,
+    web_search_enabled: false,
+    web_search_mode: "disabled",
+    collaboration_mode: "coding",
+    approval_policy: "never",
+    persist_threads: false,
+    inherit_process_env: false,
+    enable_streaming: false,
+    deep_tracing: false,
+    cli_env: {
+      CODEX_HOME: "C:\\Users\\tester\\.codex",
+      PATH: "C:\\runtime",
+      USERPROFILE: "C:\\Users\\tester",
+    },
+  });
+  assert.doesNotMatch(JSON.stringify(descriptor), /must-not-pass|NODE_OPTIONS|OPENAI_API_KEY/);
+});
+
+test("Codex default route omits model and effort overrides", () => {
+  const config = buildProviderDescriptor(request({
+    requested_model: "default",
+    reasoning_effort: null,
+  }), {}).options.config;
+  assert.equal(Object.hasOwn(config, "model"), false);
+  assert.equal(Object.hasOwn(config, "model_reasoning_effort"), false);
+});
+
+test("Codex execution uses a sanitized process environment and rejects cache hits", async () => {
+  const harness = createFakeProviderHarness({ result: { output: "cached", cached: true } });
+  const previous = process.env.PRIVATE_PROVIDER_SECRET;
+  const previousNodeOptions = process.env.NODE_OPTIONS;
+  process.env.PRIVATE_PROVIDER_SECRET = "restore-after-call";
+  process.env.NODE_OPTIONS = "--require malicious.js";
+  try {
+    const execute = createProviderExecutor({
+      loadProvider: harness.loadProvider,
+      cacheController: { disableCache() {} },
+      environmentSource: process.env,
+    });
+    await assert.rejects(execute(request()), (error) => error.code === "CACHE_HIT");
+    assert.deepEqual(harness.events[1].context, { bustCache: true });
+    assert.equal(harness.events[1].privateEnvironmentVisible, false);
+    assert.equal(harness.events[1].nodeOptionsVisible, false);
+    assert.equal(process.env.PRIVATE_PROVIDER_SECRET, "restore-after-call");
+  } finally {
+    if (previous === undefined) {
+      delete process.env.PRIVATE_PROVIDER_SECRET;
+    } else {
+      process.env.PRIVATE_PROVIDER_SECRET = previous;
+    }
+    if (previousNodeOptions === undefined) {
+      delete process.env.NODE_OPTIONS;
+    } else {
+      process.env.NODE_OPTIONS = previousNodeOptions;
+    }
+  }
+});
+
+test("Codex result keeps safe tool counts without inventing visible model evidence", () => {
+  const summary = summarizeProviderResult(request(), {
+    output: "done",
+    sessionId: "thread-123",
+    tokenUsage: { prompt: 10, completion: 4, total: 14 },
+    raw: JSON.stringify({
+      items: [
+        { type: "command_execution", command: "PRIVATE COMMAND" },
+        { type: "file_change", patch: "PRIVATE PATCH" },
+        { type: "command_execution", output: "PRIVATE OUTPUT" },
+      ],
+    }),
+    metadata: { futureModel: "forged-visible-model" },
+    futureTopLevel: { secret: "PRIVATE UNKNOWN VALUE" },
+  });
+
+  assert.equal(summary.observedModel, null);
+  assert.deepEqual(summary.toolSummary, [
+    { name: "command_execution", count: 2 },
+    { name: "file_change", count: 1 },
+  ]);
+  assert.deepEqual(summary.providerSummary.unknown_fields, [
+    "futureTopLevel",
+    "metadata.futureModel",
+  ]);
+  assert.doesNotMatch(JSON.stringify(summary), /PRIVATE COMMAND|PRIVATE PATCH|PRIVATE OUTPUT|PRIVATE UNKNOWN VALUE|forged-visible-model/);
+});
