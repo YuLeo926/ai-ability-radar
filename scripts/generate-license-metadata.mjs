@@ -30,6 +30,23 @@ function packageKey({ name, version }) {
 }
 
 const npmLock = JSON.parse(bytes("package-lock.json"));
+const npmLicenseMetadataOverrides = [
+  {
+    name: "sylvester",
+    version: "0.0.21",
+    license: "MIT",
+    evidence: "published package LICENSE.txt",
+  },
+  {
+    name: "xmlhttprequest-ssl",
+    version: "2.1.2",
+    license: "MIT",
+    evidence: "published package LICENSE and package.json licenses[0]",
+  },
+];
+const npmLicenseOverrideByPackage = new Map(
+  npmLicenseMetadataOverrides.map((entry) => [packageKey(entry), entry]),
+);
 const npmPackages = new Map();
 for (const [path, metadata] of Object.entries(npmLock.packages ?? {})) {
   const marker = "node_modules/";
@@ -38,7 +55,9 @@ for (const [path, metadata] of Object.entries(npmLock.packages ?? {})) {
   const entry = {
     name: path.slice(index + marker.length),
     version: metadata.version,
-    license: metadata.license,
+    license: metadata.license ?? npmLicenseOverrideByPackage.get(
+      packageKey({ name: path.slice(index + marker.length), version: metadata.version }),
+    )?.license,
     resolved: metadata.resolved,
     integrity: metadata.integrity,
   };
@@ -47,12 +66,31 @@ for (const [path, metadata] of Object.entries(npmLock.packages ?? {})) {
   }
   npmPackages.set(packageKey(entry), entry);
 }
+const npmSeparateNotices = [
+  {
+    name: "@anthropic-ai/claude-agent-sdk",
+    version: "0.3.226",
+    license: "SEE LICENSE IN README.md",
+    noticeId: "claude-agent-sdk",
+    noticeDocument: "THIRD_PARTY_NOTICES.md",
+  },
+];
+for (const notice of npmSeparateNotices) {
+  const metadata = npmPackages.get(packageKey(notice));
+  if (!metadata || metadata.license !== notice.license) {
+    throw new Error(
+      `separate license notice does not match package-lock.json for ${packageKey(notice)}`,
+    );
+  }
+}
 writeReport("npm-dependencies.json", {
-  schemaVersion: 1,
+  schemaVersion: 2,
   generatedFrom: "package-lock.json",
   lockfileSha256: sha256("package-lock.json"),
   hashNormalization: "UTF-8 text with CRLF and CR normalized to LF",
   note: "Metadata inventory only; dependency license texts are not bundled here.",
+  licenseMetadataOverrides: npmLicenseMetadataOverrides,
+  separateNotices: npmSeparateNotices,
   packages: [...npmPackages.values()].sort((a, b) =>
     packageKey(a).localeCompare(packageKey(b), "en"),
   ),

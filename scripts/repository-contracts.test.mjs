@@ -593,6 +593,150 @@ test("repository validator rejects parser dependency version ranges", () => {
   assertRejected(result, /TypeScript parser.*exactly 5\.8\.3/i);
 });
 
+const exactAgentRuntimeDependencies = Object.freeze({
+  promptfoo: "0.122.0",
+  "@openai/codex-sdk": "0.147.0",
+  "@anthropic-ai/claude-agent-sdk": "0.3.226",
+});
+const exactAgentRuntimeSecurityOverrides = Object.freeze({
+  ai: "6.0.237",
+  "adm-zip": "0.6.0",
+  sharp: "0.35.3",
+});
+
+test("agent runtime dependencies and Node floor are exact root contracts", () => {
+  const packageManifest = JSON.parse(
+    readFileSync(join(root, "package.json"), "utf8"),
+  );
+  const lock = JSON.parse(readFileSync(join(root, "package-lock.json"), "utf8"));
+
+  assert.equal(packageManifest.engines?.node, ">=22.22.0");
+  assert.equal(lock.packages?.[""]?.engines?.node, ">=22.22.0");
+  for (const [name, version] of Object.entries(exactAgentRuntimeDependencies)) {
+    assert.equal(packageManifest.dependencies?.[name], version, name);
+    assert.equal(lock.packages?.[""]?.dependencies?.[name], version, name);
+    assert.equal(lock.packages?.[`node_modules/${name}`]?.version, version, name);
+    if (name !== "promptfoo") {
+      assert.equal(packageManifest.overrides?.[name], version, `${name} override`);
+    }
+    const lockedVersions = Object.entries(lock.packages ?? {})
+      .filter(([path]) => path === `node_modules/${name}` || path.endsWith(`/node_modules/${name}`))
+      .map(([, metadata]) => metadata.version);
+    assert.deepEqual([...new Set(lockedVersions)], [version], `${name} dependency tree`);
+  }
+});
+
+test("agent runtime transitive security fixes stay pinned", () => {
+  const packageManifest = JSON.parse(
+    readFileSync(join(root, "package.json"), "utf8"),
+  );
+  const desktopManifest = JSON.parse(
+    readFileSync(join(root, "apps", "desktop", "package.json"), "utf8"),
+  );
+  const lock = JSON.parse(readFileSync(join(root, "package-lock.json"), "utf8"));
+
+  for (const [name, version] of Object.entries(exactAgentRuntimeSecurityOverrides)) {
+    assert.equal(packageManifest.overrides?.[name], version, `${name} security override`);
+    const lockedVersions = Object.entries(lock.packages ?? {})
+      .filter(([path]) => path === `node_modules/${name}` || path.endsWith(`/node_modules/${name}`))
+      .map(([, metadata]) => metadata.version);
+    assert.deepEqual([...new Set(lockedVersions)], [version], `${name} dependency tree`);
+  }
+  assert.equal(desktopManifest.dependencies?.["react-router-dom"], "^7.18.2");
+  assert.equal(lock.packages?.["apps/desktop"]?.dependencies?.["react-router-dom"], "^7.18.2");
+  assert.equal(lock.packages?.["node_modules/react-router"]?.version, "7.18.2");
+  assert.equal(lock.packages?.["node_modules/react-router-dom"]?.version, "7.18.2");
+});
+
+test("repository validator rejects agent runtime security override drift", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, "package.json"), (source) => {
+      const manifest = JSON.parse(source);
+      manifest.overrides.ai = "6.0.246";
+      return `${JSON.stringify(manifest, null, 2)}\n`;
+    });
+  });
+  assertRejected(result, /agent runtime security override ai.*exactly 6\.0\.237/i);
+});
+
+test("repository validator rejects agent runtime dependency drift", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, "package.json"), (source) => {
+      const manifest = JSON.parse(source);
+      manifest.dependencies.promptfoo = "^0.122.0";
+      return `${JSON.stringify(manifest, null, 2)}\n`;
+    });
+  });
+  assertRejected(result, /agent runtime.*promptfoo.*exactly 0\.122\.0/i);
+});
+
+test("repository validator rejects a lower Node runtime floor", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, "package.json"), (source) => {
+      const manifest = JSON.parse(source);
+      manifest.engines.node = ">=22.0.0";
+      return `${JSON.stringify(manifest, null, 2)}\n`;
+    });
+  });
+  assertRejected(result, /Node.*exactly >=22\.22\.0/i);
+});
+
+test("repository validator rejects online just-in-time package execution", () => {
+  const result = runNegativeFixture((fixture) => {
+    replace(join(fixture, "package.json"), (source) => {
+      const manifest = JSON.parse(source);
+      manifest.scripts["agent:unsafe"] = "npx --yes promptfoo@latest eval";
+      return `${JSON.stringify(manifest, null, 2)}\n`;
+    });
+  });
+  assertRejected(result, /production scripts.*npx|online just-in-time package/i);
+});
+
+test("Claude Agent SDK keeps a separate nonstandard license notice", () => {
+  const notice = readFileSync(join(root, "THIRD_PARTY_NOTICES.md"), "utf8");
+  const report = JSON.parse(
+    readFileSync(join(root, "docs", "licenses", "npm-dependencies.json"), "utf8"),
+  );
+  const sdk = report.packages.find(
+    ({ name, version }) =>
+      name === "@anthropic-ai/claude-agent-sdk" && version === "0.3.226",
+  );
+  const separateNotice = report.separateNotices?.find(
+    ({ name, version }) =>
+      name === "@anthropic-ai/claude-agent-sdk" && version === "0.3.226",
+  );
+
+  assert.equal(sdk?.license, "SEE LICENSE IN README.md");
+  assert.equal(separateNotice?.noticeId, "claude-agent-sdk");
+  assert.match(notice, /Claude Agent SDK.*0\.3\.226/si);
+  assert.match(notice, /SEE LICENSE IN README\.md/si);
+  assert.match(notice, /不(?:是|按).*Apache|非 Apache/si);
+});
+
+test("missing lockfile license metadata needs an exact reviewed evidence override", () => {
+  const report = JSON.parse(
+    readFileSync(join(root, "docs", "licenses", "npm-dependencies.json"), "utf8"),
+  );
+  const metadata = report.packages.find(
+    ({ name, version }) => name === "sylvester" && version === "0.0.21",
+  );
+  assert.equal(metadata?.license, "MIT");
+  assert.deepEqual(report.licenseMetadataOverrides, [
+    {
+      name: "sylvester",
+      version: "0.0.21",
+      license: "MIT",
+      evidence: "published package LICENSE.txt",
+    },
+    {
+      name: "xmlhttprequest-ssl",
+      version: "2.1.2",
+      license: "MIT",
+      evidence: "published package LICENSE and package.json licenses[0]",
+    },
+  ]);
+});
+
 test("comment-only action cannot satisfy a required workflow action", () => {
   const result = runNegativeFixture((fixture) => {
     replace(join(fixture, ".github", "workflows", "ci.yml"), (source) =>

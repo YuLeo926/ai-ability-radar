@@ -387,6 +387,7 @@ const requiredFiles = [
   "tools/fake-cli/Cargo.toml",
   "tools/fake-cli/src/main.rs",
   "tools/fake-cli/tests/fake_cli.rs",
+  "tools/promptfoo-runner/README.md",
   "apps/desktop/src-tauri/tests/fake_cli_e2e.rs",
   "scripts/package-portable.mjs",
   "scripts/package-portable.test.mjs",
@@ -416,6 +417,79 @@ if (
     `TypeScript parser must be declared, locked, and loaded at exactly ${expectedTypeScriptParserVersion}`,
   );
 }
+const expectedNodeEngine = ">=22.22.0";
+const exactAgentRuntimeDependencies = Object.freeze({
+  promptfoo: "0.122.0",
+  "@openai/codex-sdk": "0.147.0",
+  "@anthropic-ai/claude-agent-sdk": "0.3.226",
+});
+const exactAgentRuntimeSecurityOverrides = Object.freeze({
+  ai: "6.0.237",
+  "adm-zip": "0.6.0",
+  sharp: "0.35.3",
+});
+if (
+  rootPackage.engines?.node !== expectedNodeEngine ||
+  npmLock.packages?.[""]?.engines?.node !== expectedNodeEngine
+) {
+  fail(`Node engine must be declared and locked at exactly ${expectedNodeEngine}`);
+}
+for (const [name, version] of Object.entries(exactAgentRuntimeDependencies)) {
+  if (
+    rootPackage.dependencies?.[name] !== version ||
+    npmLock.packages?.[""]?.dependencies?.[name] !== version ||
+    npmLock.packages?.[`node_modules/${name}`]?.version !== version
+  ) {
+    fail(`agent runtime dependency ${name} must be declared and locked at exactly ${version}`);
+  }
+  if (name !== "promptfoo" && rootPackage.overrides?.[name] !== version) {
+    fail(`agent runtime dependency ${name} must be overridden at exactly ${version}`);
+  }
+  const lockedVersions = Object.entries(npmLock.packages ?? {})
+    .filter(([path]) => path === `node_modules/${name}` || path.endsWith(`/node_modules/${name}`))
+    .map(([, metadata]) => metadata.version);
+  if (
+    lockedVersions.length === 0 ||
+    lockedVersions.some((lockedVersion) => lockedVersion !== version)
+  ) {
+    fail(`agent runtime dependency tree must use only ${name}@${version}`);
+  }
+}
+for (const [name, version] of Object.entries(exactAgentRuntimeSecurityOverrides)) {
+  if (rootPackage.overrides?.[name] !== version) {
+    fail(`agent runtime security override ${name} must be pinned at exactly ${version}`);
+  }
+  const lockedVersions = Object.entries(npmLock.packages ?? {})
+    .filter(([path]) => path === `node_modules/${name}` || path.endsWith(`/node_modules/${name}`))
+    .map(([, metadata]) => metadata.version);
+  if (
+    lockedVersions.length === 0 ||
+    lockedVersions.some((lockedVersion) => lockedVersion !== version)
+  ) {
+    fail(`agent runtime security dependency tree must use only ${name}@${version}`);
+  }
+}
+if (
+  desktopPackage.dependencies?.["react-router-dom"] !== "^7.18.2" ||
+  npmLock.packages?.["apps/desktop"]?.dependencies?.["react-router-dom"] !== "^7.18.2" ||
+  npmLock.packages?.["node_modules/react-router"]?.version !== "7.18.2" ||
+  npmLock.packages?.["node_modules/react-router-dom"]?.version !== "7.18.2"
+) {
+  fail("React Router security floor must be locked at 7.18.2");
+}
+if (
+  Object.values(rootPackage.scripts ?? {}).some(
+    (command) => typeof command === "string" && /(?:^|\s)npx(?:\s|$)|@latest\b/i.test(command),
+  )
+) {
+  fail("production scripts must not use npx or online just-in-time package versions");
+}
+requireText("tools/promptfoo-runner/README.md", [
+  ["runner contract version", /promptfoo-agent-v1/],
+  ["Codex provider", /openai:codex-sdk/],
+  ["Claude provider", /anthropic:claude-agent-sdk/],
+  ["no just-in-time install", /不使用.*npx|禁止.*npx/si],
+]);
 if (rootPackage.scripts?.tauri !== "npm run tauri --workspace apps/desktop --") {
   fail("package.json tauri script must preserve the argument separator for workspace forwarding");
 }
@@ -3112,11 +3186,46 @@ for (const href of site.matchAll(/href="([^"]+)"/g)) {
 
 const rustReport = json("docs/licenses/rust-dependencies.json");
 const npmReport = json("docs/licenses/npm-dependencies.json");
+const expectedNpmLicenseMetadataOverrides = [
+  {
+    name: "sylvester",
+    version: "0.0.21",
+    license: "MIT",
+    evidence: "published package LICENSE.txt",
+  },
+  {
+    name: "xmlhttprequest-ssl",
+    version: "2.1.2",
+    license: "MIT",
+    evidence: "published package LICENSE and package.json licenses[0]",
+  },
+];
+const expectedNpmSeparateNotices = [
+  {
+    name: "@anthropic-ai/claude-agent-sdk",
+    version: "0.3.226",
+    license: "SEE LICENSE IN README.md",
+    noticeId: "claude-agent-sdk",
+    noticeDocument: "THIRD_PARTY_NOTICES.md",
+  },
+];
 if (rustReport.generatedFrom !== "Cargo.lock") {
   fail("Rust license report must declare Cargo.lock as its source");
 }
 if (npmReport.generatedFrom !== "package-lock.json") {
   fail("npm license report must declare package-lock.json as its source");
+}
+if (
+  JSON.stringify(npmReport.licenseMetadataOverrides) !==
+  JSON.stringify(expectedNpmLicenseMetadataOverrides)
+) {
+  fail("npm license metadata overrides must match the exact reviewed evidence allowlist");
+}
+if (
+  JSON.stringify(npmReport.separateNotices) !==
+  JSON.stringify(expectedNpmSeparateNotices)
+) {
+  fail("npm separate license notices must match the exact reviewed notice allowlist");
 }
 if (rustReport.hashNormalization !== "UTF-8 text with CRLF and CR normalized to LF") {
   fail("Rust license report must declare cross-platform line-ending normalization");

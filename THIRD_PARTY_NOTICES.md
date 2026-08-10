@@ -12,6 +12,18 @@ AI 能力雷达第一方代码按仓库根目录的 [Apache License 2.0](LICENSE
 任何未来导入的题目、starter、verifier 或数据集都必须在这里单独列出来源、版本、修改与再分发许可，
 不能借用上述第一方声明。DeepSWE 内容当前未包含；其再分发审查完成前不会进入仓库或安装包。
 
+## 单独审查的运行时依赖
+
+### Claude Agent SDK 0.3.226
+
+`@anthropic-ai/claude-agent-sdk` 0.3.226 在 npm 元数据中声明的许可为
+`SEE LICENSE IN README.md`。它不是按 Apache-2.0 或 MIT 许可发布的项目代码；使用和再分发时必须同时
+遵守该包 README 中的 Anthropic 商业许可条款。上游包与许可说明：
+<https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk/v/0.3.226>。
+
+本项目仅把它作为 Claude Code 本地执行的可选运行时，不改变其许可，也不把它并入本项目的
+Apache-2.0 授权范围。机器可读清单通过 `noticeId: claude-agent-sdk` 指向本节。
+
 ## Rust 与 npm 依赖
 
 锁定依赖的机器可读许可报告：
