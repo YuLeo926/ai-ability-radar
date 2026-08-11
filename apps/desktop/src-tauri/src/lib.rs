@@ -202,7 +202,7 @@ mod tests {
 
     #[test]
     fn cross_platform_backup_path_resolves_only_paired_cfg_helpers() {
-        let source = include_str!("commands.rs");
+        let source = include_str!("commands.rs").replace("\r\n", "\n");
         assert!(source.contains("#[cfg(windows)]\nfn write_full_backup_to_destination("));
         assert!(source.contains("#[cfg(not(windows))]\nfn write_full_backup_to_destination("));
         let export_body = source
