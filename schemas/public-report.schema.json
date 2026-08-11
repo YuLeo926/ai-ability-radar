@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "AI Ability Radar public report v2",
+  "title": "AI Ability Radar public report v3",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -14,7 +14,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": 2
+      "const": 3
     },
     "reportId": {
       "type": "string",
@@ -182,7 +182,8 @@
         "categoryScores",
         "outcomeCounts",
         "failureCounts",
-        "totalDurationMs"
+        "totalDurationMs",
+        "agentExecution"
       ],
       "properties": {
         "runStatus": {
@@ -306,6 +307,55 @@
         "totalDurationMs": {
           "type": "integer",
           "minimum": 0
+        },
+        "agentExecution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "recordedTasks",
+            "statusCounts",
+            "commandSummaryTasks",
+            "commandSucceeded",
+            "commandFailed",
+            "commandUnknown",
+            "toolErrorSummaryTasks",
+            "toolErrorCount",
+            "fileChangeSummaryTasks",
+            "fileChangeCount",
+            "modelEvidenceTasks",
+            "modelEvidenceSourceCounts"
+          ],
+          "properties": {
+            "recordedTasks": { "type": "integer", "minimum": 0 },
+            "statusCounts": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "completed": { "type": "integer", "minimum": 0 },
+                "provider_error": { "type": "integer", "minimum": 0 },
+                "timed_out": { "type": "integer", "minimum": 0 },
+                "cancelled": { "type": "integer", "minimum": 0 }
+              }
+            },
+            "commandSummaryTasks": { "type": "integer", "minimum": 0 },
+            "commandSucceeded": { "type": "integer", "minimum": 0 },
+            "commandFailed": { "type": "integer", "minimum": 0 },
+            "commandUnknown": { "type": "integer", "minimum": 0 },
+            "toolErrorSummaryTasks": { "type": "integer", "minimum": 0 },
+            "toolErrorCount": { "type": "integer", "minimum": 0 },
+            "fileChangeSummaryTasks": { "type": "integer", "minimum": 0 },
+            "fileChangeCount": { "type": "integer", "minimum": 0 },
+            "modelEvidenceTasks": { "type": "integer", "minimum": 0 },
+            "modelEvidenceSourceCounts": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "provider": { "type": "integer", "minimum": 0 },
+                "request_only": { "type": "integer", "minimum": 0 },
+                "unavailable": { "type": "integer", "minimum": 0 }
+              }
+            }
+          }
         }
       }
     },

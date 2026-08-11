@@ -11,6 +11,7 @@ import {
 import { describe, expect, test, vi } from "vitest";
 import { BackendProvider } from "../api/BackendContext";
 import type {
+  AgentExecutionSummary,
   Backend,
   FailureKind,
   RunDetail,
@@ -146,11 +147,37 @@ function fullCoverageTasks(detailRunId = runId): TaskResult[] {
 function makeDetail(
   runOverrides: Partial<RunRecord> = {},
   taskResults?: TaskResult[],
+  agentExecutionSummaries: AgentExecutionSummary[] = [],
 ): RunDetail {
   const run = makeRun(runOverrides);
   return {
     run,
     taskResults: taskResults ?? canonicalTasks(run.id),
+    agentExecutionSummaries,
+  };
+}
+
+function makeAgentSummary(taskId: string): AgentExecutionSummary {
+  return {
+    taskId,
+    contractVersion: "promptfoo-agent-v2",
+    status: "completed",
+    commandSucceeded: 0,
+    commandFailed: 1,
+    commandUnknown: 0,
+    exitCodes: [{ code: 1, count: 1 }],
+    toolErrorCount: 1,
+    fileChangeCount: 0,
+    sessionPresent: true,
+    tokens: { input: 120, output: 40, total: 160 },
+    model: {
+      requestedModel: "gpt-test",
+      observedModel: "gpt-test",
+      source: "provider",
+    },
+    providerUnknownFieldCount: 0,
+    agentDurationMs: 2_500,
+    detailAvailable: true,
   };
 }
 
@@ -229,7 +256,7 @@ describe("ResultPage local data controls", () => {
       await screen.findByText("数据管理"),
     );
     const rawButton = screen.getByRole("button", {
-      name: /只删除原始回答和 CLI 日志/,
+      name: /删除原始数据和本地诊断/,
     });
     await user.click(rawButton);
     await user.click(screen.getByRole("button", { name: "取消" }));
@@ -695,6 +722,90 @@ describe("ResultPage objective semantics", () => {
     ).toBeInTheDocument();
   });
 
+  test("keeps Agent completion separate from failed verification and lazy-loads private diagnostics", async () => {
+    const user = userEvent.setup();
+    const task = makeTask(1, {
+      category: "cli_coding",
+      outcome: "failed",
+      score: 0,
+      failureKind: "wrong_answer",
+    });
+    const summary = makeAgentSummary(task.taskId);
+    const getAgentExecutionDetail = vi.fn(async () => ({
+      status: "available" as const,
+      detail: {
+        finalText: "I finished, but the hidden test still fails.",
+        sessionPresent: true,
+        tokens: { input: 120, output: 40, total: 160 },
+        toolSummary: [{ name: "shell", count: 1 }],
+        commandSucceeded: 0,
+        commandFailed: 1,
+        commandUnknown: 0,
+        exitCodes: [{ code: 1, count: 1 }],
+        toolErrors: [{ kind: "command_failed", message: "test failed" }],
+        fileChangeCount: 0,
+        model: {
+          requestedModel: "gpt-test",
+          observedModel: "gpt-test",
+          source: "provider" as const,
+        },
+        providerUnknownFieldCount: 0,
+      },
+    }));
+    const backend = {
+      ...makeBackend(async () =>
+        makeDetail(
+          {
+            target: {
+              kind: "codex_cli",
+              reportedModel: "gpt-test",
+              reasoningEffort: "high",
+              modelSource: "cli_reported",
+              modelVerification: "provider_reported",
+            },
+            totalTasks: 1,
+            completedTasks: 1,
+            score: {
+              abilityScore: 0,
+              passedTasks: 0,
+              validTasks: 1,
+              totalTasks: 1,
+              categoryScores: { cli_coding: 0 },
+            },
+          },
+          [task],
+          [summary],
+        ),
+      ),
+      getAgentExecutionDetail,
+    };
+    renderResult(backend);
+
+    const evidence = await screen.findByRole("list", {
+      name: "逐题客观证据",
+    });
+    expect(within(evidence).getByText("已结束")).toBeInTheDocument();
+    expect(
+      within(evidence).getByText("未通过（计入本题包成绩）"),
+    ).toBeInTheDocument();
+    expect(
+      within(evidence).getByText(/Agent 已结束不等于任务通过/),
+    ).toBeInTheDocument();
+    expect(getAgentExecutionDetail).not.toHaveBeenCalled();
+    expect(
+      screen.queryByText("I finished, but the hidden test still fails."),
+    ).not.toBeInTheDocument();
+
+    await user.click(within(evidence).getByText("本地诊断详情"));
+    expect(getAgentExecutionDetail).toHaveBeenCalledWith(runId, task.taskId);
+    expect(
+      await within(evidence).findByText(
+        "I finished, but the hidden test still fails.",
+      ),
+    ).toBeInTheDocument();
+    expect(within(evidence).getByText(/退出码：1 × 1/)).toBeInTheDocument();
+  });
+
   test("maps every safe task outcome and failure without exposing identifiers or paths", async () => {
     const failures: FailureKind[] = [
       "cli_missing",
@@ -1031,7 +1142,7 @@ describe("ResultPage objective semantics", () => {
     const dialog = screen.getByRole("dialog", { name: "导出前检查" });
     expect(dialog).toHaveAttribute("aria-modal", "true");
     expect(dialog).toContainElement(document.activeElement as HTMLElement);
-    expect(within(dialog).getByText("报告格式版本 2")).toBeInTheDocument();
+    expect(within(dialog).getByText("报告格式版本 3")).toBeInTheDocument();
     expect(
       within(dialog).getByText(/匿名报告编号和生成时间将在确认并选择位置后创建/),
     ).toBeInTheDocument();
@@ -1059,6 +1170,10 @@ describe("ResultPage objective semantics", () => {
       "题目提示词",
       "CLI 日志",
       "逐题详情文本",
+      "Agent 最终回答",
+      "工具错误正文",
+      "命令正文与输出",
+      "会话标识",
       "用户名",
       "主机名",
       "操作系统构建号",

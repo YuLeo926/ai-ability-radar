@@ -318,6 +318,7 @@ impl ManualRunService {
                     .map(|result| RecoveryArtifactCheckpoint {
                         task_id: result.task_id.clone(),
                         raw_artifact: true,
+                        agent_evidence_artifact: false,
                     })
                     .collect::<Vec<_>>();
                 artifact_store

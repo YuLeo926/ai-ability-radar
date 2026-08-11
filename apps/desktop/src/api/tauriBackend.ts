@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
+  AgentEvidenceResponse,
   Backend,
   Bootstrap,
   DataSettings,
@@ -25,6 +26,7 @@ import {
   isSafeBatchRecord,
   isSafeBatchRecordList,
   isSafeBatchRetryEstimate,
+  isSafeAgentEvidenceResponse,
   isSafeClientSelectionDetection,
   isSafeNextGuidedMember,
   isSafeGuidedBatchRunRecord,
@@ -79,6 +81,12 @@ export const tauriBackend: Backend = {
   listRuns: () => invoke<RunRecord[]>("list_runs"),
   getRunDetail: (runId) =>
     invoke<RunDetail | null>("get_run_detail", { runId }),
+  getAgentExecutionDetail: (runId, taskId) =>
+    invokeValidated<AgentEvidenceResponse>(
+      "get_agent_execution_detail",
+      { input: { runId, taskId } },
+      isSafeAgentEvidenceResponse,
+    ),
   exportPublicReport: (runId) =>
     invoke<string | null>("export_public_report", { input: { runId } }),
   deleteRawArtifacts: (runId) =>

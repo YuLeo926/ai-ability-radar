@@ -31,10 +31,35 @@
 .task-evidence-card .outcome { width: fit-content; padding: var(--space-1) var(--space-3); border-radius: var(--radius-sm); background: var(--brand-soft); color: var(--text-primary); font-size: 0.84rem; font-weight: 720; }
 .task-evidence-card .outcome-failed { background: var(--danger-soft); color: var(--danger); }
 .task-evidence-card .outcome-invalid, .task-evidence-card .outcome-cancelled { background: var(--surface-muted); color: var(--text-muted); }
+.task-status-strip { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); overflow: hidden; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--border); gap: 1px; }
+.task-status-strip > div { display: grid; min-width: 0; gap: var(--space-1); padding: var(--space-3); background: var(--panel-raised); }
+.task-status-strip > div > span { color: var(--text-muted); font-size: .72rem; font-weight: 760; letter-spacing: .08em; text-transform: uppercase; }
+.task-status-strip strong { width: fit-content; max-width: 100%; overflow-wrap: anywhere; }
+.task-status-strip .outcome { margin: 0; }
+.agent-status { color: var(--text-primary); font-size: .92rem; }
+.agent-status-completed { color: var(--success); }
+.agent-status-provider_error, .agent-status-timed_out { color: var(--warning); }
+.agent-status-cancelled, .agent-status-legacy { color: var(--text-muted); }
+.agent-verification-warning { padding: var(--space-2) var(--space-3); border-left: .22rem solid var(--warning); background: var(--warning-soft); color: var(--text-primary); font-size: .88rem; }
 .task-evidence-card dl { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); }
 .task-evidence-card dl div { display: flex; gap: var(--space-1); }
 .task-evidence-card dt { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 .task-evidence-card dd, .failure-explanation { font-size: 0.9rem; }
+.agent-diagnostics { border-top: 1px solid var(--border); padding-top: var(--space-3); }
+.agent-diagnostics > summary { width: fit-content; color: var(--brand-strong); font-size: .9rem; font-weight: 740; cursor: pointer; }
+.agent-diagnostics-body { display: grid; gap: var(--space-3); margin-top: var(--space-3); }
+.agent-summary-grid { display: grid !important; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2) !important; }
+.agent-summary-grid > div { display: grid !important; gap: var(--space-1) !important; padding: var(--space-2); border: 1px solid var(--border); background: var(--surface-muted); }
+.agent-summary-grid dt { position: static !important; width: auto !important; height: auto !important; clip: auto !important; color: var(--text-muted); font-size: .7rem !important; }
+.agent-summary-grid dd { overflow-wrap: anywhere; color: var(--text-primary); font-family: ui-monospace, "Cascadia Mono", monospace; font-size: .78rem !important; }
+.diagnostic-unavailable { color: var(--text-muted); font-size: .86rem; }
+.agent-private-record { display: grid; gap: var(--space-3); padding: var(--space-3); border: 1px solid var(--border-strong); background: var(--panel-raised); }
+.agent-private-record section { display: grid; gap: var(--space-2); }
+.agent-private-record h3 { margin: 0; font-size: .86rem; }
+.agent-private-record p, .agent-private-record li { color: var(--text-muted); font-size: .82rem; }
+.agent-private-record pre { max-height: 18rem; margin: 0; overflow: auto; padding: var(--space-3); border: 1px solid var(--border); background: var(--surface-muted); color: var(--text-primary); font: .78rem/1.6 ui-monospace, "Cascadia Mono", monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.agent-private-record ul { display: grid; gap: var(--space-1); margin: 0; padding-left: var(--space-4); }
+.diagnostic-privacy-note { padding-top: var(--space-2); border-top: 1px solid var(--border); }
 
 .technical-details { margin-top: clamp(var(--space-6), 5vw, var(--space-7)); padding: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface-muted); }
 .technical-details summary { color: var(--text-primary); font-weight: 730; cursor: pointer; }
@@ -137,7 +162,7 @@
 
 @media (max-width: 54rem) { .score-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 42rem) {
-  .score-cards, .task-evidence-list, .technical-details dl, .history-batch-grid, .history-batch-cohort > header, .history-batch-facts { grid-template-columns: 1fr; }
+  .score-cards, .task-evidence-list, .technical-details dl, .history-batch-grid, .history-batch-cohort > header, .history-batch-facts, .task-status-strip, .agent-summary-grid { grid-template-columns: 1fr; }
   .category-row { grid-template-columns: 1fr auto; }
   .category-row .bar-track { grid-column: 1 / -1; grid-row: 2; }
   .history-series-header, .report-export, .report-review-columns, .report-allowlist { display: grid; grid-template-columns: 1fr; }

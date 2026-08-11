@@ -78,6 +78,7 @@ impl Read for ArtifactBackupFile {
 pub struct RecoveryArtifactCheckpoint {
     pub task_id: String,
     pub raw_artifact: bool,
+    pub agent_evidence_artifact: bool,
 }
 
 impl ArtifactStore {
@@ -181,6 +182,16 @@ impl ArtifactStore {
         windows::open_backup_files(&self.root, expected_runs)
     }
 
+    #[cfg(windows)]
+    pub fn open_agent_evidence_file(
+        &self,
+        run_id: Uuid,
+        task_id: &str,
+        expected_relative: &str,
+    ) -> Result<Option<File>, ArtifactStoreError> {
+        windows::open_agent_evidence_file(&self.root, run_id, task_id, expected_relative)
+    }
+
     #[cfg(not(windows))]
     pub fn delete_run_artifacts(
         &self,
@@ -206,6 +217,16 @@ impl ArtifactStore {
         &self,
         _expected_runs: &[BackupRunBinding],
     ) -> Result<Vec<ArtifactBackupFile>, ArtifactStoreError> {
+        Err(ArtifactStoreError::UnsupportedPlatform)
+    }
+
+    #[cfg(not(windows))]
+    pub fn open_agent_evidence_file(
+        &self,
+        _run_id: Uuid,
+        _task_id: &str,
+        _expected_relative: &str,
+    ) -> Result<Option<File>, ArtifactStoreError> {
         Err(ArtifactStoreError::UnsupportedPlatform)
     }
 }
@@ -313,6 +334,8 @@ mod windows {
         ManualRoot,
         CliRoot,
         Logs,
+        Evidence,
+        EvidenceTemporary,
         Workspaces,
     }
 
@@ -430,7 +453,7 @@ mod windows {
             validate_name(OsStr::new(&checkpoint.task_id))?;
             if !pack_ids.contains(checkpoint.task_id.as_str())
                 || completed
-                    .insert(checkpoint.task_id.as_str(), checkpoint.raw_artifact)
+                    .insert(checkpoint.task_id.as_str(), checkpoint)
                     .is_some()
             {
                 return Err(ArtifactStoreError::UnexpectedEntry);
@@ -465,7 +488,10 @@ mod windows {
                 reconcile_manual(&run_handle, &pack_ids, &completed, authority)
             }
             TreePolicy::CliRoot => reconcile_cli(&run_handle, &pack_ids, &completed, authority),
-            TreePolicy::Logs | TreePolicy::Workspaces => unreachable!("target root policy"),
+            TreePolicy::Logs
+            | TreePolicy::Evidence
+            | TreePolicy::EvidenceTemporary
+            | TreePolicy::Workspaces => unreachable!("target root policy"),
         }
     }
 
@@ -531,6 +557,58 @@ mod windows {
         Ok(files)
     }
 
+    pub fn open_agent_evidence_file(
+        root: &Path,
+        run_id: Uuid,
+        task_id: &str,
+        expected_relative: &str,
+    ) -> Result<Option<File>, ArtifactStoreError> {
+        validate_name(OsStr::new(task_id))?;
+        let expected = format!("runs/{run_id}/evidence/{task_id}.json");
+        if expected_relative != expected {
+            return Err(ArtifactStoreError::UnexpectedEntry);
+        }
+
+        let (drive, components) = local_drive_components(root)?;
+        let Some((root_handle, authority)) = open_existing_chain(drive, &components)? else {
+            return Ok(None);
+        };
+        let Some(runs_handle) = open_optional_directory(
+            &root_handle,
+            OsStr::new("runs"),
+            DIRECTORY_ACCESS,
+            authority,
+        )?
+        else {
+            return Ok(None);
+        };
+        let run_name = run_id.to_string();
+        let Some(run_handle) = open_optional_directory(
+            &runs_handle,
+            OsStr::new(&run_name),
+            DIRECTORY_ACCESS,
+            authority,
+        )?
+        else {
+            return Ok(None);
+        };
+        let Some(evidence_handle) = open_optional_directory(
+            &run_handle,
+            OsStr::new("evidence"),
+            DIRECTORY_ACCESS,
+            authority,
+        )?
+        else {
+            return Ok(None);
+        };
+        let file_name = format!("{task_id}.json");
+        validate_name(OsStr::new(&file_name))?;
+        match open_optional_file_for_backup(&evidence_handle, OsStr::new(&file_name), authority)? {
+            Some(file) => Ok(Some(file)),
+            None => Ok(None),
+        }
+    }
+
     fn collect_backup_tree(
         directory: &File,
         policy: TreePolicy,
@@ -562,6 +640,10 @@ mod windows {
                     )?;
                 }
                 OpenedChild::File(file) => {
+                    if matches!(child_policy, TreePolicy::EvidenceTemporary) {
+                        components.pop();
+                        continue;
+                    }
                     let zip_name = components.join("/");
                     let canonical_zip_name = canonical_windows_zip_name(&zip_name)
                         .ok_or(ArtifactStoreError::UnexpectedEntry)?;
@@ -642,11 +724,20 @@ mod windows {
             TreePolicy::CliRoot if kind == HandleKind::Directory && name == "logs" => {
                 Ok(TreePolicy::Logs)
             }
+            TreePolicy::CliRoot if kind == HandleKind::Directory && name == "evidence" => {
+                Ok(TreePolicy::Evidence)
+            }
             TreePolicy::CliRoot if kind == HandleKind::Directory && name == "workspaces" => {
                 Ok(TreePolicy::Workspaces)
             }
             TreePolicy::Logs if kind == HandleKind::File && name.ends_with(".log") => {
                 Ok(TreePolicy::Logs)
+            }
+            TreePolicy::Evidence if kind == HandleKind::File && name.ends_with(".json") => {
+                Ok(TreePolicy::Evidence)
+            }
+            TreePolicy::Evidence if kind == HandleKind::File && name.ends_with(".tmp") => {
+                Ok(TreePolicy::EvidenceTemporary)
             }
             TreePolicy::Workspaces => Ok(TreePolicy::Workspaces),
             _ => Err(ArtifactStoreError::UnexpectedEntry),
@@ -663,7 +754,7 @@ mod windows {
     fn reconcile_manual(
         directory: &File,
         pack_ids: &HashSet<&str>,
-        completed: &HashMap<&str, bool>,
+        completed: &HashMap<&str, &RecoveryArtifactCheckpoint>,
         authority: VolumeAuthority,
     ) -> Result<(), ArtifactStoreError> {
         for name in list_safe_directory(directory)? {
@@ -702,7 +793,7 @@ mod windows {
     fn reconcile_cli(
         directory: &File,
         pack_ids: &HashSet<&str>,
-        completed: &HashMap<&str, bool>,
+        completed: &HashMap<&str, &RecoveryArtifactCheckpoint>,
         authority: VolumeAuthority,
     ) -> Result<(), ArtifactStoreError> {
         for name in list_safe_directory(directory)? {
@@ -711,6 +802,9 @@ mod windows {
             match (value, open_child(directory, &name, false, authority)?) {
                 ("logs", OpenedChild::Directory(logs)) => {
                     reconcile_logs(&logs, pack_ids, completed, authority)?;
+                }
+                ("evidence", OpenedChild::Directory(evidence)) => {
+                    reconcile_evidence(&evidence, pack_ids, completed, authority)?;
                 }
                 ("workspaces", OpenedChild::Directory(workspaces)) => {
                     reconcile_workspaces(&workspaces, pack_ids, completed, authority)?;
@@ -724,7 +818,7 @@ mod windows {
     fn reconcile_logs(
         directory: &File,
         pack_ids: &HashSet<&str>,
-        completed: &HashMap<&str, bool>,
+        completed: &HashMap<&str, &RecoveryArtifactCheckpoint>,
         authority: VolumeAuthority,
     ) -> Result<(), ArtifactStoreError> {
         for name in list_safe_directory(directory)? {
@@ -737,13 +831,15 @@ mod windows {
                 return Err(ArtifactStoreError::UnexpectedEntry);
             }
             match completed.get(task_id) {
-                Some(true) => match open_child(directory, &name, false, authority)? {
-                    OpenedChild::File(_) => {}
-                    OpenedChild::Directory(_) => {
-                        return Err(ArtifactStoreError::UnexpectedEntry);
+                Some(checkpoint) if checkpoint.raw_artifact => {
+                    match open_child(directory, &name, false, authority)? {
+                        OpenedChild::File(_) => {}
+                        OpenedChild::Directory(_) => {
+                            return Err(ArtifactStoreError::UnexpectedEntry);
+                        }
                     }
-                },
-                Some(false) => return Err(ArtifactStoreError::UnexpectedEntry),
+                }
+                Some(_) => return Err(ArtifactStoreError::UnexpectedEntry),
                 None => match open_child(directory, &name, true, authority)? {
                     OpenedChild::File(child) => delete_handle(&child).map_err(map_io)?,
                     OpenedChild::Directory(_) => {
@@ -755,10 +851,61 @@ mod windows {
         Ok(())
     }
 
+    fn reconcile_evidence(
+        directory: &File,
+        pack_ids: &HashSet<&str>,
+        completed: &HashMap<&str, &RecoveryArtifactCheckpoint>,
+        authority: VolumeAuthority,
+    ) -> Result<(), ArtifactStoreError> {
+        for name in list_safe_directory(directory)? {
+            validate_name(&name)?;
+            let value = name.to_str().ok_or(ArtifactStoreError::UnexpectedEntry)?;
+            let (task_id, temporary) = if let Some(task_id) = value.strip_suffix(".json") {
+                (task_id, false)
+            } else {
+                let Some(temporary) = value
+                    .strip_prefix('.')
+                    .and_then(|value| value.strip_suffix(".tmp"))
+                else {
+                    return Err(ArtifactStoreError::UnexpectedEntry);
+                };
+                let Some((task_id, nonce)) = temporary.rsplit_once('.') else {
+                    return Err(ArtifactStoreError::UnexpectedEntry);
+                };
+                if Uuid::parse_str(nonce).is_err() {
+                    return Err(ArtifactStoreError::UnexpectedEntry);
+                }
+                (task_id, true)
+            };
+            if !pack_ids.contains(task_id) {
+                return Err(ArtifactStoreError::UnexpectedEntry);
+            }
+            let preserve = !temporary
+                && completed
+                    .get(task_id)
+                    .is_some_and(|checkpoint| checkpoint.agent_evidence_artifact);
+            if !temporary
+                && completed
+                    .get(task_id)
+                    .is_some_and(|checkpoint| !checkpoint.agent_evidence_artifact)
+            {
+                return Err(ArtifactStoreError::UnexpectedEntry);
+            }
+            match open_child(directory, &name, !preserve, authority)? {
+                OpenedChild::File(child) if !preserve => {
+                    delete_handle(&child).map_err(map_io)?;
+                }
+                OpenedChild::File(_) => {}
+                OpenedChild::Directory(_) => return Err(ArtifactStoreError::UnexpectedEntry),
+            }
+        }
+        Ok(())
+    }
+
     fn reconcile_workspaces(
         directory: &File,
         pack_ids: &HashSet<&str>,
-        completed: &HashMap<&str, bool>,
+        completed: &HashMap<&str, &RecoveryArtifactCheckpoint>,
         authority: VolumeAuthority,
     ) -> Result<(), ArtifactStoreError> {
         for name in list_safe_directory(directory)? {
@@ -926,6 +1073,31 @@ mod windows {
                 let snapshot = inspect_handle(&file).map_err(map_io)?;
                 validate_handle_snapshot(snapshot, authority).map_err(map_io)?;
                 if handle_kind(snapshot) != HandleKind::Directory {
+                    return Err(ArtifactStoreError::UnexpectedEntry);
+                }
+                Ok(Some(file))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(map_io(error)),
+        }
+    }
+
+    fn open_optional_file_for_backup(
+        parent: &File,
+        name: &OsStr,
+        authority: VolumeAuthority,
+    ) -> Result<Option<File>, ArtifactStoreError> {
+        match open_relative(
+            parent,
+            name,
+            BACKUP_FILE_ACCESS,
+            FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+            SAFE_SHARING,
+        ) {
+            Ok(file) => {
+                let snapshot = inspect_handle(&file).map_err(map_io)?;
+                validate_handle_snapshot(snapshot, authority).map_err(map_io)?;
+                if handle_kind(snapshot) != HandleKind::File {
                     return Err(ArtifactStoreError::UnexpectedEntry);
                 }
                 Ok(Some(file))
@@ -1355,6 +1527,42 @@ mod windows {
                 canonical_windows_zip_name("artifacts/runs/id/Answer.TXT"),
                 canonical_windows_zip_name("artifacts/runs/id/answer.txt")
             );
+        }
+
+        #[test]
+        fn cli_recovery_preserves_only_checkpointed_agent_evidence_and_removes_temporaries() {
+            let directory = tempdir().unwrap();
+            let root = directory.path().join("artifacts");
+            let run_id = Uuid::new_v4();
+            let evidence = root.join("runs").join(run_id.to_string()).join("evidence");
+            fs::create_dir_all(&evidence).unwrap();
+            fs::write(evidence.join("task-one.json"), "committed").unwrap();
+            fs::write(evidence.join("task-two.json"), "orphan").unwrap();
+            fs::write(
+                evidence.join(format!(".task-two.{}.tmp", Uuid::new_v4())),
+                "temporary",
+            )
+            .unwrap();
+
+            prepare_recovery(
+                &root,
+                run_id,
+                TargetKind::CodexCli,
+                &["task-one".into(), "task-two".into()],
+                &[RecoveryArtifactCheckpoint {
+                    task_id: "task-one".into(),
+                    raw_artifact: false,
+                    agent_evidence_artifact: true,
+                }],
+            )
+            .unwrap();
+
+            assert_eq!(
+                fs::read_to_string(evidence.join("task-one.json")).unwrap(),
+                "committed"
+            );
+            assert!(!evidence.join("task-two.json").exists());
+            assert_eq!(fs::read_dir(evidence).unwrap().count(), 1);
         }
 
         #[test]

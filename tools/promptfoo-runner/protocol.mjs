@@ -1,11 +1,13 @@
 import { realpathSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 
-export const CONTRACT_VERSION = "promptfoo-agent-v1";
+export const CONTRACT_VERSION = "promptfoo-agent-v2";
 export const MAX_REQUEST_BYTES = 256 * 1024;
 export const MAX_PROMPT_BYTES = 128 * 1024;
 // Leave room for the evidence envelope under the Rust runner's 1 MiB stdout cap.
-export const MAX_FINAL_TEXT_BYTES = 768 * 1024;
+export const MAX_FINAL_TEXT_BYTES = 64 * 1024;
+export const MAX_TOOL_ERROR_TEXT_BYTES = 512;
+export const MAX_TOOL_ERRORS = 32;
 
 const REQUEST_FIELDS = new Set([
   "provider",
@@ -22,9 +24,12 @@ const RESPONSE_FIELDS = new Set([
   "run_id",
   "status",
   "final_text",
-  "session_id",
+  "session_present",
   "tokens",
   "tool_summary",
+  "command_summary",
+  "tool_error_summary",
+  "file_change_count",
   "model_evidence",
   "provider_summary",
   "provider_error_code",
@@ -41,6 +46,15 @@ const PROVIDER_ERROR_CODES = new Set([
 ]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const UNSAFE_LABEL = /[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}]/u;
+const UNSAFE_DIAGNOSTIC_CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
+const SECRET_PATTERNS = [
+  /\b(?:Bearer|Basic)\s+[^\s,;]+/giu,
+  /\bsk-[A-Za-z0-9_-]{8,}\b/gu,
+  /\bAKIA[0-9A-Z]{12,}\b/gu,
+  /\b(api[_-]?key|access[_-]?token|auth[_-]?token|secret|password)\s*[:=]\s*([^\s,;]+)/giu,
+];
+const WINDOWS_PATH = /(?:\\\\[^\\\s]+\\[^\s"'<>|]+|\b[A-Za-z]:\\[^\s"'<>|]+)/gu;
+const UNIX_PATH = /(^|[\s("'=])\/(?!\/)[^\s"'<>]+/gu;
 
 export class ProtocolError extends Error {
   constructor(code) {
@@ -91,6 +105,50 @@ function nullableToken(value) {
   }
   if (!Number.isSafeInteger(value) || value < 0) {
     throw new ProtocolError("invalid_tokens");
+  }
+  return value;
+}
+
+function truncateUtf8(value, maxBytes) {
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) {
+    return value;
+  }
+  let bytes = 0;
+  let output = "";
+  for (const character of value) {
+    const length = Buffer.byteLength(character, "utf8");
+    if (bytes + length > maxBytes) break;
+    output += character;
+    bytes += length;
+  }
+  return output;
+}
+
+export function sanitizeDiagnosticText(value, { workspace = null, maxBytes = MAX_FINAL_TEXT_BYTES } = {}) {
+  if (typeof value !== "string") {
+    return "";
+  }
+  let sanitized = value.replace(UNSAFE_DIAGNOSTIC_CONTROL, "");
+  if (typeof workspace === "string" && workspace.length > 0) {
+    sanitized = sanitized.replaceAll(workspace, "<path>");
+    sanitized = sanitized.replaceAll(workspace.replaceAll("\\", "/"), "<path>");
+  }
+  for (const pattern of SECRET_PATTERNS) {
+    sanitized = sanitized.replace(pattern, (_match, label) =>
+      typeof label === "string" && /key|token|secret|password/i.test(label)
+        ? `${label}=<redacted>`
+        : "<redacted>",
+    );
+  }
+  sanitized = sanitized.replace(WINDOWS_PATH, "<path>");
+  sanitized = sanitized.replace(UNIX_PATH, (_match, prefix) => `${prefix}<path>`);
+  return truncateUtf8(sanitized, maxBytes);
+}
+
+function nullableCount(value, code) {
+  if (value === null) return null;
+  if (!Number.isSafeInteger(value) || value < 0 || value > 1_000_000) {
+    throw new ProtocolError(code);
   }
   return value;
 }
@@ -174,14 +232,28 @@ export function createSuccessResponse(request, result = {}) {
     contract_version: CONTRACT_VERSION,
     run_id: request.run_id,
     status: "success",
-    final_text: result.finalText ?? "",
-    session_id: result.sessionId ?? null,
+    final_text: sanitizeDiagnosticText(result.finalText ?? "", { workspace: request.workspace }),
+    session_present: result.sessionPresent ?? Boolean(result.sessionId),
     tokens: {
       input: result.tokenUsage?.input ?? null,
       output: result.tokenUsage?.output ?? null,
       total: result.tokenUsage?.total ?? null,
     },
     tool_summary: result.toolSummary ?? [],
+    command_summary: result.commandSummary ?? {
+      succeeded: null,
+      failed: null,
+      unknown: null,
+      exit_codes: [],
+    },
+    tool_error_summary: (result.toolErrorSummary ?? []).map((error) => ({
+      kind: error.kind,
+      message: sanitizeDiagnosticText(error.message, {
+        workspace: request.workspace,
+        maxBytes: MAX_TOOL_ERROR_TEXT_BYTES,
+      }),
+    })),
+    file_change_count: result.fileChangeCount ?? null,
     model_evidence: {
       requested_model: request.requested_model,
       observed_model: result.observedModel ?? null,
@@ -201,9 +273,12 @@ export function createErrorResponse({ runId = null, requestedModel = null, provi
     run_id: runId,
     status: "error",
     final_text: "",
-    session_id: null,
+    session_present: false,
     tokens: { input: null, output: null, total: null },
     tool_summary: [],
+    command_summary: { succeeded: null, failed: null, unknown: null, exit_codes: [] },
+    tool_error_summary: [],
+    file_change_count: null,
     model_evidence: {
       requested_model: requestedModel,
       observed_model: null,
@@ -231,11 +306,14 @@ export function validateRunnerResponse(value) {
   }
   if (
     typeof value.final_text !== "string" ||
-    Buffer.byteLength(value.final_text, "utf8") > MAX_FINAL_TEXT_BYTES
+    Buffer.byteLength(value.final_text, "utf8") > MAX_FINAL_TEXT_BYTES ||
+    sanitizeDiagnosticText(value.final_text) !== value.final_text
   ) {
     throw new ProtocolError("invalid_final_text");
   }
-  safeLabel(value.session_id, 256, "invalid_session_id", { nullable: true });
+  if (typeof value.session_present !== "boolean") {
+    throw new ProtocolError("invalid_session_present");
+  }
 
   object(value.tokens, "invalid_tokens");
   exactFields(value.tokens, new Set(["input", "output", "total"]));
@@ -254,6 +332,64 @@ export function validateRunnerResponse(value) {
       throw new ProtocolError("invalid_tool_summary");
     }
   }
+
+  object(value.command_summary, "invalid_command_summary");
+  exactFields(
+    value.command_summary,
+    new Set(["succeeded", "failed", "unknown", "exit_codes"]),
+  );
+  nullableCount(value.command_summary.succeeded, "invalid_command_summary");
+  nullableCount(value.command_summary.failed, "invalid_command_summary");
+  nullableCount(value.command_summary.unknown, "invalid_command_summary");
+  const commandCounts = [
+    value.command_summary.succeeded,
+    value.command_summary.failed,
+    value.command_summary.unknown,
+  ];
+  if (commandCounts.some((count) => count === null) && commandCounts.some((count) => count !== null)) {
+    throw new ProtocolError("invalid_command_summary");
+  }
+  if (!Array.isArray(value.command_summary.exit_codes) || value.command_summary.exit_codes.length > 64) {
+    throw new ProtocolError("invalid_command_summary");
+  }
+  const seenExitCodes = new Set();
+  for (const exitCode of value.command_summary.exit_codes) {
+    object(exitCode, "invalid_command_summary");
+    exactFields(exitCode, new Set(["code", "count"]));
+    if (
+      !Number.isSafeInteger(exitCode.code) ||
+      exitCode.code < -2_147_483_648 ||
+      exitCode.code > 2_147_483_647 ||
+      !Number.isSafeInteger(exitCode.count) ||
+      exitCode.count < 1 ||
+      exitCode.count > 1_000_000 ||
+      seenExitCodes.has(exitCode.code)
+    ) {
+      throw new ProtocolError("invalid_command_summary");
+    }
+    seenExitCodes.add(exitCode.code);
+  }
+  if (commandCounts[0] === null && value.command_summary.exit_codes.length > 0) {
+    throw new ProtocolError("invalid_command_summary");
+  }
+
+  if (!Array.isArray(value.tool_error_summary) || value.tool_error_summary.length > MAX_TOOL_ERRORS) {
+    throw new ProtocolError("invalid_tool_error_summary");
+  }
+  for (const error of value.tool_error_summary) {
+    object(error, "invalid_tool_error_summary");
+    exactFields(error, new Set(["kind", "message"]));
+    safeLabel(error.kind, 64, "invalid_tool_error_summary");
+    if (
+      typeof error.message !== "string" ||
+      error.message.length === 0 ||
+      Buffer.byteLength(error.message, "utf8") > MAX_TOOL_ERROR_TEXT_BYTES ||
+      sanitizeDiagnosticText(error.message, { maxBytes: MAX_TOOL_ERROR_TEXT_BYTES }) !== error.message
+    ) {
+      throw new ProtocolError("invalid_tool_error_summary");
+    }
+  }
+  nullableCount(value.file_change_count, "invalid_file_change_count");
 
   object(value.model_evidence, "invalid_model_evidence");
   exactFields(value.model_evidence, new Set(["requested_model", "observed_model", "source"]));
@@ -280,6 +416,24 @@ export function validateRunnerResponse(value) {
     (value.status === "error" && !PROVIDER_ERROR_CODES.has(value.provider_error_code))
   ) {
     throw new ProtocolError("invalid_provider_error_code");
+  }
+  if (
+    value.status === "error" &&
+    (value.final_text !== "" ||
+      value.session_present ||
+      value.tokens.input !== null ||
+      value.tokens.output !== null ||
+      value.tokens.total !== null ||
+      value.tool_summary.length > 0 ||
+      value.command_summary.succeeded !== null ||
+      value.command_summary.failed !== null ||
+      value.command_summary.unknown !== null ||
+      value.command_summary.exit_codes.length > 0 ||
+      value.tool_error_summary.length > 0 ||
+      value.file_change_count !== null ||
+      value.model_evidence.source !== "unavailable")
+  ) {
+    throw new ProtocolError("invalid_error_evidence");
   }
   return value;
 }

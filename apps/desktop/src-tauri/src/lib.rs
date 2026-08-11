@@ -20,10 +20,10 @@ use batch_commands::{
 };
 use commands::{
     cancel_run, delete_raw_artifacts, delete_run, delete_target_history, detect_client_selection,
-    export_full_backup, export_public_batch_report, export_public_report, get_bootstrap,
-    get_data_settings, get_run_detail, interrupt_manual_run, list_runs, next_manual_step,
-    resume_cli_run, resume_manual_run, set_raw_retention, start_cli_run, start_manual_run,
-    submit_manual_answer,
+    export_full_backup, export_public_batch_report, export_public_report,
+    get_agent_execution_detail, get_bootstrap, get_data_settings, get_run_detail,
+    interrupt_manual_run, list_runs, next_manual_step, resume_cli_run, resume_manual_run,
+    set_raw_retention, start_cli_run, start_manual_run, submit_manual_answer,
 };
 use tauri::Manager;
 
@@ -42,6 +42,7 @@ macro_rules! command_inventory {
             interrupt_manual_run,
             list_runs,
             get_run_detail,
+            get_agent_execution_detail,
             export_public_report,
             export_public_batch_report,
             delete_raw_artifacts,
@@ -123,6 +124,7 @@ mod tests {
                 "interrupt_manual_run",
                 "list_runs",
                 "get_run_detail",
+                "get_agent_execution_detail",
                 "export_public_report",
                 "export_public_batch_report",
                 "delete_raw_artifacts",

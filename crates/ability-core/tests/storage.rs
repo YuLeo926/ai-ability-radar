@@ -1,7 +1,8 @@
 use ability_core::{
-    Category, EnvironmentFingerprint, ModelSource, ModelVerification, RunMode, RunRecord,
-    RunRepository, RunStatus, ScoreSummary, StorageError, TargetKind, TargetSelection, TaskOutcome,
-    TaskResult, summarize_scores,
+    AgentExecutionStatus, AgentExecutionSummary, AgentExitCodeCount, AgentModelSummary,
+    AgentTokenSummary, Category, EnvironmentFingerprint, ModelSource, ModelVerification, RunMode,
+    RunRecord, RunRepository, RunStatus, ScoreSummary, StorageError, TargetKind, TargetSelection,
+    TaskOutcome, TaskResult, summarize_scores,
 };
 use chrono::{Duration, Utc};
 use std::collections::BTreeMap;
@@ -77,6 +78,95 @@ fn invalid_infrastructure_result(run_id: Uuid, task_id: &str) -> TaskResult {
         answer_rel_path: None,
         detail: "network unavailable".into(),
     }
+}
+
+fn completed_agent_summary(run_id: Uuid, task_id: &str) -> AgentExecutionSummary {
+    AgentExecutionSummary {
+        run_id,
+        task_id: task_id.into(),
+        contract_version: "promptfoo-agent-v2".into(),
+        status: AgentExecutionStatus::Completed,
+        command_succeeded: Some(1),
+        command_failed: Some(1),
+        command_unknown: Some(0),
+        exit_codes: vec![
+            AgentExitCodeCount { code: 0, count: 1 },
+            AgentExitCodeCount { code: 7, count: 1 },
+        ],
+        tool_error_count: Some(1),
+        file_change_count: Some(0),
+        session_present: Some(true),
+        tokens: AgentTokenSummary {
+            input: Some(12),
+            output: Some(4),
+            total: Some(16),
+        },
+        model: Some(AgentModelSummary {
+            requested_model: "gpt-5.6-terra".into(),
+            observed_model: None,
+            source: "request_only".into(),
+        }),
+        provider_unknown_field_count: Some(0),
+        agent_duration_ms: Some(200),
+        evidence_rel_path: Some(format!("runs/{run_id}/evidence/{task_id}.json")),
+    }
+}
+
+#[test]
+fn task_and_agent_summary_checkpoint_atomically_and_cleanup_keeps_the_summary() {
+    let directory = tempdir().unwrap();
+    let repository = RunRepository::open(&directory.path().join("ability.db")).unwrap();
+    let mut run = sample_run();
+    run.total_tasks = 1;
+    repository.insert_run(&run).unwrap();
+    let result = passing_result(run.id, "instruction-1");
+    let summary = completed_agent_summary(run.id, &result.task_id);
+
+    repository
+        .save_task_result_with_agent_summary(&result, &summary)
+        .unwrap();
+
+    assert_eq!(repository.get_task_results(run.id).unwrap(), vec![result]);
+    assert_eq!(
+        repository.get_agent_execution_summaries(run.id).unwrap(),
+        vec![summary.clone()]
+    );
+    repository
+        .finish_without_score(run.id, RunStatus::Interrupted)
+        .unwrap();
+    assert_eq!(repository.clear_artifact_references(run.id).unwrap(), 2);
+    let retained = repository
+        .get_agent_execution_summary(run.id, "instruction-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.status, AgentExecutionStatus::Completed);
+    assert_eq!(retained.file_change_count, Some(0));
+    assert_eq!(retained.evidence_rel_path, None);
+}
+
+#[test]
+fn agent_summary_identity_mismatch_rolls_back_the_task_result() {
+    let directory = tempdir().unwrap();
+    let repository = RunRepository::open(&directory.path().join("ability.db")).unwrap();
+    let mut run = sample_run();
+    run.total_tasks = 1;
+    repository.insert_run(&run).unwrap();
+    let result = passing_result(run.id, "instruction-1");
+    let mut summary = completed_agent_summary(run.id, &result.task_id);
+    summary.task_id = "instruction-2".into();
+
+    assert!(
+        repository
+            .save_task_result_with_agent_summary(&result, &summary)
+            .is_err()
+    );
+    assert!(repository.get_task_results(run.id).unwrap().is_empty());
+    assert!(
+        repository
+            .get_agent_execution_summaries(run.id)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 fn complete_one_result_run(repository: &RunRepository, mut run: RunRecord) -> RunRecord {
@@ -1120,7 +1210,7 @@ fn publication_rows_accept_only_canonical_safe_fixed_metadata() {
 }
 
 #[test]
-fn opening_repository_applies_v3_without_changing_legacy_defaults() {
+fn opening_repository_applies_v4_without_changing_legacy_defaults() {
     let directory = tempdir().unwrap();
     let database = directory.path().join("ability.db");
     let repository = RunRepository::open(&database).unwrap();
@@ -1134,7 +1224,7 @@ fn opening_repository_applies_v3_without_changing_legacy_defaults() {
                 row.get::<_, i64>(0)
             })
             .unwrap(),
-        3
+        4
     );
     for table in [
         "scan_batches",
@@ -1143,6 +1233,7 @@ fn opening_repository_applies_v3_without_changing_legacy_defaults() {
         "scan_batch_task_isolation",
         "scan_execution_authorizations",
         "baseline_snapshots",
+        "task_agent_evidence",
         "scan_deletion_intents",
     ] {
         assert_eq!(

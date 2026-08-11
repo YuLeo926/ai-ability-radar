@@ -7,6 +7,8 @@ import {
   scoreableResultScore,
 } from "../api/runtimeValidation";
 import type {
+  AgentEvidenceResponse,
+  AgentExecutionSummary,
   Category,
   FailureKind,
   RunDetail,
@@ -210,9 +212,140 @@ function safeExportError(error: unknown): string {
   return "无法导出报告，请检查公开字段后重试。";
 }
 
+function agentStatusLabel(summary: AgentExecutionSummary | undefined): string {
+  if (!summary) return "旧版本未记录";
+  switch (summary.status) {
+    case "completed":
+      return "已结束";
+    case "provider_error":
+      return "Provider 异常";
+    case "timed_out":
+      return "已超时";
+    case "cancelled":
+      return "已取消";
+  }
+}
+
+function AgentDiagnosticPanel({
+  runId,
+  summary,
+}: {
+  runId: string;
+  summary: AgentExecutionSummary;
+}) {
+  const backend = useBackend();
+  const [response, setResponse] = useState<
+    AgentEvidenceResponse | "idle" | "loading" | "error"
+  >("idle");
+
+  const loadDetail = async () => {
+    if (response !== "idle" || !summary.detailAvailable) return;
+    setResponse("loading");
+    try {
+      setResponse(await backend.getAgentExecutionDetail(runId, summary.taskId));
+    } catch {
+      setResponse("error");
+    }
+  };
+
+  return (
+    <details
+      className="agent-diagnostics"
+      onToggle={(event) => {
+        if (event.currentTarget.open) void loadDetail();
+      }}
+    >
+      <summary>本地诊断详情</summary>
+      <div className="agent-diagnostics-body">
+        <dl className="agent-summary-grid">
+          <div>
+            <dt>命令</dt>
+            <dd>
+              {summary.commandSucceeded == null
+                ? "Provider 未提供"
+                : `成功 ${summary.commandSucceeded} · 失败 ${summary.commandFailed ?? 0} · 未知 ${summary.commandUnknown ?? 0}`}
+            </dd>
+          </div>
+          <div>
+            <dt>文件修改事件</dt>
+            <dd>{summary.fileChangeCount ?? "Provider 未提供"}</dd>
+          </div>
+          <div>
+            <dt>工具错误</dt>
+            <dd>{summary.toolErrorCount ?? "Provider 未提供"}</dd>
+          </div>
+          <div>
+            <dt>Agent 耗时</dt>
+            <dd>
+              {summary.agentDurationMs == null
+                ? "未记录"
+                : `${(summary.agentDurationMs / 1000).toFixed(1)} 秒`}
+            </dd>
+          </div>
+        </dl>
+
+        {!summary.detailAvailable ? (
+          <p className="diagnostic-unavailable">
+            诊断正文未记录或已按本地保留策略清理；上方安全摘要仍然保留。
+          </p>
+        ) : response === "idle" || response === "loading" ? (
+          <p aria-live="polite" className="diagnostic-unavailable">
+            {response === "loading" ? "正在读取本地诊断…" : "展开后读取本地诊断。"}
+          </p>
+        ) : response === "error" || response.status === "unavailable" ? (
+          <p className="diagnostic-unavailable">
+            本地诊断不可用，可能已经清理或文件校验未通过。
+          </p>
+        ) : (
+          <div className="agent-private-record">
+            <section>
+              <h3>Agent 最终回答</h3>
+              <pre>{response.detail.finalText || "（空）"}</pre>
+            </section>
+            <section>
+              <h3>退出码与工具</h3>
+              <p>
+                退出码：
+                {response.detail.exitCodes.length === 0
+                  ? "未提供"
+                  : response.detail.exitCodes
+                      .map((entry) => `${entry.code} × ${entry.count}`)
+                      .join(" · ")}
+              </p>
+              <p>
+                工具：
+                {response.detail.toolSummary.length === 0
+                  ? "未提供"
+                  : response.detail.toolSummary
+                      .map((tool) => `${tool.name} × ${tool.count}`)
+                      .join(" · ")}
+              </p>
+            </section>
+            {response.detail.toolErrors.length > 0 ? (
+              <section>
+                <h3>工具错误摘要</h3>
+                <ul>
+                  {response.detail.toolErrors.map((error, index) => (
+                    <li key={`${error.kind}-${index}`}>
+                      <strong>{error.kind}</strong>：{error.message}
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ) : null}
+            <p className="diagnostic-privacy-note">
+              这里只读取本机保存的脱敏记录，不代表任务已经通过。
+            </p>
+          </div>
+        )}
+      </div>
+    </details>
+  );
+}
+
 function ReportExportControls({ detail }: { detail: RunDetail }) {
   const backend = useBackend();
-  const { run, taskResults } = detail;
+  const { run, taskResults, agentExecutionSummaries } = detail;
   const [open, setOpen] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -313,6 +446,30 @@ function ReportExportControls({ detail }: { detail: RunDetail }) {
     failures.length === 0
       ? "无"
       : countBy(failures, failureOrder.filter((kind) => failures.includes(kind)));
+  const agentStatusCounts = countBy(
+    agentExecutionSummaries.map((summary) => summary.status),
+    ["completed", "provider_error", "timed_out", "cancelled"] as const,
+  );
+  const commandSummaries = agentExecutionSummaries.filter(
+    (summary) => summary.commandSucceeded != null,
+  );
+  const commandTotals = commandSummaries.reduce(
+    (totals, summary) => ({
+      succeeded: totals.succeeded + (summary.commandSucceeded ?? 0),
+      failed: totals.failed + (summary.commandFailed ?? 0),
+      unknown: totals.unknown + (summary.commandUnknown ?? 0),
+    }),
+    { succeeded: 0, failed: 0, unknown: 0 },
+  );
+  const toolErrorSummaries = agentExecutionSummaries.filter(
+    (summary) => summary.toolErrorCount != null,
+  );
+  const fileChangeSummaries = agentExecutionSummaries.filter(
+    (summary) => summary.fileChangeCount != null,
+  );
+  const modelEvidenceSummaries = agentExecutionSummaries.filter(
+    (summary) => summary.model != null,
+  );
 
   return (
     <section aria-labelledby="report-export-title" className="report-export">
@@ -497,6 +654,53 @@ function ReportExportControls({ detail }: { detail: RunDetail }) {
                   </dl>
                   <p>{publicMethodology}</p>
                 </section>
+
+                <section aria-labelledby="public-agent-title">
+                  <h3 id="public-agent-title">Agent 执行安全摘要</h3>
+                  <dl>
+                    <div>
+                      <dt>已记录任务</dt>
+                      <dd>
+                        {agentExecutionSummaries.length === 0
+                          ? "0（旧版本未记录）"
+                          : agentExecutionSummaries.length}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>执行状态计数</dt>
+                      <dd>{agentStatusCounts}</dd>
+                    </div>
+                    <div>
+                      <dt>命令计数</dt>
+                      <dd>
+                        {commandSummaries.length} 题有摘要 · 成功 {commandTotals.succeeded} ·
+                        失败 {commandTotals.failed} · 未知 {commandTotals.unknown}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>工具错误</dt>
+                      <dd>
+                        {toolErrorSummaries.length} 题有摘要 · 合计 {toolErrorSummaries.reduce(
+                          (total, summary) => total + (summary.toolErrorCount ?? 0),
+                          0,
+                        )}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>文件修改事件</dt>
+                      <dd>
+                        {fileChangeSummaries.length} 题有摘要 · 合计 {fileChangeSummaries.reduce(
+                          (total, summary) => total + (summary.fileChangeCount ?? 0),
+                          0,
+                        )}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>模型证据来源覆盖</dt>
+                      <dd>{modelEvidenceSummaries.length} 题</dd>
+                    </div>
+                  </dl>
+                </section>
               </div>
 
               <aside aria-labelledby="excluded-fields-title" className="excluded-fields">
@@ -506,6 +710,10 @@ function ReportExportControls({ detail }: { detail: RunDetail }) {
                   <li>题目提示词</li>
                   <li>CLI 日志</li>
                   <li>逐题详情文本</li>
+                  <li>Agent 最终回答</li>
+                  <li>工具错误正文</li>
+                  <li>命令正文与输出</li>
+                  <li>会话标识</li>
                   <li>用户名</li>
                   <li>主机名</li>
                   <li>操作系统构建号</li>
@@ -654,19 +862,19 @@ function DataManagementControls({
           }}
           type="button"
         >
-          只删除原始回答和 CLI 日志，保留分数
+          删除原始数据和本地诊断，保留分数
         </button>
-          <button
-            className="evidence-button danger"
+        <button
+          className="evidence-button danger"
           disabled={busy || choice !== null}
           onClick={() => {
             setError("");
             setChoice("run");
-            }}
-            type="button"
-          >
-            从应用中删除本次记录和原始数据
-          </button>
+          }}
+          type="button"
+        >
+          从应用中删除本次记录和原始数据
+        </button>
       </div>
 
       {choice ? (
@@ -681,12 +889,12 @@ function DataManagementControls({
         >
           <h3>
             {choice === "raw"
-              ? "只删除原始回答和 CLI 日志？"
+              ? "删除原始回答、CLI 数据和本地诊断？"
               : "删除本次记录和原始数据？"}
           </h3>
           <p>
             {choice === "raw"
-              ? "分数、逐题客观证据和运行条件会继续保留；原始回答、CLI 日志及工作区将被删除。"
+              ? "分数、逐题客观证据、运行条件和安全摘要会继续保留；原始回答、CLI 日志、工作区及 Agent 本地诊断详情将被删除。"
               : "本次分数、逐题证据、运行记录以及应用管理的原始数据都会被删除。"}
           </p>
           {error ? (
@@ -731,7 +939,12 @@ function ResultReady({
   detail: RunDetail;
   onRawDeleted(): void;
 }) {
-  const { run, taskResults } = detail;
+  const { run, taskResults, agentExecutionSummaries } = detail;
+  const agentSummaryByTask = new Map(
+    agentExecutionSummaries.map((summary) => [summary.taskId, summary]),
+  );
+  const isCli =
+    run.target.kind === "codex_cli" || run.target.kind === "claude_code";
   const finalScore = run.status === "completed" ? run.score : null;
   const noScore = statusPresentation(run.status);
 
@@ -840,15 +1053,33 @@ function ResultReady({
           <ol aria-label="逐题客观证据" className="task-evidence-list">
             {taskResults.map((result, index) => {
               const score = scoreableResultScore(result);
+              const agentSummary = agentSummaryByTask.get(result.taskId);
               return (
-                <li className="task-evidence-card" key={index}>
+                <li className="task-evidence-card" key={result.taskId}>
                   <div>
                     <span>第 {index + 1} 题</span>
                     <strong>{categoryLabels[result.category]}</strong>
                   </div>
-                  <p className={`outcome outcome-${result.outcome}`}>
-                    {outcomeLabel(result)}
-                  </p>
+                  {isCli ? (
+                    <div className="task-status-strip">
+                      <div>
+                        <span>Agent 执行</span>
+                        <strong className={`agent-status agent-status-${agentSummary?.status ?? "legacy"}`}>
+                          {agentStatusLabel(agentSummary)}
+                        </strong>
+                      </div>
+                      <div>
+                        <span>任务验证</span>
+                        <strong className={`outcome outcome-${result.outcome}`}>
+                          {outcomeLabel(result)}
+                        </strong>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className={`outcome outcome-${result.outcome}`}>
+                      {outcomeLabel(result)}
+                    </p>
+                  )}
                   <dl>
                     {score !== null ? (
                       <div>
@@ -864,6 +1095,20 @@ function ResultReady({
                   {result.failureKind ? (
                     <p className="failure-explanation">
                       {failureExplanation(result.failureKind)}
+                    </p>
+                  ) : null}
+                  {isCli && agentSummary ? (
+                    <>
+                      {agentSummary.status === "completed" && result.outcome !== "passed" ? (
+                        <p className="agent-verification-warning">
+                          Agent 已结束不等于任务通过；最终结论以上方任务验证为准。
+                        </p>
+                      ) : null}
+                      <AgentDiagnosticPanel runId={run.id} summary={agentSummary} />
+                    </>
+                  ) : isCli ? (
+                    <p className="diagnostic-unavailable">
+                      这条旧记录没有保存 Agent 执行摘要，原有得分不受影响。
                     </p>
                   ) : null}
                 </li>

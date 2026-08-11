@@ -11,6 +11,7 @@ import {
   createErrorResponse,
   createSuccessResponse,
   parseRunnerRequest,
+  sanitizeDiagnosticText,
   validateRunnerResponse,
 } from "../protocol.mjs";
 import { runOnce } from "../run.mjs";
@@ -85,6 +86,13 @@ test("response schema always carries execution evidence and stable errors", () =
   });
   assert.equal(validateRunnerResponse(success).contract_version, CONTRACT_VERSION);
   assert.deepEqual(success.provider_error_code, null);
+  assert.equal(success.session_present, true);
+  assert.deepEqual(success.command_summary, {
+    succeeded: null,
+    failed: null,
+    unknown: null,
+    exit_codes: [],
+  });
 
   const failure = createErrorResponse({
     runId: validRequest().run_id,
@@ -95,6 +103,39 @@ test("response schema always carries execution evidence and stable errors", () =
   assert.throws(
     () => validateRunnerResponse({ ...success, unexpected: true }),
     (error) => error instanceof ProtocolError && error.code === "unknown_field",
+  );
+});
+
+test("diagnostic sanitizer removes credentials and local paths without damaging URLs", () => {
+  const text = [
+    "Bearer private-token",
+    "api_key=super-secret",
+    "sk-1234567890abcdef",
+    "C:\\Users\\tester\\repo\\secret.txt",
+    "/home/tester/repo/secret.txt",
+    "https://example.com/docs/path",
+    "ok\u0000done",
+  ].join("\n");
+  const sanitized = sanitizeDiagnosticText(text);
+  assert.doesNotMatch(sanitized, /private-token|super-secret|sk-123|tester\\repo|\/home\/tester|\u0000/);
+  assert.match(sanitized, /https:\/\/example\.com\/docs\/path/);
+  assert.match(sanitized, /<redacted>/);
+  assert.match(sanitized, /<path>/);
+});
+
+test("response rejects mixed unknown command counts and private error text", () => {
+  const success = createSuccessResponse(validRequest(), {
+    finalText: "done",
+    commandSummary: { succeeded: 1, failed: 0, unknown: 0, exit_codes: [{ code: 0, count: 1 }] },
+    toolErrorSummary: [{ kind: "error", message: "Bearer private-token" }],
+  });
+  assert.equal(success.tool_error_summary[0].message, "<redacted>");
+  assert.throws(
+    () => validateRunnerResponse({
+      ...success,
+      command_summary: { succeeded: 1, failed: null, unknown: 0, exit_codes: [] },
+    }),
+    (error) => error instanceof ProtocolError && error.code === "invalid_command_summary",
   );
 });
 

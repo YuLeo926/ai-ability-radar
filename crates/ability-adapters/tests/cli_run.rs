@@ -1,13 +1,15 @@
 use ability_adapters::{
-    AdapterCompletion, AdapterError, AgentAdapter, AuthState, AvailabilityStatus,
-    CliBatchExecutionBinding, CliRunError, CliRunService, ExecutionRequest, LaunchSource,
-    PrerequisiteStatus, RunEvent, RunEventKind, TargetAvailability, VerificationGrade,
+    AdapterCompletion, AdapterError, AgentAdapter, AgentCommandSummary, AgentExecutionEvidence,
+    AgentExitCodeCount, AgentModelEvidence, AgentProviderSummary, AgentTokenUsage, AgentToolUsage,
+    AuthState, AvailabilityStatus, CliBatchExecutionBinding, CliRunError, CliRunService,
+    ExecutionRequest, LaunchSource, ModelEvidenceSource, PrerequisiteStatus, RunEvent,
+    RunEventKind, StoredAgentExecutionEvidence, TargetAvailability, VerificationGrade,
     WorkspaceVerifier, adapter_error_grade,
 };
 use ability_core::{
-    EnvironmentFingerprint, FailureKind, LoadedPack, ModelSource, ModelVerification, PackLoader,
-    RunMode, RunRepository, RunStatus, StorageError, TargetKind, TargetSelection, TaskOutcome,
-    TaskResult,
+    AgentExecutionStatus, EnvironmentFingerprint, FailureKind, LoadedPack, ModelSource,
+    ModelVerification, PackLoader, RunMode, RunRepository, RunStatus, StorageError, TargetKind,
+    TargetSelection, TaskOutcome, TaskResult,
 };
 use async_trait::async_trait;
 use std::collections::VecDeque;
@@ -22,6 +24,7 @@ use uuid::Uuid;
 
 enum AdapterStep {
     Complete { duration_ms: u64 },
+    CompleteWithEvidence { duration_ms: u64 },
     BudgetExhausted,
     Infrastructure(FailureKind),
     Cancelled,
@@ -101,8 +104,10 @@ impl AgentAdapter for FakeAdapter {
         if let Some(cancellation) = &self.cancel_parent {
             cancellation.cancel();
         }
+        let has_evidence = matches!(&step, AdapterStep::CompleteWithEvidence { .. });
         match step {
-            AdapterStep::Complete { duration_ms } => {
+            AdapterStep::Complete { duration_ms }
+            | AdapterStep::CompleteWithEvidence { duration_ms } => {
                 fs::write(
                     request.workspace.join("src/index.mjs"),
                     "export const fixed = true;",
@@ -112,7 +117,41 @@ impl AgentAdapter for FakeAdapter {
                     duration_ms,
                     stdout: "local agent stdout".into(),
                     stderr: "local agent stderr".into(),
-                    evidence: None,
+                    evidence: has_evidence.then(|| AgentExecutionEvidence {
+                        contract_version: self.contract_version().into(),
+                        run_id: request.run_id,
+                        final_text: "private final response".into(),
+                        session_present: true,
+                        tokens: AgentTokenUsage {
+                            input: Some(120),
+                            output: Some(45),
+                            total: Some(165),
+                        },
+                        tool_summary: vec![AgentToolUsage {
+                            name: "shell".into(),
+                            count: 2,
+                        }],
+                        command_summary: AgentCommandSummary {
+                            succeeded: Some(1),
+                            failed: Some(1),
+                            unknown: Some(0),
+                            exit_codes: vec![
+                                AgentExitCodeCount { code: 0, count: 1 },
+                                AgentExitCodeCount { code: 1, count: 1 },
+                            ],
+                        },
+                        tool_error_summary: Vec::new(),
+                        file_change_count: Some(1),
+                        model_evidence: AgentModelEvidence {
+                            requested_model: "test-model".into(),
+                            observed_model: Some("test-model".into()),
+                            source: ModelEvidenceSource::Provider,
+                        },
+                        provider_summary: AgentProviderSummary {
+                            unknown_fields: vec!["future_field".into()],
+                            discarded_field_count: 1,
+                        },
+                    }),
                 })
             }
             AdapterStep::BudgetExhausted => Err(AdapterError::AgentBudgetExceeded),
@@ -123,6 +162,56 @@ impl AgentAdapter for FakeAdapter {
             AdapterStep::Cancelled => Err(AdapterError::Cancelled),
         }
     }
+}
+
+#[tokio::test]
+async fn completed_agent_evidence_is_checkpointed_as_private_file_and_safe_summary() {
+    let fixture = Fixture::new(1);
+    let run = fixture.prepare();
+    let adapter = Arc::new(FakeAdapter::new(
+        TargetKind::CodexCli,
+        [AdapterStep::CompleteWithEvidence { duration_ms: 50 }],
+    ));
+    let verifier = Arc::new(FakeVerifier::new([VerifierStep::Grade(failed_grade(10))]));
+    let (sender, _receiver) = mpsc::unbounded_channel();
+
+    fixture
+        .service
+        .execute(
+            run.id,
+            fixture.pack.clone(),
+            adapter,
+            verifier,
+            CancellationToken::new(),
+            sender,
+        )
+        .await
+        .unwrap();
+
+    let result = fixture
+        .repository
+        .get_task_results(run.id)
+        .unwrap()
+        .remove(0);
+    assert_eq!(result.outcome, TaskOutcome::Failed);
+    let summary = fixture
+        .repository
+        .get_agent_execution_summary(run.id, &result.task_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(summary.status, AgentExecutionStatus::Completed);
+    assert_eq!(summary.command_succeeded, Some(1));
+    assert_eq!(summary.command_failed, Some(1));
+    assert_eq!(summary.file_change_count, Some(1));
+    assert_eq!(summary.provider_unknown_field_count, Some(2));
+
+    let relative = summary.evidence_rel_path.unwrap();
+    let stored: StoredAgentExecutionEvidence =
+        serde_json::from_slice(&fs::read(fixture.artifact_root.join(relative)).unwrap()).unwrap();
+    assert_eq!(stored.schema_version, 1);
+    assert_eq!(stored.run_id, run.id);
+    assert_eq!(stored.task_id, result.task_id);
+    assert_eq!(stored.evidence.final_text, "private final response");
 }
 
 enum VerifierStep {

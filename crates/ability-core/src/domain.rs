@@ -194,3 +194,56 @@ pub struct TaskResult {
     pub answer_rel_path: Option<String>,
     pub detail: String,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentExecutionStatus {
+    Completed,
+    ProviderError,
+    TimedOut,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentExitCodeCount {
+    pub code: i32,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentTokenSummary {
+    pub input: Option<u64>,
+    pub output: Option<u64>,
+    pub total: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentModelSummary {
+    pub requested_model: String,
+    pub observed_model: Option<String>,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentExecutionSummary {
+    pub run_id: Uuid,
+    pub task_id: String,
+    pub contract_version: String,
+    pub status: AgentExecutionStatus,
+    pub command_succeeded: Option<u64>,
+    pub command_failed: Option<u64>,
+    pub command_unknown: Option<u64>,
+    pub exit_codes: Vec<AgentExitCodeCount>,
+    pub tool_error_count: Option<u64>,
+    pub file_change_count: Option<u64>,
+    pub session_present: Option<bool>,
+    pub tokens: AgentTokenSummary,
+    pub model: Option<AgentModelSummary>,
+    pub provider_unknown_field_count: Option<u64>,
+    pub agent_duration_ms: Option<u64>,
+    pub evidence_rel_path: Option<String>,
+}

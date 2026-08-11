@@ -172,7 +172,7 @@ test("resume preview shows the persisted target snapshot before continuing it ex
     }),
   );
   const backend = fakeBackend({
-    getRunDetail: vi.fn(async () => ({ run: preview, taskResults: [] })),
+    getRunDetail: vi.fn(async () => ({ run: preview, taskResults: [], agentExecutionSummaries: [] })),
     detectClientSelection,
     resumeManualRun,
     nextManualStep,
@@ -216,7 +216,7 @@ test.each(MANUAL_EFFORT_DISPLAY_CASES)(
     preview.status = "interrupted";
     preview.target.reasoningEffort = effort;
     const backend = fakeBackend({
-      getRunDetail: vi.fn(async () => ({ run: preview, taskResults: [] })),
+      getRunDetail: vi.fn(async () => ({ run: preview, taskResults: [], agentExecutionSummaries: [] })),
     });
 
     renderWizard(backend, `/manual/${kind}?resume=${RUN_ID}`);
@@ -238,7 +238,7 @@ test.each(
     preview.status = "interrupted";
     preview.target.reportedModel = "default";
     const backend = fakeBackend({
-      getRunDetail: vi.fn(async () => ({ run: preview, taskResults: [] })),
+      getRunDetail: vi.fn(async () => ({ run: preview, taskResults: [], agentExecutionSummaries: [] })),
     });
 
     renderWizard(backend, `/manual/${kind}?resume=${RUN_ID}`);
@@ -256,7 +256,7 @@ test.each(INVALID_LEGACY_EFFORT_CASES)(
     preview.status = "interrupted";
     preview.target.reasoningEffort = effort;
     const backend = fakeBackend({
-      getRunDetail: vi.fn(async () => ({ run: preview, taskResults: [] })),
+      getRunDetail: vi.fn(async () => ({ run: preview, taskResults: [], agentExecutionSummaries: [] })),
     });
 
     renderWizard(
@@ -284,7 +284,7 @@ test("a resumed run returned after unmount is interrupted exactly without readin
   const interruptManualRun = vi.fn(async () => true);
   const nextManualStep = vi.fn(async () => makeStep(1));
   const backend = fakeBackend({
-    getRunDetail: vi.fn(async () => ({ run: preview, taskResults: [] })),
+    getRunDetail: vi.fn(async () => ({ run: preview, taskResults: [], agentExecutionSummaries: [] })),
     resumeManualRun,
     interruptManualRun,
     nextManualStep,
@@ -317,7 +317,7 @@ test("same-family route mismatch is rejected from the preview without a resume c
   stored.status = "interrupted";
   const resumeManualRun = vi.fn(async () => stored);
   const backend = fakeBackend({
-    getRunDetail: vi.fn(async () => ({ run: stored, taskResults: [] })),
+    getRunDetail: vi.fn(async () => ({ run: stored, taskResults: [], agentExecutionSummaries: [] })),
     resumeManualRun,
   });
 
@@ -395,7 +395,7 @@ test.each([
     preview.target.reasoningEffort = "high";
     const interruptManualRun = vi.fn(async () => true);
     const backend = fakeBackend({
-      getRunDetail: vi.fn(async () => ({ run: preview, taskResults: [] })),
+      getRunDetail: vi.fn(async () => ({ run: preview, taskResults: [], agentExecutionSummaries: [] })),
       resumeManualRun: vi.fn(async () => response(preview)),
       interruptManualRun,
     });
@@ -424,7 +424,7 @@ test("resume failure never exposes backend paths and does not create a replaceme
   });
   const startManualRun = vi.fn(async () => makeRun());
   const backend = fakeBackend({
-    getRunDetail: vi.fn(async () => ({ run: preview, taskResults: [] })),
+    getRunDetail: vi.fn(async () => ({ run: preview, taskResults: [], agentExecutionSummaries: [] })),
     resumeManualRun,
     startManualRun,
   });
@@ -1211,6 +1211,7 @@ test("navigates after the final checkpoint and announces completion", async () =
       },
     },
     taskResults: [makeResult()],
+    agentExecutionSummaries: [],
   };
   const backend = fakeBackend({
     nextManualStep: vi

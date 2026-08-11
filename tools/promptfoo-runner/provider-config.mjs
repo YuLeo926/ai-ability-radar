@@ -2,6 +2,11 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { cache, loadApiProvider } from "promptfoo";
+import {
+  MAX_TOOL_ERRORS,
+  MAX_TOOL_ERROR_TEXT_BYTES,
+  sanitizeDiagnosticText,
+} from "./protocol.mjs";
 
 export const RUNNER_PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -317,22 +322,93 @@ function countTools(names, discardedFieldCount) {
     .map(([name, count]) => ({ name, count }));
 }
 
-function codexToolNames(raw, discardedFieldCount) {
+function unknownCodexDiagnostics() {
+  return {
+    toolNames: [],
+    commandSummary: {
+      succeeded: null,
+      failed: null,
+      unknown: null,
+      exit_codes: [],
+    },
+    toolErrorSummary: [],
+    fileChangeCount: null,
+  };
+}
+
+function codexDiagnostics(raw, discardedFieldCount, workspace) {
   if (typeof raw !== "string" || Buffer.byteLength(raw, "utf8") > MAX_RAW_EVIDENCE_BYTES) {
     if (raw !== undefined) {
       discardedFieldCount.count += 1;
     }
-    return [];
+    return unknownCodexDiagnostics();
   }
   try {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed?.items)) {
-      return [];
+      return unknownCodexDiagnostics();
     }
-    return parsed.items.map((item) => item?.type);
+    const toolNames = [];
+    const commandSummary = { succeeded: 0, failed: 0, unknown: 0, exit_codes: [] };
+    const exitCodes = new Map();
+    const toolErrorSummary = [];
+    let fileChangeCount = 0;
+    const addError = (kind, message) => {
+      if (toolErrorSummary.length >= MAX_TOOL_ERRORS) return;
+      const sanitized = sanitizeDiagnosticText(message, {
+        workspace,
+        maxBytes: MAX_TOOL_ERROR_TEXT_BYTES,
+      });
+      if (sanitized.length > 0) {
+        toolErrorSummary.push({ kind, message: sanitized });
+      }
+    };
+
+    for (const item of parsed.items) {
+      const type = typeof item?.type === "string" ? item.type : null;
+      toolNames.push(type);
+      if (type === "command_execution") {
+        const exitCode = Number.isSafeInteger(item.exit_code) &&
+          item.exit_code >= -2_147_483_648 && item.exit_code <= 2_147_483_647
+          ? item.exit_code
+          : null;
+        if (exitCode !== null) {
+          exitCodes.set(exitCode, (exitCodes.get(exitCode) ?? 0) + 1);
+        }
+        if (item.status === "completed" && exitCode === 0) {
+          commandSummary.succeeded += 1;
+        } else if (item.status === "failed" || (exitCode !== null && exitCode !== 0)) {
+          commandSummary.failed += 1;
+          addError(
+            "command_execution",
+            exitCode === null ? "Command execution failed" : `Command exited with code ${exitCode}`,
+          );
+        } else {
+          commandSummary.unknown += 1;
+        }
+      } else if (type === "file_change") {
+        fileChangeCount += 1;
+        if (item.status === "failed") {
+          addError("file_change", "File change failed");
+        }
+      } else if (type === "error") {
+        addError("error", typeof item.message === "string" ? item.message : "Agent item failed");
+      } else if (item?.status === "failed" || item?.error !== undefined) {
+        const kind = typeof type === "string" && SAFE_TOOL_NAME.test(type) ? type : "tool";
+        const message = typeof item?.error?.message === "string"
+          ? item.error.message
+          : "Tool execution failed";
+        addError(kind, message);
+      }
+    }
+    commandSummary.exit_codes = [...exitCodes.entries()]
+      .sort(([left], [right]) => left - right)
+      .slice(0, 64)
+      .map(([code, count]) => ({ code, count }));
+    return { toolNames, commandSummary, toolErrorSummary, fileChangeCount };
   } catch {
     discardedFieldCount.count += 1;
-    return [];
+    return unknownCodexDiagnostics();
   }
 }
 
@@ -374,9 +450,12 @@ export function summarizeProviderResult(request, result) {
     ? result.metadata
     : {};
   const discardedFieldCount = { count: 0 };
+  const codex = request.provider === "codex"
+    ? codexDiagnostics(result.raw, discardedFieldCount, request.workspace)
+    : null;
   const toolNames = request.provider === "claude"
     ? Array.isArray(metadata.toolCalls) ? metadata.toolCalls.map((tool) => tool?.name) : []
-    : codexToolNames(result.raw, discardedFieldCount);
+    : codex.toolNames;
   if (request.provider === "claude") {
     enforceClaudeToolPolicy(toolNames);
   }
@@ -388,14 +467,22 @@ export function summarizeProviderResult(request, result) {
     : null;
 
   return {
-    finalText: result.output,
-    sessionId,
+    finalText: sanitizeDiagnosticText(result.output, { workspace: request.workspace }),
+    sessionPresent: sessionId !== null,
     tokenUsage: {
       input: safeNonnegativeInteger(tokenUsage.input) ?? safeNonnegativeInteger(tokenUsage.prompt),
       output: safeNonnegativeInteger(tokenUsage.output) ?? safeNonnegativeInteger(tokenUsage.completion),
       total: safeNonnegativeInteger(tokenUsage.total),
     },
     toolSummary: countTools(toolNames, discardedFieldCount),
+    commandSummary: codex?.commandSummary ?? {
+      succeeded: null,
+      failed: null,
+      unknown: null,
+      exit_codes: [],
+    },
+    toolErrorSummary: codex?.toolErrorSummary ?? [],
+    fileChangeCount: codex?.fileChangeCount ?? null,
     observedModel: request.provider === "claude" ? claudeObservedModel(metadata.modelUsage) : null,
     providerSummary: {
       unknown_fields: summarizeUnknownFields(result, metadata, discardedFieldCount),

@@ -6,6 +6,7 @@ import {
   summarizeProviderResult,
 } from "./provider-config.mjs";
 import {
+  CONTRACT_VERSION,
   MAX_REQUEST_BYTES,
   ProtocolError,
   createErrorResponse,
@@ -35,7 +36,7 @@ export async function runOnce({
       requestedModel: request?.requested_model ?? null,
       providerErrorCode: code,
     });
-    stderr.write(`promptfoo-agent-v1 error=${protocolFailure ? error.code : code}\n`);
+    stderr.write(`${CONTRACT_VERSION} error=${protocolFailure ? error.code : code}\n`);
     exitCode = protocolFailure ? 2 : 1;
   }
   stdout.write(`${JSON.stringify(response)}\n`);
@@ -61,7 +62,7 @@ export async function main() {
   try {
     inputText = await readBoundedStdin();
   } catch (error) {
-    process.stderr.write("promptfoo-agent-v1 error=request_too_large\n");
+    process.stderr.write(`${CONTRACT_VERSION} error=request_too_large\n`);
     process.stdout.write(`${JSON.stringify(createErrorResponse({ providerErrorCode: "runtime" }))}\n`);
     process.exitCode = 2;
     return;

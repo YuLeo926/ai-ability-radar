@@ -485,7 +485,7 @@ if (
   fail("production scripts must not use npx or online just-in-time package versions");
 }
 requireText("tools/promptfoo-runner/README.md", [
-  ["runner contract version", /promptfoo-agent-v1/],
+  ["runner contract version", /promptfoo-agent-v2/],
   ["Codex provider", /openai:codex-sdk/],
   ["Claude provider", /anthropic:claude-agent-sdk/],
   ["no just-in-time install", /不使用.*npx|禁止.*npx/si],

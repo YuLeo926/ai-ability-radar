@@ -112,7 +112,7 @@ function makeRun(
 }
 
 function detail(run: RunRecord): RunDetail {
-  return { run, taskResults: [] };
+  return { run, taskResults: [], agentExecutionSummaries: [] };
 }
 
 function fakeBackend(overrides: Partial<Backend> = {}): Backend {

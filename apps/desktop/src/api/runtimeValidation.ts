@@ -1,4 +1,10 @@
 import type {
+  AgentEvidenceResponse,
+  AgentExecutionDetail,
+  AgentExecutionSummary,
+  AgentExecutionStatus,
+  AgentModelSummary,
+  AgentTokenSummary,
   Category,
   ClientSelectionCandidate,
   ClientSelectionDetection,
@@ -137,6 +143,48 @@ const taskResultKeys = new Set([
   "durationMs",
   "answerRelPath",
 ]);
+const agentExecutionStatuses = new Set<AgentExecutionStatus>([
+  "completed",
+  "provider_error",
+  "timed_out",
+  "cancelled",
+]);
+const agentSummaryKeys = new Set([
+  "taskId",
+  "contractVersion",
+  "status",
+  "commandSucceeded",
+  "commandFailed",
+  "commandUnknown",
+  "exitCodes",
+  "toolErrorCount",
+  "fileChangeCount",
+  "sessionPresent",
+  "tokens",
+  "model",
+  "providerUnknownFieldCount",
+  "agentDurationMs",
+  "detailAvailable",
+]);
+const tokenKeys = new Set(["input", "output", "total"]);
+const modelKeys = new Set(["requestedModel", "observedModel", "source"]);
+const exitCodeKeys = new Set(["code", "count"]);
+const agentDetailKeys = new Set([
+  "finalText",
+  "sessionPresent",
+  "tokens",
+  "toolSummary",
+  "commandSucceeded",
+  "commandFailed",
+  "commandUnknown",
+  "exitCodes",
+  "toolErrors",
+  "fileChangeCount",
+  "model",
+  "providerUnknownFieldCount",
+]);
+const toolUsageKeys = new Set(["name", "count"]);
+const toolErrorKeys = new Set(["kind", "message"]);
 const guidedRunKeys = new Set([
   "id",
   "target",
@@ -278,6 +326,178 @@ function isCount(value: unknown): value is number {
     typeof value === "number" &&
     Number.isSafeInteger(value) &&
     value >= 0
+  );
+}
+
+function isOptionalCount(value: unknown): boolean {
+  return value === undefined || value === null || isCount(value);
+}
+
+function isAgentTokens(value: unknown): value is AgentTokenSummary {
+  return (
+    isObject(value) &&
+    hasExactKeys(value, tokenKeys, [...tokenKeys]) &&
+    isOptionalCount(value.input) &&
+    isOptionalCount(value.output) &&
+    isOptionalCount(value.total)
+  );
+}
+
+function isAgentModel(value: unknown): value is AgentModelSummary {
+  if (
+    !isObject(value) ||
+    !hasExactKeys(value, modelKeys, [...modelKeys]) ||
+    !isSafeDisplayText(value.requestedModel, 120) ||
+    (value.observedModel !== null &&
+      value.observedModel !== undefined &&
+      !isSafeDisplayText(value.observedModel, 120)) ||
+    !["provider", "request_only", "unavailable"].includes(
+      value.source as string,
+    )
+  ) {
+    return false;
+  }
+  return (value.source === "provider") === (value.observedModel != null);
+}
+
+function isExitCodes(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length > 64) return false;
+  let previous: number | null = null;
+  return value.every((entry) => {
+    if (
+      !isObject(entry) ||
+      !hasExactKeys(entry, exitCodeKeys, [...exitCodeKeys]) ||
+      typeof entry.code !== "number" ||
+      !Number.isInteger(entry.code) ||
+      entry.code < -2_147_483_648 ||
+      entry.code > 2_147_483_647 ||
+      !isCount(entry.count) ||
+      entry.count === 0 ||
+      (previous !== null && previous >= entry.code)
+    ) {
+      return false;
+    }
+    previous = entry.code;
+    return true;
+  });
+}
+
+function isAgentExecutionSummary(
+  value: unknown,
+): value is AgentExecutionSummary {
+  if (
+    !isObject(value) ||
+    !hasExactKeys(value, agentSummaryKeys, [...agentSummaryKeys]) ||
+    !isSafeDisplayText(value.taskId, 128) ||
+    !isSafeDisplayText(value.contractVersion, 128) ||
+    !agentExecutionStatuses.has(value.status as AgentExecutionStatus) ||
+    !isOptionalCount(value.commandSucceeded) ||
+    !isOptionalCount(value.commandFailed) ||
+    !isOptionalCount(value.commandUnknown) ||
+    !isExitCodes(value.exitCodes) ||
+    !isOptionalCount(value.toolErrorCount) ||
+    !isOptionalCount(value.fileChangeCount) ||
+    ![null, true, false].includes(value.sessionPresent as null | boolean) ||
+    !isAgentTokens(value.tokens) ||
+    (value.model !== null && !isAgentModel(value.model)) ||
+    !isOptionalCount(value.providerUnknownFieldCount) ||
+    !isOptionalCount(value.agentDurationMs) ||
+    typeof value.detailAvailable !== "boolean"
+  ) {
+    return false;
+  }
+  const commandCounts = [
+    value.commandSucceeded,
+    value.commandFailed,
+    value.commandUnknown,
+  ];
+  if (
+    !(
+      commandCounts.every((count) => count === null) ||
+      commandCounts.every(isCount)
+    )
+  ) {
+    return false;
+  }
+  if (value.status === "completed") {
+    return !value.detailAvailable || value.agentDurationMs !== null;
+  }
+  return (
+    !value.detailAvailable &&
+    commandCounts.every((count) => count === null) &&
+    (value.exitCodes as unknown[]).length === 0 &&
+    value.toolErrorCount === null &&
+    value.fileChangeCount === null &&
+    value.sessionPresent === null &&
+    value.tokens.input === null &&
+    value.tokens.output === null &&
+    value.tokens.total === null &&
+    value.model === null &&
+    value.providerUnknownFieldCount === null &&
+    value.agentDurationMs === null
+  );
+}
+
+function isSafePrivateText(value: unknown, maxCharacters: number): value is string {
+  if (typeof value !== "string" || Array.from(value).length > maxCharacters) {
+    return false;
+  }
+  return Array.from(value).every((character) => {
+    const code = character.codePointAt(0) ?? 0;
+    if (code === 9 || code === 10 || code === 13) return true;
+    return !forbiddenDisplayCharacter.test(character);
+  });
+}
+
+function isAgentExecutionDetail(value: unknown): value is AgentExecutionDetail {
+  return (
+    isObject(value) &&
+    hasExactKeys(value, agentDetailKeys, [...agentDetailKeys]) &&
+    isSafePrivateText(value.finalText, 65_536) &&
+    typeof value.sessionPresent === "boolean" &&
+    isAgentTokens(value.tokens) &&
+    Array.isArray(value.toolSummary) &&
+    value.toolSummary.length <= 64 &&
+    value.toolSummary.every(
+      (tool) =>
+        isObject(tool) &&
+        hasExactKeys(tool, toolUsageKeys, [...toolUsageKeys]) &&
+        isSafeDisplayText(tool.name, 80) &&
+        isCount(tool.count) &&
+        tool.count > 0 &&
+        tool.count <= 10_000,
+    ) &&
+    isOptionalCount(value.commandSucceeded) &&
+    isOptionalCount(value.commandFailed) &&
+    isOptionalCount(value.commandUnknown) &&
+    isExitCodes(value.exitCodes) &&
+    Array.isArray(value.toolErrors) &&
+    value.toolErrors.length <= 32 &&
+    value.toolErrors.every(
+      (error) =>
+        isObject(error) &&
+        hasExactKeys(error, toolErrorKeys, [...toolErrorKeys]) &&
+        isSafeDisplayText(error.kind, 80) &&
+        isSafePrivateText(error.message, 512),
+    ) &&
+    isOptionalCount(value.fileChangeCount) &&
+    isAgentModel(value.model) &&
+    isCount(value.providerUnknownFieldCount)
+  );
+}
+
+export function isSafeAgentEvidenceResponse(
+  value: unknown,
+): value is AgentEvidenceResponse {
+  if (!isObject(value) || !["available", "unavailable"].includes(value.status as string)) {
+    return false;
+  }
+  if (value.status === "unavailable") {
+    return hasExactKeys(value, new Set(["status"]), ["status"]);
+  }
+  return (
+    hasExactKeys(value, new Set(["status", "detail"]), ["status", "detail"]) &&
+    isAgentExecutionDetail(value.detail)
   );
 }
 
@@ -590,6 +810,8 @@ export function isSafeRunDetail(value: unknown): value is RunDetail {
     !isObject(value) ||
     !isSafeRunRecord(value.run) ||
     !Array.isArray(value.taskResults) ||
+    !Array.isArray(value.agentExecutionSummaries) ||
+    !value.agentExecutionSummaries.every(isAgentExecutionSummary) ||
     !value.taskResults.every(isSafeTaskResult) ||
     !value.taskResults.every(hasCoherentTaskEvidence) ||
     value.taskResults.length !== value.run.completedTasks
@@ -606,6 +828,20 @@ export function isSafeRunDetail(value: unknown): value is RunDetail {
       return false;
     }
     taskIds.add(result.taskId);
+  }
+
+  const summaryTaskIds = new Set<string>();
+  for (const summary of value.agentExecutionSummaries) {
+    if (!taskIds.has(summary.taskId) || summaryTaskIds.has(summary.taskId)) {
+      return false;
+    }
+    summaryTaskIds.add(summary.taskId);
+  }
+  if (
+    ["chat_gpt_client", "claude_client"].includes(value.run.target.kind) &&
+    value.agentExecutionSummaries.length !== 0
+  ) {
+    return false;
   }
 
   if (value.run.status !== "completed") return true;

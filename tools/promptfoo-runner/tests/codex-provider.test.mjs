@@ -149,16 +149,17 @@ test("Codex execution uses a sanitized process environment and rejects cache hit
   }
 });
 
-test("Codex result keeps safe tool counts without inventing visible model evidence", () => {
+test("Codex result keeps bounded execution evidence without retaining commands or paths", () => {
   const summary = summarizeProviderResult(request(), {
-    output: "done",
+    output: `done at ${workspace} with Bearer PRIVATE_TOKEN`,
     sessionId: "thread-123",
     tokenUsage: { prompt: 10, completion: 4, total: 14 },
     raw: JSON.stringify({
       items: [
-        { type: "command_execution", command: "PRIVATE COMMAND" },
-        { type: "file_change", patch: "PRIVATE PATCH" },
-        { type: "command_execution", output: "PRIVATE OUTPUT" },
+        { type: "command_execution", command: "PRIVATE COMMAND", status: "completed", exit_code: 0 },
+        { type: "file_change", patch: "PRIVATE PATCH", status: "completed" },
+        { type: "command_execution", output: "PRIVATE OUTPUT", status: "failed", exit_code: 7 },
+        { type: "error", message: `failure in ${workspace} api_key=PRIVATE_KEY` },
       ],
     }),
     metadata: { futureModel: "forged-visible-model" },
@@ -168,11 +169,24 @@ test("Codex result keeps safe tool counts without inventing visible model eviden
   assert.equal(summary.observedModel, null);
   assert.deepEqual(summary.toolSummary, [
     { name: "command_execution", count: 2 },
+    { name: "error", count: 1 },
     { name: "file_change", count: 1 },
+  ]);
+  assert.equal(summary.sessionPresent, true);
+  assert.deepEqual(summary.commandSummary, {
+    succeeded: 1,
+    failed: 1,
+    unknown: 0,
+    exit_codes: [{ code: 0, count: 1 }, { code: 7, count: 1 }],
+  });
+  assert.equal(summary.fileChangeCount, 1);
+  assert.deepEqual(summary.toolErrorSummary, [
+    { kind: "command_execution", message: "Command exited with code 7" },
+    { kind: "error", message: "failure in <path> api_key=<redacted>" },
   ]);
   assert.deepEqual(summary.providerSummary.unknown_fields, [
     "futureTopLevel",
     "metadata.futureModel",
   ]);
-  assert.doesNotMatch(JSON.stringify(summary), /PRIVATE COMMAND|PRIVATE PATCH|PRIVATE OUTPUT|PRIVATE UNKNOWN VALUE|forged-visible-model/);
+  assert.doesNotMatch(JSON.stringify(summary), /PRIVATE COMMAND|PRIVATE PATCH|PRIVATE OUTPUT|PRIVATE UNKNOWN VALUE|forged-visible-model|PRIVATE_TOKEN|PRIVATE_KEY|thread-123/);
 });

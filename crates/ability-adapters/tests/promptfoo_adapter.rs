@@ -138,9 +138,33 @@ impl ProcessRunner for FakeRunner {
                             "run_id": run_id,
                             "status": "success",
                             "final_text": "implemented and tested",
-                            "session_id": "thread-123",
+                            "session_present": true,
                             "tokens": { "input": 13, "output": 5, "total": 18 },
                             "tool_summary": tool_summary,
+                            "command_summary": if request["provider"] == "codex" {
+                                json!({
+                                    "succeeded": 1,
+                                    "failed": 1,
+                                    "unknown": 0,
+                                    "exit_codes": [
+                                        { "code": 0, "count": 1 },
+                                        { "code": 7, "count": 1 }
+                                    ]
+                                })
+                            } else {
+                                json!({
+                                    "succeeded": null,
+                                    "failed": null,
+                                    "unknown": null,
+                                    "exit_codes": []
+                                })
+                            },
+                            "tool_error_summary": if request["provider"] == "codex" {
+                                json!([{ "kind": "command_execution", "message": "Command exited with code 7" }])
+                            } else {
+                                json!([])
+                            },
+                            "file_change_count": if request["provider"] == "codex" { json!(1) } else { Value::Null },
                             "model_evidence": {
                                 "requested_model": request["requested_model"],
                                 "observed_model": null,
@@ -164,9 +188,17 @@ impl ProcessRunner for FakeRunner {
                         "run_id": RUN_ID,
                         "status": "error",
                         "final_text": "",
-                        "session_id": null,
+                        "session_present": false,
                         "tokens": { "input": null, "output": null, "total": null },
                         "tool_summary": [],
+                        "command_summary": {
+                            "succeeded": null,
+                            "failed": null,
+                            "unknown": null,
+                            "exit_codes": []
+                        },
+                        "tool_error_summary": [],
+                        "file_change_count": null,
                         "model_evidence": {
                             "requested_model": "gpt-5.6-terra",
                             "observed_model": null,
@@ -416,8 +448,14 @@ async fn executes_one_stdin_request_and_returns_structured_evidence() {
         panic!("Promptfoo completion must include evidence")
     };
     assert_eq!(evidence.final_text, "implemented and tested");
+    assert!(evidence.session_present);
     assert_eq!(evidence.tokens.total, Some(18));
     assert_eq!(evidence.tool_summary.len(), 2);
+    assert_eq!(evidence.command_summary.succeeded, Some(1));
+    assert_eq!(evidence.command_summary.failed, Some(1));
+    assert_eq!(evidence.command_summary.exit_codes.len(), 2);
+    assert_eq!(evidence.tool_error_summary.len(), 1);
+    assert_eq!(evidence.file_change_count, Some(1));
     assert_eq!(evidence.model_evidence.requested_model, "gpt-5.6-terra");
 
     let spec = runner.execution_spec();

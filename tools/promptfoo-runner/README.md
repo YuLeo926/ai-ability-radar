@@ -1,7 +1,7 @@
 # Promptfoo Agent Runner
 
-此目录承载 AI 能力雷达的本地 Agent 执行桥。首个执行契约版本为
-`promptfoo-agent-v1`，固定支持以下 Promptfoo provider：
+此目录承载 AI 能力雷达的本地 Agent 执行桥。当前执行契约版本为
+`promptfoo-agent-v2`，固定支持以下 Promptfoo provider：
 
 - Codex CLI：`openai:codex-sdk`；
 - Claude Code：`anthropic:claude-agent-sdk`。
@@ -25,6 +25,7 @@ Promptfoo 声明的兼容版本范围内；后两者只修复本项目不使用�
 `time_budget_seconds`、`max_turns` 和 `run_id`。未知字段、相对或不存在的工作区、超限文本和不支持的档位会在
 provider 启动前失败。
 
-标准输出只写一行 `promptfoo-agent-v1` 结果 JSON，包含状态、最终文本、session ID、Token、工具摘要、
-模型证据和稳定的 provider 错误码。诊断只写入标准错误，且不回显异常正文。Promptfoo 缓存默认关闭，缓存命中不能作为
-有效能力结果。
+标准输出只写一行 `promptfoo-agent-v2` 结果 JSON，包含状态、脱敏最终文本、session 是否存在、Token、
+工具计数、命令状态、退出码分布、工具错误摘要、文件修改事件数、模型证据和稳定的 provider 错误码。协议不输出命令、
+命令输出、补丁、文件路径或完整 session ID。诊断只写入标准错误，且不回显异常正文。Promptfoo 缓存默认关闭，缓存命中
+不能作为有效能力结果。

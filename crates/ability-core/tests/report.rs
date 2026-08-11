@@ -1,8 +1,9 @@
 use ability_core::{
-    Category, EnvironmentFingerprint, FailureKind, ModelSource, ModelVerification, PublicReport,
-    ReportError, RunMode, RunRecord, RunStatus, ScoreSummary, TargetKind, TargetSelection,
-    TaskOutcome, TaskResult, build_public_report, render_public_report_html,
-    validate_public_report,
+    AgentExecutionStatus, AgentExecutionSummary, AgentModelSummary, AgentTokenSummary, Category,
+    EnvironmentFingerprint, FailureKind, ModelSource, ModelVerification, PublicReport, ReportError,
+    RunMode, RunRecord, RunStatus, ScoreSummary, TargetKind, TargetSelection, TaskOutcome,
+    TaskResult, build_public_report, build_public_report_with_agent_summaries,
+    render_public_report_html, validate_public_report,
 };
 use std::collections::BTreeMap;
 
@@ -93,7 +94,81 @@ fn public_report_is_a_structural_allowlist_not_a_redacted_domain_object() {
 }
 
 #[test]
-fn public_report_v2_includes_persisted_model_provenance_and_html_labels() {
+fn public_agent_summary_exposes_only_aggregate_status_and_counts() {
+    let (run, tasks) = sample_evidence("GPT-5.6");
+    let summaries = vec![
+        AgentExecutionSummary {
+            run_id: run.id,
+            task_id: tasks[0].task_id.clone(),
+            contract_version: "promptfoo-agent-v2".into(),
+            status: AgentExecutionStatus::Completed,
+            command_succeeded: Some(1),
+            command_failed: Some(2),
+            command_unknown: Some(0),
+            exit_codes: Vec::new(),
+            tool_error_count: Some(1),
+            file_change_count: Some(0),
+            session_present: Some(true),
+            tokens: AgentTokenSummary {
+                input: Some(100),
+                output: Some(20),
+                total: Some(120),
+            },
+            model: Some(AgentModelSummary {
+                requested_model: "private-model-C:\\Users\\Alice".into(),
+                observed_model: Some("private-observed-model".into()),
+                source: "provider".into(),
+            }),
+            provider_unknown_field_count: Some(0),
+            agent_duration_ms: Some(100),
+            evidence_rel_path: Some(format!(
+                "runs/{}/evidence/{}.json",
+                run.id, tasks[0].task_id
+            )),
+        },
+        AgentExecutionSummary {
+            run_id: run.id,
+            task_id: tasks[1].task_id.clone(),
+            contract_version: "promptfoo-agent-v2".into(),
+            status: AgentExecutionStatus::ProviderError,
+            command_succeeded: None,
+            command_failed: None,
+            command_unknown: None,
+            exit_codes: Vec::new(),
+            tool_error_count: None,
+            file_change_count: None,
+            session_present: None,
+            tokens: AgentTokenSummary {
+                input: None,
+                output: None,
+                total: None,
+            },
+            model: None,
+            provider_unknown_field_count: None,
+            agent_duration_ms: None,
+            evidence_rel_path: None,
+        },
+    ];
+
+    let report = build_public_report_with_agent_summaries(&run, &tasks, &summaries).unwrap();
+    let json = serde_json::to_string(&report).unwrap();
+    assert_eq!(report.result.agent_execution.recorded_tasks, 2);
+    assert_eq!(report.result.agent_execution.status_counts["completed"], 1);
+    assert_eq!(
+        report.result.agent_execution.status_counts["provider_error"],
+        1
+    );
+    assert_eq!(report.result.agent_execution.command_failed, 2);
+    assert_eq!(report.result.agent_execution.file_change_count, 0);
+    assert!(!json.contains("private-model"));
+    assert!(!json.contains("private-observed"));
+    assert!(!json.contains("evidence/"));
+    assert!(!json.contains(&run.id.to_string()));
+    assert!(!json.contains(&tasks[0].task_id));
+}
+
+#[test]
+fn public_report_v3_includes_persisted_model_provenance_and_html_labels() {
     let (mut run, tasks) = sample_evidence("GPT-5.6");
     run.target.kind = TargetKind::ChatGptClient;
     run.target.model_source = ModelSource::WindowsAccessibility;
@@ -103,7 +178,7 @@ fn public_report_v2_includes_persisted_model_provenance_and_html_labels() {
     let json = serde_json::to_value(&report).unwrap();
     let html = render_public_report_html(&report).unwrap();
 
-    assert_eq!(json["schemaVersion"], 2);
+    assert_eq!(json["schemaVersion"], 3);
     assert_eq!(json["target"]["modelSource"], "windows_accessibility");
     assert_eq!(json["target"]["modelVerification"], "user_confirmed");
     assert!(html.contains("模型来源：Windows 客户端界面 · 用户已确认"));

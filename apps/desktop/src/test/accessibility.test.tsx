@@ -262,7 +262,7 @@ function runDetail(): RunDetail {
       answerRelPath: "private-answer-2.txt",
     },
   ];
-  return { run: runRecord(), taskResults };
+  return { run: runRecord(), taskResults, agentExecutionSummaries: [] };
 }
 
 function accessibleBatchRecord(completed = false): ScanBatchRecord {
@@ -661,7 +661,11 @@ describe("Task 21 accessibility baseline", () => {
       "/cli/codex_cli",
       fakeBackend({
         startCliRun: vi.fn(async () => cliRun),
-        getRunDetail: vi.fn(async () => ({ run: cliRun, taskResults: [] })),
+        getRunDetail: vi.fn(async () => ({
+          run: cliRun,
+          taskResults: [],
+          agentExecutionSummaries: [],
+        })),
       }),
     );
     await screen.findByRole("heading", { name: "Codex CLI 快速体检" });

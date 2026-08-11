@@ -11,6 +11,7 @@ import {
   isSafeBatchRecord,
   isSafeBatchRecordList,
   isSafeBatchRetryEstimate,
+  isSafeAgentEvidenceResponse,
   isSafeClientSelectionDetection,
   isSafeNextGuidedMember,
   isSafeRunDetail,
@@ -19,6 +20,47 @@ import {
   isSafeScanExecutionAuthorization,
   scoreableResultScore,
 } from "./runtimeValidation";
+
+describe("isSafeAgentEvidenceResponse", () => {
+  const available = {
+    status: "available",
+    detail: {
+      finalText: "safe\nfinal response",
+      sessionPresent: true,
+      tokens: { input: 10, output: 5, total: 15 },
+      toolSummary: [{ name: "shell", count: 1 }],
+      commandSucceeded: 1,
+      commandFailed: 0,
+      commandUnknown: 0,
+      exitCodes: [{ code: 0, count: 1 }],
+      toolErrors: [],
+      fileChangeCount: 1,
+      model: {
+        requestedModel: "gpt-test",
+        observedModel: "gpt-test",
+        source: "provider",
+      },
+      providerUnknownFieldCount: 0,
+    },
+  };
+
+  test("accepts the exact private-detail wire shape and rejects extra path or session fields", () => {
+    expect(isSafeAgentEvidenceResponse(available)).toBe(true);
+    expect(isSafeAgentEvidenceResponse({ status: "unavailable" })).toBe(true);
+    expect(
+      isSafeAgentEvidenceResponse({
+        ...available,
+        detail: { ...available.detail, evidenceRelPath: "runs/private" },
+      }),
+    ).toBe(false);
+    expect(
+      isSafeAgentEvidenceResponse({
+        ...available,
+        detail: { ...available.detail, sessionId: "private-session" },
+      }),
+    ).toBe(false);
+  });
+});
 
 const runId = "validation-run";
 
@@ -113,6 +155,7 @@ function makeDetail(
   return {
     run: makeRun(runOverrides),
     taskResults,
+    agentExecutionSummaries: [],
   };
 }
 

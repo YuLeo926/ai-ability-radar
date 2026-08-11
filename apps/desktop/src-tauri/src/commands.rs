@@ -5,22 +5,26 @@ use crate::app_state::{
 };
 use crate::client_selection::{self, ClientSelectionDetection};
 use crate::dto::{
-    BatchIdInput, BootstrapDto, CliRunEventDto, DataSettingsDto, DeleteTargetHistoryInput,
-    DetectClientSelectionInput, ExportReportInput, FullBackupInput, PackSummaryDto, ResumeRunInput,
-    ResumeTargetSelectionInput, RunDetailDto, RunErrorEvent, RunIdInput, SetRetentionInput,
-    StartRunInput, SubmitAnswerInput, TaskResultDto,
+    AgentEvidenceInput, AgentEvidenceResponseDto, AgentExecutionDetailDto,
+    AgentExecutionSummaryDto, AgentToolErrorDto, AgentToolUsageDto, BatchIdInput, BootstrapDto,
+    CliRunEventDto, DataSettingsDto, DeleteTargetHistoryInput, DetectClientSelectionInput,
+    ExportReportInput, FullBackupInput, PackSummaryDto, ResumeRunInput, ResumeTargetSelectionInput,
+    RunDetailDto, RunErrorEvent, RunIdInput, SetRetentionInput, StartRunInput, SubmitAnswerInput,
+    TaskResultDto,
 };
 use ability_adapters::{
-    AgentAdapter, AvailabilityStatus, CliRunService, PrerequisiteStatus, ProcessRunner,
-    TargetAvailability,
+    AgentAdapter, AvailabilityStatus, CliRunService, ModelEvidenceSource, PrerequisiteStatus,
+    ProcessRunner, StoredAgentExecutionEvidence, TargetAvailability,
 };
 use ability_core::{
-    contains_forbidden_display_character, is_valid_reported_model, ArtifactStore,
+    contains_forbidden_display_character, is_valid_reported_model, AgentExecutionStatus,
+    AgentExecutionSummary, AgentExitCodeCount, AgentModelSummary, AgentTokenSummary, ArtifactStore,
     EnvironmentFingerprint, LoadedPack, ManualRunService, ManualStep, ModelSource,
     ModelVerification, RunMode, RunRecord, RunRepository, RunStatus, TargetKind, TargetSelection,
 };
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Read;
 #[cfg(windows)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -797,6 +801,19 @@ pub fn get_run_detail(
 }
 
 #[tauri::command]
+pub fn get_agent_execution_detail(
+    input: AgentEvidenceInput,
+    state: State<'_, AppState>,
+) -> Result<AgentEvidenceResponseDto, String> {
+    agent_execution_detail_from_repository(
+        &state.repository,
+        &state.artifact_root,
+        parse_run_id(&input.run_id)?,
+        validate_task_id(&input.task_id)?,
+    )
+}
+
+#[tauri::command]
 pub fn delete_raw_artifacts(state: State<'_, AppState>, input: RunIdInput) -> Result<(), String> {
     let run_id = parse_run_id(&input.run_id)?;
     let _local_data = state
@@ -1071,7 +1088,12 @@ fn export_report_to_selected_path_with_gate(
     let tasks = repository
         .get_task_results(run_id)
         .map_err(|_| "无法读取这次体检，请稍后重试。".to_string())?;
-    let report = ability_core::build_public_report(&run, &tasks).map_err(public_report_error)?;
+    let agent_summaries = repository
+        .get_agent_execution_summaries(run_id)
+        .map_err(|_| "无法读取本地执行摘要。".to_string())?;
+    let report =
+        ability_core::build_public_report_with_agent_summaries(&run, &tasks, &agent_summaries)
+            .map_err(public_report_error)?;
     let html = ability_core::render_public_report_html(&report).map_err(public_report_error)?;
     write_new_report(&destination, html.as_bytes())?;
     let report_hash = ability_core::public_report_sha256(&html);
@@ -2342,7 +2364,179 @@ fn run_detail_from_repository(
         .into_iter()
         .map(TaskResultDto::try_from)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(Some(RunDetailDto { run, task_results }))
+    let agent_execution_summaries = repository
+        .get_agent_execution_summaries(run_id)
+        .map_err(|_| "无法读取本地执行摘要。".to_string())?
+        .into_iter()
+        .map(AgentExecutionSummaryDto::from)
+        .collect();
+    Ok(Some(RunDetailDto {
+        run,
+        task_results,
+        agent_execution_summaries,
+    }))
+}
+
+fn agent_execution_detail_from_repository(
+    repository: &RunRepository,
+    artifact_root: &Path,
+    run_id: Uuid,
+    task_id: &str,
+) -> Result<AgentEvidenceResponseDto, String> {
+    let Some(summary) = repository
+        .get_agent_execution_summary(run_id, task_id)
+        .map_err(|_| "无法读取本地执行摘要。".to_string())?
+    else {
+        return Ok(AgentEvidenceResponseDto::Unavailable);
+    };
+    let Some(relative) = summary.evidence_rel_path.as_deref() else {
+        return Ok(AgentEvidenceResponseDto::Unavailable);
+    };
+    let Ok(Some(mut file)) = ArtifactStore::new(artifact_root.to_path_buf())
+        .open_agent_evidence_file(run_id, task_id, relative)
+    else {
+        return Ok(AgentEvidenceResponseDto::Unavailable);
+    };
+    const MAX_PRIVATE_EVIDENCE_BYTES: u64 = 96 * 1_024;
+    if file
+        .metadata()
+        .map(|metadata| metadata.len() > MAX_PRIVATE_EVIDENCE_BYTES)
+        .unwrap_or(true)
+    {
+        return Ok(AgentEvidenceResponseDto::Unavailable);
+    }
+    let mut bytes = Vec::new();
+    if Read::take(&mut file, MAX_PRIVATE_EVIDENCE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.len() as u64 > MAX_PRIVATE_EVIDENCE_BYTES
+    {
+        return Ok(AgentEvidenceResponseDto::Unavailable);
+    }
+    let Ok(stored) = serde_json::from_slice::<StoredAgentExecutionEvidence>(&bytes) else {
+        return Ok(AgentEvidenceResponseDto::Unavailable);
+    };
+    Ok(
+        validate_agent_execution_detail(stored, &summary, run_id, task_id).map_or(
+            AgentEvidenceResponseDto::Unavailable,
+            AgentEvidenceResponseDto::Available,
+        ),
+    )
+}
+
+fn validate_agent_execution_detail(
+    stored: StoredAgentExecutionEvidence,
+    summary: &AgentExecutionSummary,
+    run_id: Uuid,
+    task_id: &str,
+) -> Option<AgentExecutionDetailDto> {
+    let evidence = stored.evidence;
+    if stored.schema_version != 1
+        || stored.run_id != run_id
+        || stored.task_id != task_id
+        || evidence.run_id != run_id
+        || evidence.contract_version != summary.contract_version
+        || summary.status != AgentExecutionStatus::Completed
+        || evidence.final_text.len() > 64 * 1_024
+        || !safe_private_text(&evidence.final_text, true)
+        || evidence.tool_summary.len() > 64
+        || evidence.tool_error_summary.len() > 32
+    {
+        return None;
+    }
+    if evidence
+        .tool_summary
+        .iter()
+        .any(|tool| !safe_private_label(&tool.name, 80) || tool.count == 0 || tool.count > 10_000)
+        || evidence.tool_error_summary.iter().any(|error| {
+            !safe_private_label(&error.kind, 80)
+                || error.message.len() > 512
+                || !safe_private_text(&error.message, true)
+        })
+    {
+        return None;
+    }
+
+    let provider_unknown_field_count =
+        u64::try_from(evidence.provider_summary.unknown_fields.len())
+            .ok()?
+            .checked_add(evidence.provider_summary.discarded_field_count)?;
+    let model = AgentModelSummary {
+        requested_model: evidence.model_evidence.requested_model.clone(),
+        observed_model: evidence.model_evidence.observed_model.clone(),
+        source: match evidence.model_evidence.source {
+            ModelEvidenceSource::Provider => "provider",
+            ModelEvidenceSource::RequestOnly => "request_only",
+            ModelEvidenceSource::Unavailable => "unavailable",
+        }
+        .into(),
+    };
+    let tokens = AgentTokenSummary {
+        input: evidence.tokens.input,
+        output: evidence.tokens.output,
+        total: evidence.tokens.total,
+    };
+    let exit_codes = evidence
+        .command_summary
+        .exit_codes
+        .iter()
+        .map(|entry| AgentExitCodeCount {
+            code: entry.code,
+            count: entry.count,
+        })
+        .collect::<Vec<_>>();
+    if summary.command_succeeded != evidence.command_summary.succeeded
+        || summary.command_failed != evidence.command_summary.failed
+        || summary.command_unknown != evidence.command_summary.unknown
+        || summary.exit_codes != exit_codes
+        || summary.tool_error_count != u64::try_from(evidence.tool_error_summary.len()).ok()
+        || summary.file_change_count != evidence.file_change_count
+        || summary.session_present != Some(evidence.session_present)
+        || summary.tokens != tokens
+        || summary.model.as_ref() != Some(&model)
+        || summary.provider_unknown_field_count != Some(provider_unknown_field_count)
+    {
+        return None;
+    }
+
+    Some(AgentExecutionDetailDto {
+        final_text: evidence.final_text,
+        session_present: evidence.session_present,
+        tokens,
+        tool_summary: evidence
+            .tool_summary
+            .into_iter()
+            .map(|tool| AgentToolUsageDto {
+                name: tool.name,
+                count: tool.count,
+            })
+            .collect(),
+        command_succeeded: evidence.command_summary.succeeded,
+        command_failed: evidence.command_summary.failed,
+        command_unknown: evidence.command_summary.unknown,
+        exit_codes,
+        tool_errors: evidence
+            .tool_error_summary
+            .into_iter()
+            .map(|error| AgentToolErrorDto {
+                kind: error.kind,
+                message: error.message,
+            })
+            .collect(),
+        file_change_count: evidence.file_change_count,
+        model,
+        provider_unknown_field_count,
+    })
+}
+
+fn safe_private_label(value: &str, max_chars: usize) -> bool {
+    !value.is_empty() && value.chars().count() <= max_chars && !value.chars().any(char::is_control)
+}
+
+fn safe_private_text(value: &str, multiline: bool) -> bool {
+    value.chars().all(|character| {
+        !character.is_control() || (multiline && matches!(character, '\n' | '\r' | '\t'))
+    })
 }
 
 #[cfg(test)]
@@ -2351,9 +2545,12 @@ mod tests {
     use crate::app_state::CancellationRegistry;
     use crate::dto::{DetectClientSelectionInput, StartRunInput, TargetSelectionInput};
     use ability_adapters::{
-        AdapterCompletion, AdapterError, AuthState, AvailabilityStatus, CliRunService,
-        ExecutionRequest, LaunchSource, PrerequisiteStatus, ProcessError, ProcessOutput,
-        ProcessRunner, ProcessSpec, TargetAvailability,
+        AdapterCompletion, AdapterError, AgentCommandSummary, AgentExecutionEvidence,
+        AgentExitCodeCount as AdapterExitCodeCount, AgentModelEvidence, AgentProviderSummary,
+        AgentTokenUsage, AgentToolErrorSummary, AgentToolUsage, AuthState, AvailabilityStatus,
+        CliRunService, ExecutionRequest, LaunchSource, PrerequisiteStatus, ProcessError,
+        ProcessOutput, ProcessRunner, ProcessSpec, StoredAgentExecutionEvidence,
+        TargetAvailability,
     };
     use ability_core::{
         summarize_scores, Category, EnvironmentFingerprint, FailureKind, LoadedPack,
@@ -3140,6 +3337,119 @@ mod tests {
         assert!(serialized.contains("\"outcome\":\"failed\""));
         assert!(serialized.contains("\"failureKind\":\"wrong_answer\""));
         assert!(serialized.contains(&relative_artifact));
+    }
+
+    #[test]
+    fn agent_detail_is_read_only_on_demand_and_tampering_returns_stable_unavailable() {
+        let directory = tempdir().unwrap();
+        let repository = RunRepository::open(&directory.path().join("runs.db")).unwrap();
+        let run = insert_run(&repository, RunStatus::Running);
+        let task_id = "dedupe-events";
+        let relative = format!("runs/{}/evidence/{task_id}.json", run.id);
+        let result = TaskResult {
+            run_id: run.id,
+            task_id: task_id.into(),
+            category: Category::CliCoding,
+            outcome: TaskOutcome::Failed,
+            score: Some(0.0),
+            failure_kind: Some(FailureKind::WrongAnswer),
+            duration_ms: 321,
+            answer_rel_path: None,
+            detail: "hidden tests failed".into(),
+        };
+        let summary = AgentExecutionSummary {
+            run_id: run.id,
+            task_id: task_id.into(),
+            contract_version: "promptfoo-agent-v2".into(),
+            status: AgentExecutionStatus::Completed,
+            command_succeeded: Some(0),
+            command_failed: Some(1),
+            command_unknown: Some(0),
+            exit_codes: vec![AgentExitCodeCount { code: 1, count: 1 }],
+            tool_error_count: Some(1),
+            file_change_count: Some(0),
+            session_present: Some(true),
+            tokens: AgentTokenSummary {
+                input: Some(100),
+                output: Some(20),
+                total: Some(120),
+            },
+            model: Some(AgentModelSummary {
+                requested_model: "gpt-test".into(),
+                observed_model: Some("gpt-test".into()),
+                source: "provider".into(),
+            }),
+            provider_unknown_field_count: Some(0),
+            agent_duration_ms: Some(300),
+            evidence_rel_path: Some(relative.clone()),
+        };
+        repository
+            .save_task_result_with_agent_summary(&result, &summary)
+            .unwrap();
+
+        let evidence = AgentExecutionEvidence {
+            contract_version: "promptfoo-agent-v2".into(),
+            run_id: run.id,
+            final_text: "safe final response".into(),
+            session_present: true,
+            tokens: AgentTokenUsage {
+                input: Some(100),
+                output: Some(20),
+                total: Some(120),
+            },
+            tool_summary: vec![AgentToolUsage {
+                name: "shell".into(),
+                count: 1,
+            }],
+            command_summary: AgentCommandSummary {
+                succeeded: Some(0),
+                failed: Some(1),
+                unknown: Some(0),
+                exit_codes: vec![AdapterExitCodeCount { code: 1, count: 1 }],
+            },
+            tool_error_summary: vec![AgentToolErrorSummary {
+                kind: "command_failed".into(),
+                message: "test failed".into(),
+            }],
+            file_change_count: Some(0),
+            model_evidence: AgentModelEvidence {
+                requested_model: "gpt-test".into(),
+                observed_model: Some("gpt-test".into()),
+                source: ModelEvidenceSource::Provider,
+            },
+            provider_summary: AgentProviderSummary {
+                unknown_fields: Vec::new(),
+                discarded_field_count: 0,
+            },
+        };
+        let stored = StoredAgentExecutionEvidence {
+            schema_version: 1,
+            run_id: run.id,
+            task_id: task_id.into(),
+            evidence,
+        };
+        let artifact_root = directory.path().join("artifacts");
+        let path = artifact_root.join(&relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+
+        let response =
+            agent_execution_detail_from_repository(&repository, &artifact_root, run.id, task_id)
+                .unwrap();
+        let AgentEvidenceResponseDto::Available(detail) = response else {
+            panic!("expected available local detail");
+        };
+        assert_eq!(detail.final_text, "safe final response");
+        let serialized = serde_json::to_string(&detail).unwrap();
+        assert!(!serialized.contains(&relative));
+        assert!(!serialized.contains(task_id));
+
+        std::fs::write(&path, br#"{"schemaVersion":999}"#).unwrap();
+        assert_eq!(
+            agent_execution_detail_from_repository(&repository, &artifact_root, run.id, task_id,)
+                .unwrap(),
+            AgentEvidenceResponseDto::Unavailable
+        );
     }
 
     #[test]

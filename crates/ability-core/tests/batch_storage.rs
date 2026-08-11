@@ -289,7 +289,7 @@ fn migration_upgrades_v2_without_rewriting_old_run_json() {
                 0
             ))
             .unwrap(),
-        3
+        4
     );
 }
 

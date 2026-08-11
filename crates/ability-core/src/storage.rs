@@ -1,9 +1,9 @@
 use crate::{
-    BaselineEvidenceCandidate, BaselineSnapshot, BatchAnalysis, BatchAnalysisIdentity, BatchMode,
-    BatchStatus, CalibrationPolicy, CompletedBatchEvidence, FailureKind, MemberEvidence, RunMode,
-    RunRecord, RunStatus, ScanBatchPlan, ScoreSummary, TargetKind, TargetSelection, TaskEvidence,
-    TaskOutcome, TaskResult, analyze_matched_batch, grading::has_coherent_task_evidence,
-    summarize_scores,
+    AgentExecutionStatus, AgentExecutionSummary, BaselineEvidenceCandidate, BaselineSnapshot,
+    BatchAnalysis, BatchAnalysisIdentity, BatchMode, BatchStatus, CalibrationPolicy,
+    CompletedBatchEvidence, FailureKind, MemberEvidence, RunMode, RunRecord, RunStatus,
+    ScanBatchPlan, ScoreSummary, TargetKind, TargetSelection, TaskEvidence, TaskOutcome,
+    TaskResult, analyze_matched_batch, grading::has_coherent_task_evidence, summarize_scores,
 };
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
@@ -269,6 +269,9 @@ impl RunRepository {
         connection.execute_batch(include_str!("../migrations/0001_init.sql"))?;
         connection.execute_batch(include_str!("../migrations/0002_settings.sql"))?;
         connection.execute_batch(include_str!("../migrations/0003_scan_batches.sql"))?;
+        connection.execute_batch(include_str!(
+            "../migrations/0004_agent_execution_evidence.sql"
+        ))?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -333,90 +336,26 @@ impl RunRepository {
 
     pub fn save_task_result(&self, result: &TaskResult) -> Result<(), StorageError> {
         validate_task_result(result)?;
-        let duration_ms = i64::try_from(result.duration_ms)
-            .map_err(|_| StorageError::InvalidData("duration_ms exceeds SQLite range".into()))?;
-        let category_json = serde_json::to_string(&result.category)?;
-        let outcome_json = serde_json::to_string(&result.outcome)?;
-        let failure_kind_json = result
-            .failure_kind
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
         let mut connection = self.connection.lock();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let batch_owned: i64 = transaction.query_row(
-            "SELECT COUNT(*) FROM scan_batch_members WHERE run_id=?1",
-            [result.run_id.to_string()],
-            |row| row.get(0),
-        )?;
-        if batch_owned != 0 {
-            return Err(StorageError::InvalidData(
-                "batch-owned task evidence requires the atomic isolation checkpoint".into(),
-            ));
-        }
-        let (status_json, total_tasks): (String, i64) = transaction
-            .query_row(
-                "SELECT status_json,total_tasks FROM runs WHERE id=?1",
-                [result.run_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?
-            .ok_or(StorageError::RunNotFound(result.run_id))?;
-        let status: RunStatus = serde_json::from_str(&status_json)?;
-        if status != RunStatus::Running {
-            return Err(StorageError::InvalidData(
-                "task results can be saved only while the run is running".into(),
-            ));
-        }
-        transaction.execute(
-            "INSERT INTO task_results(
-              run_id,task_id,category_json,outcome_json,score,failure_kind_json,
-              duration_ms,answer_rel_path,detail
-            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
-            ON CONFLICT(run_id,task_id) DO UPDATE SET
-              category_json=excluded.category_json,
-              outcome_json=excluded.outcome_json,
-              score=excluded.score,
-              failure_kind_json=excluded.failure_kind_json,
-              duration_ms=excluded.duration_ms,
-              answer_rel_path=excluded.answer_rel_path,
-              detail=excluded.detail",
-            params![
-                result.run_id.to_string(),
-                &result.task_id,
-                category_json,
-                outcome_json,
-                result.score,
-                failure_kind_json,
-                duration_ms,
-                &result.answer_rel_path,
-                &result.detail,
-            ],
-        )?;
-        let checkpoint_count: i64 = transaction.query_row(
-            "SELECT COUNT(*) FROM task_results WHERE run_id=?1",
-            [result.run_id.to_string()],
-            |row| row.get(0),
-        )?;
-        if checkpoint_count > total_tasks {
-            return Err(StorageError::InvalidData(
-                "checkpoint count exceeds the run total_tasks".into(),
-            ));
-        }
-        let changed = transaction.execute(
-            "UPDATE runs SET completed_tasks=(
-              SELECT COUNT(*) FROM task_results WHERE run_id=?1
-            ) WHERE id=?1 AND status_json=?2",
-            params![
-                result.run_id.to_string(),
-                serde_json::to_string(&RunStatus::Running)?,
-            ],
-        )?;
-        if changed != 1 {
-            return Err(StorageError::InvalidData(
-                "run changed while checkpoint evidence was being saved".into(),
-            ));
-        }
+        reject_batch_owned_checkpoint(&transaction, result.run_id)?;
+        save_task_result_in_transaction(&transaction, result)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn save_task_result_with_agent_summary(
+        &self,
+        result: &TaskResult,
+        summary: &AgentExecutionSummary,
+    ) -> Result<(), StorageError> {
+        validate_task_result(result)?;
+        validate_agent_execution_summary(summary, result)?;
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        reject_batch_owned_checkpoint(&transaction, result.run_id)?;
+        save_task_result_in_transaction(&transaction, result)?;
+        save_agent_execution_summary_in_transaction(&transaction, summary)?;
         transaction.commit()?;
         Ok(())
     }
@@ -615,6 +554,43 @@ impl RunRepository {
             .map_err(StorageError::from)
     }
 
+    pub fn get_agent_execution_summaries(
+        &self,
+        run_id: Uuid,
+    ) -> Result<Vec<AgentExecutionSummary>, StorageError> {
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(
+            "SELECT run_id,task_id,contract_version,status_json,command_succeeded,
+                    command_failed,command_unknown,exit_codes_json,tool_error_count,
+                    file_change_count,session_present,tokens_json,model_json,
+                    provider_unknown_field_count,agent_duration_ms,evidence_rel_path
+             FROM task_agent_evidence WHERE run_id=?1 ORDER BY task_id ASC",
+        )?;
+        let rows = statement.query_map([run_id.to_string()], row_to_agent_execution_summary)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::from)
+    }
+
+    pub fn get_agent_execution_summary(
+        &self,
+        run_id: Uuid,
+        task_id: &str,
+    ) -> Result<Option<AgentExecutionSummary>, StorageError> {
+        self.connection
+            .lock()
+            .query_row(
+                "SELECT run_id,task_id,contract_version,status_json,command_succeeded,
+                        command_failed,command_unknown,exit_codes_json,tool_error_count,
+                        file_change_count,session_present,tokens_json,model_json,
+                        provider_unknown_field_count,agent_duration_ms,evidence_rel_path
+                 FROM task_agent_evidence WHERE run_id=?1 AND task_id=?2",
+                params![run_id.to_string(), task_id],
+                row_to_agent_execution_summary,
+            )
+            .optional()
+            .map_err(StorageError::from)
+    }
+
     pub fn get_run_task_counts(&self, run_id: Uuid) -> Result<Option<(u32, u32)>, StorageError> {
         let counts: Option<(i64, i64)> = self
             .connection
@@ -761,13 +737,20 @@ impl RunRepository {
                 "retention candidate changed before cleanup".into(),
             ));
         }
-        let changed = transaction.execute(
+        let answer_paths = transaction.execute(
             "UPDATE task_results SET answer_rel_path=NULL
              WHERE run_id=?1 AND answer_rel_path IS NOT NULL",
             [candidate.id.to_string()],
         )?;
+        let evidence_paths = transaction.execute(
+            "UPDATE task_agent_evidence SET evidence_rel_path=NULL
+             WHERE run_id=?1 AND evidence_rel_path IS NOT NULL",
+            [candidate.id.to_string()],
+        )?;
         transaction.commit()?;
-        Ok(changed)
+        answer_paths
+            .checked_add(evidence_paths)
+            .ok_or_else(|| StorageError::InvalidData("artifact reference count overflow".into()))
     }
 
     pub fn snapshot_to_backup_file(
@@ -1907,6 +1890,27 @@ impl RunRepository {
         ordinal: u32,
         result: &TaskResult,
     ) -> Result<(), StorageError> {
+        self.save_cli_batch_task_result_checkpoint(batch_id, ordinal, result, None)
+    }
+
+    pub fn save_cli_batch_task_result_with_agent_summary(
+        &self,
+        batch_id: Uuid,
+        ordinal: u32,
+        result: &TaskResult,
+        summary: &AgentExecutionSummary,
+    ) -> Result<(), StorageError> {
+        validate_agent_execution_summary(summary, result)?;
+        self.save_cli_batch_task_result_checkpoint(batch_id, ordinal, result, Some(summary))
+    }
+
+    fn save_cli_batch_task_result_checkpoint(
+        &self,
+        batch_id: Uuid,
+        ordinal: u32,
+        result: &TaskResult,
+        summary: Option<&AgentExecutionSummary>,
+    ) -> Result<(), StorageError> {
         validate_task_result(result)?;
         let mut connection = self.connection.lock();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1958,6 +1962,9 @@ impl RunRepository {
             ));
         }
         save_task_result_in_transaction(&transaction, result)?;
+        if let Some(summary) = summary {
+            save_agent_execution_summary_in_transaction(&transaction, summary)?;
+        }
         transaction.commit()?;
         Ok(())
     }
@@ -2434,13 +2441,20 @@ impl RunRepository {
         let status = run_status_in_transaction(&transaction, run_id)?
             .ok_or(StorageError::RunNotFound(run_id))?;
         reject_active_delete(status)?;
-        let changed = transaction.execute(
+        let answer_paths = transaction.execute(
             "UPDATE task_results SET answer_rel_path=NULL
              WHERE run_id=?1 AND answer_rel_path IS NOT NULL",
             [run_id.to_string()],
         )?;
+        let evidence_paths = transaction.execute(
+            "UPDATE task_agent_evidence SET evidence_rel_path=NULL
+             WHERE run_id=?1 AND evidence_rel_path IS NOT NULL",
+            [run_id.to_string()],
+        )?;
         transaction.commit()?;
-        Ok(changed)
+        answer_paths
+            .checked_add(evidence_paths)
+            .ok_or_else(|| StorageError::InvalidData("artifact reference count overflow".into()))
     }
 
     pub fn delete_run(&self, run_id: Uuid) -> Result<bool, StorageError> {
@@ -2880,6 +2894,10 @@ fn to_sqlite_u64(value: u64, label: &str) -> Result<i64, StorageError> {
         .map_err(|_| StorageError::InvalidData(format!("{label} exceeds SQLite range")))
 }
 
+fn optional_sqlite_u64(value: Option<u64>, label: &str) -> Result<Option<i64>, StorageError> {
+    value.map(|value| to_sqlite_u64(value, label)).transpose()
+}
+
 fn validate_reserved_run(
     plan: &ScanBatchPlan,
     target_position: usize,
@@ -3176,6 +3194,75 @@ fn save_task_result_in_transaction(
             "run changed while checkpoint evidence was saved".into(),
         ));
     }
+    Ok(())
+}
+
+fn reject_batch_owned_checkpoint(
+    transaction: &rusqlite::Transaction<'_>,
+    run_id: Uuid,
+) -> Result<(), StorageError> {
+    let batch_owned: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM scan_batch_members WHERE run_id=?1",
+        [run_id.to_string()],
+        |row| row.get(0),
+    )?;
+    if batch_owned != 0 {
+        return Err(StorageError::InvalidData(
+            "batch-owned task evidence requires the atomic isolation checkpoint".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn save_agent_execution_summary_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    summary: &AgentExecutionSummary,
+) -> Result<(), StorageError> {
+    transaction.execute(
+        "INSERT INTO task_agent_evidence(
+           run_id,task_id,contract_version,status_json,command_succeeded,command_failed,
+           command_unknown,exit_codes_json,tool_error_count,file_change_count,
+           session_present,tokens_json,model_json,provider_unknown_field_count,
+           agent_duration_ms,evidence_rel_path
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+         ON CONFLICT(run_id,task_id) DO UPDATE SET
+           contract_version=excluded.contract_version,status_json=excluded.status_json,
+           command_succeeded=excluded.command_succeeded,command_failed=excluded.command_failed,
+           command_unknown=excluded.command_unknown,exit_codes_json=excluded.exit_codes_json,
+           tool_error_count=excluded.tool_error_count,file_change_count=excluded.file_change_count,
+           session_present=excluded.session_present,tokens_json=excluded.tokens_json,
+           model_json=excluded.model_json,
+           provider_unknown_field_count=excluded.provider_unknown_field_count,
+           agent_duration_ms=excluded.agent_duration_ms,
+           evidence_rel_path=excluded.evidence_rel_path",
+        params![
+            summary.run_id.to_string(),
+            &summary.task_id,
+            &summary.contract_version,
+            serde_json::to_string(&summary.status)?,
+            optional_sqlite_u64(summary.command_succeeded, "command_succeeded")?,
+            optional_sqlite_u64(summary.command_failed, "command_failed")?,
+            optional_sqlite_u64(summary.command_unknown, "command_unknown")?,
+            serde_json::to_string(&summary.exit_codes)?,
+            optional_sqlite_u64(summary.tool_error_count, "tool_error_count")?,
+            optional_sqlite_u64(summary.file_change_count, "file_change_count")?,
+            summary
+                .session_present
+                .map(|value| if value { 1_i64 } else { 0_i64 }),
+            serde_json::to_string(&summary.tokens)?,
+            summary
+                .model
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
+            optional_sqlite_u64(
+                summary.provider_unknown_field_count,
+                "provider_unknown_field_count",
+            )?,
+            optional_sqlite_u64(summary.agent_duration_ms, "agent_duration_ms")?,
+            &summary.evidence_rel_path,
+        ],
+    )?;
     Ok(())
 }
 
@@ -4090,6 +4177,53 @@ fn row_to_task_result(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskResult> {
     Ok(result)
 }
 
+fn row_to_agent_execution_summary(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<AgentExecutionSummary> {
+    let run_id: String = row.get(0)?;
+    let status: String = row.get(3)?;
+    let exit_codes: String = row.get(7)?;
+    let session_present: Option<i64> = row.get(10)?;
+    let tokens: String = row.get(11)?;
+    let model: Option<String> = row.get(12)?;
+    let summary = AgentExecutionSummary {
+        run_id: Uuid::parse_str(&run_id).map_err(to_sql_error)?,
+        task_id: row.get(1)?,
+        contract_version: row.get(2)?,
+        status: serde_json::from_str(&status).map_err(to_sql_error)?,
+        command_succeeded: optional_u64_from_row(row, 4)?,
+        command_failed: optional_u64_from_row(row, 5)?,
+        command_unknown: optional_u64_from_row(row, 6)?,
+        exit_codes: serde_json::from_str(&exit_codes).map_err(to_sql_error)?,
+        tool_error_count: optional_u64_from_row(row, 8)?,
+        file_change_count: optional_u64_from_row(row, 9)?,
+        session_present: session_present
+            .map(|value| match value {
+                0 => Ok(false),
+                1 => Ok(true),
+                _ => Err(to_sql_error(StorageError::InvalidData(
+                    "stored session_present is invalid".into(),
+                ))),
+            })
+            .transpose()?,
+        tokens: serde_json::from_str(&tokens).map_err(to_sql_error)?,
+        model: model
+            .map(|value| serde_json::from_str(&value).map_err(to_sql_error))
+            .transpose()?,
+        provider_unknown_field_count: optional_u64_from_row(row, 13)?,
+        agent_duration_ms: optional_u64_from_row(row, 14)?,
+        evidence_rel_path: row.get(15)?,
+    };
+    validate_agent_execution_summary_shape(&summary).map_err(to_sql_error)?;
+    Ok(summary)
+}
+
+fn optional_u64_from_row(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Option<u64>> {
+    row.get::<_, Option<i64>>(index)?
+        .map(|value| u64::try_from(value).map_err(to_sql_error))
+        .transpose()
+}
+
 fn validate_run(run: &RunRecord) -> Result<(), StorageError> {
     if run.suite_id.is_empty() || run.suite_version.is_empty() {
         return Err(StorageError::InvalidData(
@@ -4131,6 +4265,156 @@ fn validate_task_result(result: &TaskResult) -> Result<(), StorageError> {
         ));
     }
     Ok(())
+}
+
+fn validate_agent_execution_summary(
+    summary: &AgentExecutionSummary,
+    result: &TaskResult,
+) -> Result<(), StorageError> {
+    if summary.run_id != result.run_id || summary.task_id != result.task_id {
+        return Err(StorageError::InvalidData(
+            "agent summary identity does not match task result".into(),
+        ));
+    }
+    validate_agent_execution_summary_shape(summary)
+}
+
+fn validate_agent_execution_summary_shape(
+    summary: &AgentExecutionSummary,
+) -> Result<(), StorageError> {
+    if summary.task_id.is_empty()
+        || summary.contract_version.is_empty()
+        || summary.contract_version.len() > 128
+        || summary.contract_version.chars().any(char::is_control)
+    {
+        return Err(StorageError::InvalidData(
+            "agent summary identity is invalid".into(),
+        ));
+    }
+    let command_counts = [
+        summary.command_succeeded,
+        summary.command_failed,
+        summary.command_unknown,
+    ];
+    let all_known = command_counts.iter().all(Option::is_some);
+    let all_unknown = command_counts.iter().all(Option::is_none);
+    let command_total = command_counts
+        .into_iter()
+        .flatten()
+        .try_fold(0_u64, u64::checked_add)
+        .ok_or_else(|| StorageError::InvalidData("agent command count overflow".into()))?;
+    let mut previous = None;
+    let mut exit_total = 0_u64;
+    for entry in &summary.exit_codes {
+        if entry.count == 0
+            || entry.count > 1_000_000
+            || previous.is_some_and(|code| code >= entry.code)
+        {
+            return Err(StorageError::InvalidData(
+                "agent exit-code summary is invalid".into(),
+            ));
+        }
+        previous = Some(entry.code);
+        exit_total = exit_total
+            .checked_add(entry.count)
+            .ok_or_else(|| StorageError::InvalidData("agent exit count overflow".into()))?;
+    }
+    if (!all_known && !all_unknown)
+        || command_total > 1_000_000
+        || summary.exit_codes.len() > 64
+        || (all_unknown && !summary.exit_codes.is_empty())
+        || exit_total > command_total
+        || summary.tool_error_count.is_some_and(|value| value > 32)
+        || summary
+            .file_change_count
+            .is_some_and(|value| value > 1_000_000)
+        || summary
+            .provider_unknown_field_count
+            .is_some_and(|value| value > 1_000_000)
+    {
+        return Err(StorageError::InvalidData(
+            "agent summary counts are invalid".into(),
+        ));
+    }
+    for token in [
+        summary.tokens.input,
+        summary.tokens.output,
+        summary.tokens.total,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        to_sqlite_u64(token, "agent token count")?;
+    }
+    if let Some(model) = &summary.model {
+        if !safe_agent_label(&model.requested_model, 120)
+            || model
+                .observed_model
+                .as_deref()
+                .is_some_and(|value| !safe_agent_label(value, 120))
+            || !matches!(
+                model.source.as_str(),
+                "provider" | "request_only" | "unavailable"
+            )
+            || (model.source == "provider") != model.observed_model.is_some()
+        {
+            return Err(StorageError::InvalidData(
+                "agent model summary is invalid".into(),
+            ));
+        }
+    }
+    if let Some(path) = &summary.evidence_rel_path {
+        let expected = format!("runs/{}/evidence/{}.json", summary.run_id, summary.task_id);
+        if path != &expected || !is_safe_relative_path(path) {
+            return Err(StorageError::InvalidData(
+                "agent evidence path is invalid".into(),
+            ));
+        }
+    }
+    let has_private_evidence = summary.evidence_rel_path.is_some();
+    match summary.status {
+        AgentExecutionStatus::Completed => {
+            if has_private_evidence
+                && (summary.tool_error_count.is_none()
+                    || summary.session_present.is_none()
+                    || summary.model.is_none()
+                    || summary.provider_unknown_field_count.is_none()
+                    || summary.agent_duration_ms.is_none())
+            {
+                return Err(StorageError::InvalidData(
+                    "completed agent evidence summary is incomplete".into(),
+                ));
+            }
+        }
+        AgentExecutionStatus::ProviderError
+        | AgentExecutionStatus::TimedOut
+        | AgentExecutionStatus::Cancelled => {
+            if has_private_evidence
+                || !all_unknown
+                || summary.tool_error_count.is_some()
+                || summary.file_change_count.is_some()
+                || summary.session_present.is_some()
+                || summary.tokens.input.is_some()
+                || summary.tokens.output.is_some()
+                || summary.tokens.total.is_some()
+                || summary.model.is_some()
+                || summary.provider_unknown_field_count.is_some()
+                || summary.agent_duration_ms.is_some()
+            {
+                return Err(StorageError::InvalidData(
+                    "unfinished agent status contains fabricated evidence".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn safe_agent_label(value: &str, max_bytes: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_bytes
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
 }
 
 fn validate_retry_marker(result: &TaskResult) -> Result<(), StorageError> {

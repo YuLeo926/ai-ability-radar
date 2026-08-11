@@ -55,7 +55,7 @@ async function main() {
     const result = await probeRuntime(process.argv[2]);
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } catch {
-    process.stderr.write("promptfoo-agent-v1 probe failed\n");
+    process.stderr.write(`${CONTRACT_VERSION} probe failed\n`);
     process.exitCode = 1;
   }
 }

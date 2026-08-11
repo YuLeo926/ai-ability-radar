@@ -364,7 +364,7 @@ function LocalDataControls() {
       <p className="section-kicker">仅保存在本机</p>
       <h2 id="local-data-title">本地数据</h2>
       <p>
-        到期只删除原始回答、CLI 日志和工作区副本；体检记录、任务证据、分数与摘要会保留。
+        到期只删除原始回答、CLI 日志、工作区副本和 Agent 本地诊断详情；体检记录、任务证据、分数与安全摘要会保留。
       </p>
       {settingsError ? (
         <p role="alert">暂时无法读取本地数据设置，请稍后重试。</p>

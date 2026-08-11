@@ -1,17 +1,19 @@
 use crate::{
-    AdapterCompletion, AdapterError, AgentAdapter, ExecutionRequest, VerificationGrade,
+    AdapterCompletion, AdapterError, AgentAdapter, AgentExecutionEvidence, AgentModelEvidence,
+    ExecutionRequest, ModelEvidenceSource, StoredAgentExecutionEvidence, VerificationGrade,
     WorkspaceVerifier,
 };
 use ability_core::{
-    ArtifactStore, BatchMemberStatus, BatchReservation, EnvironmentFingerprint, FailureKind,
-    GraderSpec, LoadedPack, LoadedTask, RecoveryArtifactCheckpoint, RunMode, RunRecord,
-    RunRepository, RunStatus, StorageError, TargetKind, TargetSelection, TaskOutcome, TaskResult,
-    summarize_scores, validate_recovery, validate_recovery_checkpoints,
+    AgentExecutionStatus, AgentExecutionSummary, AgentExitCodeCount, AgentModelSummary,
+    AgentTokenSummary, ArtifactStore, BatchMemberStatus, BatchReservation, EnvironmentFingerprint,
+    FailureKind, GraderSpec, LoadedPack, LoadedTask, RecoveryArtifactCheckpoint, RunMode,
+    RunRecord, RunRepository, RunStatus, StorageError, TargetKind, TargetSelection, TaskOutcome,
+    TaskResult, summarize_scores, validate_recovery, validate_recovery_checkpoints,
 };
 #[cfg(test)]
 use ability_core::{ModelSource, ModelVerification};
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -69,6 +71,8 @@ pub enum CliRunError {
     CountOverflow,
     #[error("duration exceeds the supported range")]
     DurationOverflow,
+    #[error("agent execution evidence is inconsistent with the current task")]
+    InvalidAgentEvidence,
     #[error("storage failed: {0}")]
     Storage(#[from] StorageError),
     #[error("workspace I/O failed: {0}")]
@@ -198,6 +202,7 @@ impl CliRunService {
         }
 
         let results = self.repository.get_task_results(run.id)?;
+        let agent_summaries = self.repository.get_agent_execution_summaries(run.id)?;
         let retry_marker = if run.status == RunStatus::Interrupted {
             validate_cli_recovery_with_retry_marker(
                 run,
@@ -223,18 +228,11 @@ impl CliRunService {
                 .iter()
                 .map(|task| task.definition.id.clone())
                 .collect::<Vec<_>>();
-            let checkpoints = results
-                .iter()
-                .filter(|result| {
-                    retry_marker
-                        .as_ref()
-                        .is_none_or(|marker| marker.task_id != result.task_id)
-                })
-                .map(|result| RecoveryArtifactCheckpoint {
-                    task_id: result.task_id.clone(),
-                    raw_artifact: result.answer_rel_path.is_some(),
-                })
-                .collect::<Vec<_>>();
+            let checkpoints = recovery_artifact_checkpoints(
+                &results,
+                &agent_summaries,
+                retry_marker.as_ref().map(|marker| marker.task_id.as_str()),
+            )?;
             ArtifactStore::new(self.artifact_root.clone())
                 .prepare_recovery_artifacts(run.id, run.target.kind, &pack_task_ids, &checkpoints)
                 .map_err(|_| CliRunError::NotResumable)?;
@@ -262,6 +260,7 @@ impl CliRunService {
             .get_run(run_id)?
             .ok_or(CliRunError::NotResumable)?;
         let preflight_results = self.repository.get_task_results(run_id)?;
+        let preflight_agent_summaries = self.repository.get_agent_execution_summaries(run_id)?;
         let retry_marker = validate_cli_recovery_with_retry_marker(
             &preflight_run,
             &preflight_results,
@@ -270,6 +269,7 @@ impl CliRunService {
             &current_environment,
         )
         .map_err(|_| CliRunError::NotResumable)?;
+        let retry_task_id = retry_marker.as_ref().map(|marker| marker.task_id.clone());
         let validate = |run: &RunRecord, results: &[TaskResult]| {
             if run.target != expected_target {
                 return Err(StorageError::InvalidData(
@@ -280,13 +280,11 @@ impl CliRunService {
                 StorageError::InvalidData("sealed CLI pack is not resumable".into())
             })?;
             validate_recovery(run, results, pack, &current_environment, true)?;
-            let checkpoints = results
-                .iter()
-                .map(|result| RecoveryArtifactCheckpoint {
-                    task_id: result.task_id.clone(),
-                    raw_artifact: result.answer_rel_path.is_some(),
-                })
-                .collect::<Vec<_>>();
+            let checkpoints = recovery_artifact_checkpoints(
+                results,
+                &preflight_agent_summaries,
+                retry_task_id.as_deref(),
+            )?;
             artifact_store
                 .prepare_recovery_artifacts(run.id, run.target.kind, &pack_task_ids, &checkpoints)
                 .map_err(|_| {
@@ -503,15 +501,20 @@ impl CliRunService {
                 reasoning_effort: run.target.reasoning_effort.clone(),
             };
 
-            let mut result = match adapter.execute(request, cancellation.child_token()).await {
-                Ok(AdapterCompletion::Completed {
-                    duration_ms,
-                    stdout,
-                    stderr,
-                    evidence: _,
-                }) => {
-                    let log_relative =
-                        match self.write_agent_log(run_id, &task.definition.id, &stdout, &stderr) {
+            let (mut result, mut agent_status, agent_duration_ms, mut agent_evidence) =
+                match adapter.execute(request, cancellation.child_token()).await {
+                    Ok(AdapterCompletion::Completed {
+                        duration_ms,
+                        stdout,
+                        stderr,
+                        evidence,
+                    }) => {
+                        let log_relative = match self.write_agent_log(
+                            run_id,
+                            &task.definition.id,
+                            &stdout,
+                            &stderr,
+                        ) {
                             Ok(relative) => relative,
                             Err(error) => {
                                 return Err(self.interrupt_after_error(
@@ -523,11 +526,32 @@ impl CliRunService {
                                 ));
                             }
                         };
-                    let grade = if cancellation.is_cancelled() {
-                        cancelled_grade("agent_cancelled_after_completion")
-                    } else {
-                        let verifier_id = match external_verifier_id(task) {
-                            Ok(verifier_id) => verifier_id,
+                        let grade = if cancellation.is_cancelled() {
+                            cancelled_grade("agent_cancelled_after_completion")
+                        } else {
+                            let verifier_id = match external_verifier_id(task) {
+                                Ok(verifier_id) => verifier_id,
+                                Err(error) => {
+                                    return Err(self.interrupt_after_error(
+                                        run_id,
+                                        error,
+                                        &events,
+                                        completed_tasks,
+                                        total_tasks,
+                                    ));
+                                }
+                            };
+                            verifier
+                                .verify(verifier_id, &workspace, cancellation.child_token())
+                                .await
+                        };
+                        match task_result(run_id, task, grade, Some(log_relative), duration_ms) {
+                            Ok(result) => (
+                                result,
+                                AgentExecutionStatus::Completed,
+                                Some(duration_ms),
+                                evidence,
+                            ),
                             Err(error) => {
                                 return Err(self.interrupt_after_error(
                                     run_id,
@@ -537,52 +561,37 @@ impl CliRunService {
                                     total_tasks,
                                 ));
                             }
+                        }
+                    }
+                    Err(error) => {
+                        let status = adapter_error_execution_status(&error);
+                        let budget_ms = match task.definition.time_budget_secs.checked_mul(1_000) {
+                            Some(value) => value,
+                            None => {
+                                return Err(self.interrupt_after_error(
+                                    run_id,
+                                    CliRunError::DurationOverflow,
+                                    &events,
+                                    completed_tasks,
+                                    total_tasks,
+                                ));
+                            }
                         };
-                        verifier
-                            .verify(verifier_id, &workspace, cancellation.child_token())
-                            .await
-                    };
-                    match task_result(run_id, task, grade, Some(log_relative), duration_ms) {
-                        Ok(result) => result,
-                        Err(error) => {
-                            return Err(self.interrupt_after_error(
-                                run_id,
-                                error,
-                                &events,
-                                completed_tasks,
-                                total_tasks,
-                            ));
+                        let grade = adapter_error_grade(error, budget_ms);
+                        match task_result(run_id, task, grade, None, 0) {
+                            Ok(result) => (result, status, None, None),
+                            Err(error) => {
+                                return Err(self.interrupt_after_error(
+                                    run_id,
+                                    error,
+                                    &events,
+                                    completed_tasks,
+                                    total_tasks,
+                                ));
+                            }
                         }
                     }
-                }
-                Err(error) => {
-                    let budget_ms = match task.definition.time_budget_secs.checked_mul(1_000) {
-                        Some(value) => value,
-                        None => {
-                            return Err(self.interrupt_after_error(
-                                run_id,
-                                CliRunError::DurationOverflow,
-                                &events,
-                                completed_tasks,
-                                total_tasks,
-                            ));
-                        }
-                    };
-                    let grade = adapter_error_grade(error, budget_ms);
-                    match task_result(run_id, task, grade, None, 0) {
-                        Ok(result) => result,
-                        Err(error) => {
-                            return Err(self.interrupt_after_error(
-                                run_id,
-                                error,
-                                &events,
-                                completed_tasks,
-                                total_tasks,
-                            ));
-                        }
-                    }
-                }
-            };
+                };
 
             if cancellation.is_cancelled() && result.outcome != TaskOutcome::Cancelled {
                 result.outcome = TaskOutcome::Cancelled;
@@ -590,15 +599,95 @@ impl CliRunService {
                 result.failure_kind = Some(FailureKind::UserCancelled);
                 result.detail = "user_cancelled_after_task_work".into();
             }
+            if result.outcome == TaskOutcome::Cancelled {
+                agent_status = AgentExecutionStatus::Cancelled;
+                agent_evidence = None;
+            }
+
+            let mut evidence_artifact = match agent_evidence.as_ref() {
+                Some(evidence) => match self.write_agent_evidence(
+                    run_id,
+                    &task.definition.id,
+                    adapter.contract_version(),
+                    evidence,
+                ) {
+                    Ok(artifact) => Some(artifact),
+                    Err(error) => {
+                        return Err(self.interrupt_after_error(
+                            run_id,
+                            error,
+                            &events,
+                            completed_tasks,
+                            total_tasks,
+                        ));
+                    }
+                },
+                None => None,
+            };
+            let summary = match build_agent_execution_summary(
+                run_id,
+                &task.definition.id,
+                adapter.contract_version(),
+                agent_status,
+                agent_duration_ms,
+                agent_evidence.as_ref(),
+                evidence_artifact
+                    .as_ref()
+                    .map(|artifact| artifact.relative.clone()),
+            ) {
+                Ok(summary) => summary,
+                Err(error) => {
+                    if let Some(artifact) = evidence_artifact.as_mut() {
+                        if let Err(cleanup) = artifact.cleanup() {
+                            return Err(self.interrupt_after_error(
+                                run_id,
+                                CliRunError::CleanupFailed {
+                                    original: Box::new(error),
+                                    cleanup,
+                                },
+                                &events,
+                                completed_tasks,
+                                total_tasks,
+                            ));
+                        }
+                    }
+                    return Err(self.interrupt_after_error(
+                        run_id,
+                        error,
+                        &events,
+                        completed_tasks,
+                        total_tasks,
+                    ));
+                }
+            };
             let checkpoint = match batch {
-                Some(binding) => self.repository.save_cli_batch_task_result(
-                    binding.batch_id,
-                    binding.member_ordinal,
-                    &result,
-                ),
-                None => self.repository.save_task_result(&result),
+                Some(binding) => self
+                    .repository
+                    .save_cli_batch_task_result_with_agent_summary(
+                        binding.batch_id,
+                        binding.member_ordinal,
+                        &result,
+                        &summary,
+                    ),
+                None => self
+                    .repository
+                    .save_task_result_with_agent_summary(&result, &summary),
             };
             if let Err(error) = checkpoint {
+                if let Some(artifact) = evidence_artifact.as_mut() {
+                    if let Err(cleanup) = artifact.cleanup() {
+                        return Err(self.interrupt_after_error(
+                            run_id,
+                            CliRunError::CleanupFailed {
+                                original: Box::new(CliRunError::Storage(error)),
+                                cleanup,
+                            },
+                            &events,
+                            completed_tasks,
+                            total_tasks,
+                        ));
+                    }
+                }
                 return Err(self.interrupt_after_error(
                     run_id,
                     CliRunError::Storage(error),
@@ -606,6 +695,9 @@ impl CliRunService {
                     completed_tasks,
                     total_tasks,
                 ));
+            }
+            if let Some(artifact) = evidence_artifact.as_mut() {
+                artifact.keep();
             }
             completed_tasks = match completed_tasks.checked_add(1) {
                 Some(value) => value,
@@ -855,6 +947,77 @@ impl CliRunService {
         }
     }
 
+    fn write_agent_evidence(
+        &self,
+        run_id: Uuid,
+        task_id: &str,
+        contract_version: &str,
+        evidence: &AgentExecutionEvidence,
+    ) -> Result<CreatedEvidenceArtifact, CliRunError> {
+        validate_task_component(task_id)?;
+        if evidence.run_id != run_id || evidence.contract_version != contract_version {
+            return Err(CliRunError::InvalidAgentEvidence);
+        }
+
+        let relative = format!("runs/{run_id}/evidence/{task_id}.json");
+        let path = self.artifact_root.join(Path::new(&relative));
+        if !path.starts_with(&self.artifact_root) {
+            return Err(CliRunError::UnsafeArtifactPath);
+        }
+        let temporary = path.with_file_name(format!(".{task_id}.{}.tmp", Uuid::new_v4()));
+        let stored = StoredAgentExecutionEvidence {
+            schema_version: 1,
+            run_id,
+            task_id: task_id.to_owned(),
+            evidence: evidence.clone(),
+        };
+
+        let mut created = CreatedArtifacts::default();
+        let result = (|| {
+            ensure_directory_chain(
+                path.parent().ok_or(CliRunError::UnsafeArtifactPath)?,
+                &mut created,
+            )?;
+            ensure_under_root(
+                &self.artifact_root,
+                path.parent().ok_or(CliRunError::UnsafeArtifactPath)?,
+            )?;
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .map_err(map_create_error)?;
+            created.files.push(temporary.clone());
+            serde_json::to_writer(&mut file, &stored)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            use std::io::Write;
+            file.write_all(b"\n")?;
+            file.sync_all()?;
+            drop(file);
+
+            fs::hard_link(&temporary, &path).map_err(map_create_error)?;
+            created.files.push(path.clone());
+            remove_created_file(&temporary)?;
+            created.files.retain(|candidate| candidate != &temporary);
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => Ok(CreatedEvidenceArtifact {
+                relative,
+                created,
+                retained: false,
+            }),
+            Err(error) => match created.cleanup() {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(CliRunError::CleanupFailed {
+                    original: Box::new(error),
+                    cleanup,
+                }),
+            },
+        }
+    }
+
     fn interrupt_after_error(
         &self,
         run_id: Uuid,
@@ -999,6 +1162,49 @@ fn validate_cli_recovery_with_retry_marker(
     Ok(Some(marker.clone()))
 }
 
+fn recovery_artifact_checkpoints(
+    results: &[TaskResult],
+    summaries: &[AgentExecutionSummary],
+    excluded_task_id: Option<&str>,
+) -> Result<Vec<RecoveryArtifactCheckpoint>, StorageError> {
+    let result_by_task = results
+        .iter()
+        .map(|result| (result.task_id.as_str(), result))
+        .collect::<HashMap<_, _>>();
+    let mut summary_by_task = HashMap::with_capacity(summaries.len());
+    for summary in summaries {
+        if excluded_task_id == Some(summary.task_id.as_str()) {
+            continue;
+        }
+        let Some(result) = result_by_task.get(summary.task_id.as_str()) else {
+            return Err(StorageError::InvalidData(
+                "agent summary has no matching task checkpoint".into(),
+            ));
+        };
+        if summary.run_id != result.run_id
+            || summary_by_task
+                .insert(summary.task_id.as_str(), summary)
+                .is_some()
+        {
+            return Err(StorageError::InvalidData(
+                "agent summary checkpoint identity is inconsistent".into(),
+            ));
+        }
+    }
+
+    Ok(results
+        .iter()
+        .filter(|result| excluded_task_id != Some(result.task_id.as_str()))
+        .map(|result| RecoveryArtifactCheckpoint {
+            task_id: result.task_id.clone(),
+            raw_artifact: result.answer_rel_path.is_some(),
+            agent_evidence_artifact: summary_by_task
+                .get(result.task_id.as_str())
+                .is_some_and(|summary| summary.evidence_rel_path.is_some()),
+        })
+        .collect())
+}
+
 struct CreatedWorkspace {
     path: PathBuf,
     created: CreatedArtifacts,
@@ -1038,6 +1244,143 @@ pub fn adapter_error_grade(error: AdapterError, budget_ms: u64) -> VerificationG
             detail,
             duration_ms: 0,
         },
+    }
+}
+
+fn adapter_error_execution_status(error: &AdapterError) -> AgentExecutionStatus {
+    match error {
+        AdapterError::Cancelled => AgentExecutionStatus::Cancelled,
+        AdapterError::AgentBudgetExceeded
+        | AdapterError::Infrastructure {
+            kind: FailureKind::InfrastructureTimeout,
+            ..
+        } => AgentExecutionStatus::TimedOut,
+        AdapterError::Unavailable | AdapterError::Infrastructure { .. } => {
+            AgentExecutionStatus::ProviderError
+        }
+    }
+}
+
+fn build_agent_execution_summary(
+    run_id: Uuid,
+    task_id: &str,
+    contract_version: &str,
+    status: AgentExecutionStatus,
+    duration_ms: Option<u64>,
+    evidence: Option<&AgentExecutionEvidence>,
+    evidence_rel_path: Option<String>,
+) -> Result<AgentExecutionSummary, CliRunError> {
+    if status != AgentExecutionStatus::Completed {
+        if evidence.is_some() || evidence_rel_path.is_some() {
+            return Err(CliRunError::InvalidAgentEvidence);
+        }
+        return Ok(empty_agent_execution_summary(
+            run_id,
+            task_id,
+            contract_version,
+            status,
+        ));
+    }
+
+    let Some(evidence) = evidence else {
+        let mut summary = empty_agent_execution_summary(
+            run_id,
+            task_id,
+            contract_version,
+            AgentExecutionStatus::Completed,
+        );
+        summary.agent_duration_ms = duration_ms;
+        return Ok(summary);
+    };
+    if evidence.run_id != run_id
+        || evidence.contract_version != contract_version
+        || evidence_rel_path.is_none()
+    {
+        return Err(CliRunError::InvalidAgentEvidence);
+    }
+
+    let provider_unknown_field_count =
+        u64::try_from(evidence.provider_summary.unknown_fields.len())
+            .map_err(|_| CliRunError::CountOverflow)?
+            .checked_add(evidence.provider_summary.discarded_field_count)
+            .ok_or(CliRunError::CountOverflow)?;
+    let tool_error_count =
+        u64::try_from(evidence.tool_error_summary.len()).map_err(|_| CliRunError::CountOverflow)?;
+    let mut exit_codes = evidence
+        .command_summary
+        .exit_codes
+        .iter()
+        .map(|entry| AgentExitCodeCount {
+            code: entry.code,
+            count: entry.count,
+        })
+        .collect::<Vec<_>>();
+    exit_codes.sort_by_key(|entry| entry.code);
+
+    Ok(AgentExecutionSummary {
+        run_id,
+        task_id: task_id.to_owned(),
+        contract_version: contract_version.to_owned(),
+        status,
+        command_succeeded: evidence.command_summary.succeeded,
+        command_failed: evidence.command_summary.failed,
+        command_unknown: evidence.command_summary.unknown,
+        exit_codes,
+        tool_error_count: Some(tool_error_count),
+        file_change_count: evidence.file_change_count,
+        session_present: Some(evidence.session_present),
+        tokens: AgentTokenSummary {
+            input: evidence.tokens.input,
+            output: evidence.tokens.output,
+            total: evidence.tokens.total,
+        },
+        model: Some(model_summary(&evidence.model_evidence)),
+        provider_unknown_field_count: Some(provider_unknown_field_count),
+        agent_duration_ms: duration_ms,
+        evidence_rel_path,
+    })
+}
+
+fn empty_agent_execution_summary(
+    run_id: Uuid,
+    task_id: &str,
+    contract_version: &str,
+    status: AgentExecutionStatus,
+) -> AgentExecutionSummary {
+    AgentExecutionSummary {
+        run_id,
+        task_id: task_id.to_owned(),
+        contract_version: contract_version.to_owned(),
+        status,
+        command_succeeded: None,
+        command_failed: None,
+        command_unknown: None,
+        exit_codes: Vec::new(),
+        tool_error_count: None,
+        file_change_count: None,
+        session_present: None,
+        tokens: AgentTokenSummary {
+            input: None,
+            output: None,
+            total: None,
+        },
+        model: None,
+        provider_unknown_field_count: None,
+        agent_duration_ms: None,
+        evidence_rel_path: None,
+    }
+}
+
+fn model_summary(evidence: &AgentModelEvidence) -> AgentModelSummary {
+    AgentModelSummary {
+        requested_model: evidence.requested_model.clone(),
+        observed_model: evidence.observed_model.clone(),
+        source: match evidence.source {
+            ModelEvidenceSource::Provider => "provider",
+            ModelEvidenceSource::RequestOnly => "request_only",
+            ModelEvidenceSource::Unavailable => "unavailable",
+        }
+        .into(),
     }
 }
 
@@ -1385,6 +1728,32 @@ fn map_create_error(error: io::Error) -> CliRunError {
 struct CreatedArtifacts {
     files: Vec<PathBuf>,
     directories: Vec<PathBuf>,
+}
+
+struct CreatedEvidenceArtifact {
+    relative: String,
+    created: CreatedArtifacts,
+    retained: bool,
+}
+
+impl CreatedEvidenceArtifact {
+    fn keep(&mut self) {
+        self.retained = true;
+        self.created.files.clear();
+        self.created.directories.clear();
+    }
+
+    fn cleanup(&mut self) -> io::Result<()> {
+        self.created.cleanup()
+    }
+}
+
+impl Drop for CreatedEvidenceArtifact {
+    fn drop(&mut self) {
+        if !self.retained {
+            let _ = self.created.cleanup();
+        }
+    }
 }
 
 impl CreatedArtifacts {

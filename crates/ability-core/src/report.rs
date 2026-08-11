@@ -1,10 +1,10 @@
 use crate::{
-    AdapterLaunchKind, BaselineExclusionReason, BatchAnalysis, BatchExecutionSurface, BatchMode,
-    BatchStatus, Category, ConfidenceInterval, DistributionSummary, FailureKind, MatchedTaskDelta,
-    ModelSource, ModelVerification, RegressionSignal, RunRecord, RunStatus, ScanBatchRecord,
-    ScoreSummary, SessionIsolationPolicy, TargetKind, TaskOutcome, TaskResult,
-    contains_forbidden_display_character, grading::has_coherent_task_evidence,
-    is_valid_reported_model, summarize_scores,
+    AdapterLaunchKind, AgentExecutionStatus, AgentExecutionSummary, BaselineExclusionReason,
+    BatchAnalysis, BatchExecutionSurface, BatchMode, BatchStatus, Category, ConfidenceInterval,
+    DistributionSummary, FailureKind, MatchedTaskDelta, ModelSource, ModelVerification,
+    RegressionSignal, RunRecord, RunStatus, ScanBatchRecord, ScoreSummary, SessionIsolationPolicy,
+    TargetKind, TaskOutcome, TaskResult, contains_forbidden_display_character,
+    grading::has_coherent_task_evidence, is_valid_reported_model, summarize_scores,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use regex::Regex;
@@ -15,7 +15,7 @@ use std::sync::OnceLock;
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const PUBLIC_REPORT_SCHEMA_VERSION: u32 = 2;
+pub const PUBLIC_REPORT_SCHEMA_VERSION: u32 = 3;
 pub const PUBLIC_BATCH_REPORT_SCHEMA_VERSION: u32 = 1;
 pub const PUBLIC_INTERPRETATION_STATUS: &str = "not_evaluated";
 pub const PUBLIC_METHODOLOGY_STATEMENT: &str =
@@ -69,6 +69,24 @@ pub struct PublicResult {
     pub outcome_counts: BTreeMap<String, u32>,
     pub failure_counts: BTreeMap<FailureKind, u32>,
     pub total_duration_ms: u64,
+    pub agent_execution: PublicAgentExecution,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PublicAgentExecution {
+    pub recorded_tasks: u32,
+    pub status_counts: BTreeMap<String, u32>,
+    pub command_summary_tasks: u32,
+    pub command_succeeded: u64,
+    pub command_failed: u64,
+    pub command_unknown: u64,
+    pub tool_error_summary_tasks: u32,
+    pub tool_error_count: u64,
+    pub file_change_summary_tasks: u32,
+    pub file_change_count: u64,
+    pub model_evidence_tasks: u32,
+    pub model_evidence_source_counts: BTreeMap<String, u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -407,6 +425,186 @@ fn baseline_exclusion_name(reason: BaselineExclusionReason) -> &'static str {
     }
 }
 
+fn public_agent_execution(
+    run: &RunRecord,
+    tasks: &[TaskResult],
+    summaries: &[AgentExecutionSummary],
+) -> Result<PublicAgentExecution, ReportError> {
+    if matches!(
+        run.target.kind,
+        TargetKind::ChatGptClient | TargetKind::ClaudeClient
+    ) && !summaries.is_empty()
+    {
+        return Err(ReportError::InvalidData("agentExecution.target"));
+    }
+    let task_ids = tasks
+        .iter()
+        .map(|task| task.task_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut seen = BTreeSet::new();
+    let mut public = PublicAgentExecution {
+        recorded_tasks: u32::try_from(summaries.len())
+            .map_err(|_| ReportError::InvalidData("agentExecution.counts"))?,
+        status_counts: BTreeMap::new(),
+        command_summary_tasks: 0,
+        command_succeeded: 0,
+        command_failed: 0,
+        command_unknown: 0,
+        tool_error_summary_tasks: 0,
+        tool_error_count: 0,
+        file_change_summary_tasks: 0,
+        file_change_count: 0,
+        model_evidence_tasks: 0,
+        model_evidence_source_counts: BTreeMap::new(),
+    };
+    for summary in summaries {
+        if summary.run_id != run.id
+            || !task_ids.contains(summary.task_id.as_str())
+            || !seen.insert(summary.task_id.as_str())
+            || summary.contract_version.is_empty()
+            || summary.contract_version.len() > 128
+            || summary.contract_version.chars().any(char::is_control)
+        {
+            return Err(ReportError::InvalidData("agentExecution.identity"));
+        }
+        *public
+            .status_counts
+            .entry(agent_execution_status_name(summary.status).into())
+            .or_insert(0) += 1;
+
+        let command_counts = [
+            summary.command_succeeded,
+            summary.command_failed,
+            summary.command_unknown,
+        ];
+        let commands_known = command_counts.iter().all(Option::is_some);
+        if !commands_known && !command_counts.iter().all(Option::is_none) {
+            return Err(ReportError::InvalidData("agentExecution.commands"));
+        }
+        if commands_known {
+            public.command_summary_tasks = public
+                .command_summary_tasks
+                .checked_add(1)
+                .ok_or(ReportError::InvalidData("agentExecution.counts"))?;
+            public.command_succeeded = public
+                .command_succeeded
+                .checked_add(summary.command_succeeded.unwrap_or(0))
+                .ok_or(ReportError::InvalidData("agentExecution.counts"))?;
+            public.command_failed = public
+                .command_failed
+                .checked_add(summary.command_failed.unwrap_or(0))
+                .ok_or(ReportError::InvalidData("agentExecution.counts"))?;
+            public.command_unknown = public
+                .command_unknown
+                .checked_add(summary.command_unknown.unwrap_or(0))
+                .ok_or(ReportError::InvalidData("agentExecution.counts"))?;
+        }
+        if let Some(count) = summary.tool_error_count {
+            public.tool_error_summary_tasks = public
+                .tool_error_summary_tasks
+                .checked_add(1)
+                .ok_or(ReportError::InvalidData("agentExecution.counts"))?;
+            public.tool_error_count = public
+                .tool_error_count
+                .checked_add(count)
+                .ok_or(ReportError::InvalidData("agentExecution.counts"))?;
+        }
+        if let Some(count) = summary.file_change_count {
+            public.file_change_summary_tasks = public
+                .file_change_summary_tasks
+                .checked_add(1)
+                .ok_or(ReportError::InvalidData("agentExecution.counts"))?;
+            public.file_change_count = public
+                .file_change_count
+                .checked_add(count)
+                .ok_or(ReportError::InvalidData("agentExecution.counts"))?;
+        }
+        if let Some(model) = &summary.model {
+            if !matches!(
+                model.source.as_str(),
+                "provider" | "request_only" | "unavailable"
+            ) {
+                return Err(ReportError::InvalidData("agentExecution.modelSource"));
+            }
+            public.model_evidence_tasks = public
+                .model_evidence_tasks
+                .checked_add(1)
+                .ok_or(ReportError::InvalidData("agentExecution.counts"))?;
+            *public
+                .model_evidence_source_counts
+                .entry(model.source.clone())
+                .or_insert(0) += 1;
+        }
+        if summary.status != AgentExecutionStatus::Completed
+            && (commands_known
+                || summary.tool_error_count.is_some()
+                || summary.file_change_count.is_some()
+                || summary.session_present.is_some()
+                || summary.tokens.input.is_some()
+                || summary.tokens.output.is_some()
+                || summary.tokens.total.is_some()
+                || summary.model.is_some()
+                || summary.provider_unknown_field_count.is_some()
+                || summary.agent_duration_ms.is_some()
+                || summary.evidence_rel_path.is_some())
+        {
+            return Err(ReportError::InvalidData("agentExecution.status"));
+        }
+    }
+    validate_public_agent_execution(&public, run.total_tasks)?;
+    Ok(public)
+}
+
+fn agent_execution_status_name(status: AgentExecutionStatus) -> &'static str {
+    match status {
+        AgentExecutionStatus::Completed => "completed",
+        AgentExecutionStatus::ProviderError => "provider_error",
+        AgentExecutionStatus::TimedOut => "timed_out",
+        AgentExecutionStatus::Cancelled => "cancelled",
+    }
+}
+
+fn validate_public_agent_execution(
+    agent: &PublicAgentExecution,
+    total_tasks: u32,
+) -> Result<(), ReportError> {
+    let allowed_statuses = ["completed", "provider_error", "timed_out", "cancelled"];
+    let allowed_model_sources = ["provider", "request_only", "unavailable"];
+    let status_total = agent
+        .status_counts
+        .values()
+        .try_fold(0_u32, |total, count| total.checked_add(*count));
+    let model_total = agent
+        .model_evidence_source_counts
+        .values()
+        .try_fold(0_u32, |total, count| total.checked_add(*count));
+    if agent.recorded_tasks > total_tasks
+        || status_total != Some(agent.recorded_tasks)
+        || agent
+            .status_counts
+            .keys()
+            .any(|status| !allowed_statuses.contains(&status.as_str()))
+        || agent.command_summary_tasks > agent.recorded_tasks
+        || (agent.command_summary_tasks == 0
+            && (agent.command_succeeded != 0
+                || agent.command_failed != 0
+                || agent.command_unknown != 0))
+        || agent.tool_error_summary_tasks > agent.recorded_tasks
+        || (agent.tool_error_summary_tasks == 0 && agent.tool_error_count != 0)
+        || agent.file_change_summary_tasks > agent.recorded_tasks
+        || (agent.file_change_summary_tasks == 0 && agent.file_change_count != 0)
+        || agent.model_evidence_tasks > agent.recorded_tasks
+        || model_total != Some(agent.model_evidence_tasks)
+        || agent
+            .model_evidence_source_counts
+            .keys()
+            .any(|source| !allowed_model_sources.contains(&source.as_str()))
+    {
+        return Err(ReportError::InvalidData("agentExecution"));
+    }
+    Ok(())
+}
+
 pub fn validate_public_batch_report(report: &PublicBatchReport) -> Result<(), ReportError> {
     if report.schema_version != PUBLIC_BATCH_REPORT_SCHEMA_VERSION || report.report_id.is_nil() {
         return Err(ReportError::InvalidData("schemaVersion"));
@@ -518,8 +716,17 @@ pub fn build_public_report(
     run: &RunRecord,
     tasks: &[TaskResult],
 ) -> Result<PublicReport, ReportError> {
+    build_public_report_with_agent_summaries(run, tasks, &[])
+}
+
+pub fn build_public_report_with_agent_summaries(
+    run: &RunRecord,
+    tasks: &[TaskResult],
+    agent_summaries: &[AgentExecutionSummary],
+) -> Result<PublicReport, ReportError> {
     scan_source_strings(run)?;
     let total_duration_ms = validate_completed_evidence(run, tasks)?;
+    let agent_execution = public_agent_execution(run, tasks, agent_summaries)?;
     let score = run.score.as_ref();
     let mut outcome_counts = BTreeMap::new();
     let mut failure_counts = BTreeMap::new();
@@ -578,6 +785,7 @@ pub fn build_public_report(
             outcome_counts,
             failure_counts,
             total_duration_ms,
+            agent_execution,
         },
         methodology: PublicMethodology {
             interpretation_status: PUBLIC_INTERPRETATION_STATUS.into(),
@@ -675,6 +883,7 @@ pub fn validate_public_report(report: &PublicReport) -> Result<(), ReportError> 
     {
         return Err(ReportError::InvalidData("resultCounts"));
     }
+    validate_public_agent_execution(&result.agent_execution, result.total_tasks)?;
 
     if report.methodology.interpretation_status != PUBLIC_INTERPRETATION_STATUS
         || report.methodology.statement != PUBLIC_METHODOLOGY_STATEMENT
@@ -855,6 +1064,30 @@ pub fn render_public_report_html(report: &PublicReport) -> Result<String, Report
             })
             .collect::<String>()
     };
+    let agent = &report.result.agent_execution;
+    let agent_rows = if agent.recorded_tasks == 0 {
+        "<li><span>旧版本未记录</span><strong>0</strong></li>".into()
+    } else {
+        let mut rows = agent
+            .status_counts
+            .iter()
+            .map(|(status, count)| {
+                format!(
+                    "<li><span>执行状态 {}</span><strong>{count}</strong></li>",
+                    html_escape(status)
+                )
+            })
+            .collect::<String>();
+        rows.push_str(&format!(
+            "<li><span>命令成功 / 失败 / 未知</span><strong>{} / {} / {}</strong></li><li><span>工具错误</span><strong>{}</strong></li><li><span>文件修改事件</span><strong>{}</strong></li>",
+            agent.command_succeeded,
+            agent.command_failed,
+            agent.command_unknown,
+            agent.tool_error_count,
+            agent.file_change_count,
+        ));
+        rows
+    };
     let category_section = if category_rows.is_empty() {
         "<p>本次没有形成可计分分类。</p>".into()
     } else {
@@ -937,6 +1170,7 @@ dl{{display:grid;gap:.45rem}}dl div,.fact-list li{{display:flex;justify-content:
 <section aria-labelledby="category-title"><h2 id="category-title">分类分数</h2>{category_section}</section>
 <section aria-labelledby="outcome-title"><h2 id="outcome-title">客观结果计数</h2><ul class="fact-list">{outcome_rows}</ul></section>
 <section aria-labelledby="failure-title"><h2 id="failure-title">失败分类计数</h2><ul class="fact-list">{failure_rows}</ul></section>
+<section aria-labelledby="agent-title"><h2 id="agent-title">Agent 执行摘要</h2><ul class="fact-list">{agent_rows}</ul><p>只含状态和计数；不含回答、错误正文、命令、会话或文件路径。</p></section>
 <section class="boundary" aria-labelledby="boundary-title"><h2 id="boundary-title">解释边界 · {interpretation_status}</h2><p>{statement}</p></section>
 </div>
 <footer>报告编号 {report_id} · 生成时间 {generated_at} · 状态 completed</footer>
@@ -966,6 +1200,7 @@ dl{{display:grid;gap:.45rem}}dl div,.fact-list li{{display:flex;justify-content:
         category_section = category_section,
         outcome_rows = outcome_rows,
         failure_rows = failure_rows,
+        agent_rows = agent_rows,
         interpretation_status = PUBLIC_INTERPRETATION_STATUS,
         statement = statement,
         report_id = report.report_id,

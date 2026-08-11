@@ -94,20 +94,26 @@ fn public_report_matches_the_committed_schema() {
 }
 
 #[test]
-fn public_report_schema_is_v2_and_requires_provenance() {
+fn public_report_schema_is_v3_and_requires_provenance_and_safe_agent_summary() {
     let schema = schema();
     let target_required = schema["properties"]["target"]["required"]
         .as_array()
         .unwrap();
     let report = fixture_report();
 
-    assert_eq!(schema["title"], "AI Ability Radar public report v2");
-    assert_eq!(schema["properties"]["schemaVersion"]["const"], 2);
+    assert_eq!(schema["title"], "AI Ability Radar public report v3");
+    assert_eq!(schema["properties"]["schemaVersion"]["const"], 3);
     assert!(target_required.contains(&json!("modelSource")));
     assert!(target_required.contains(&json!("modelVerification")));
-    assert_eq!(report["schemaVersion"], 2);
+    assert_eq!(report["schemaVersion"], 3);
     assert_eq!(report["target"]["modelSource"], "legacy_unknown");
     assert_eq!(report["target"]["modelVerification"], "legacy_unknown");
+    assert_eq!(report["result"]["agentExecution"]["recordedTasks"], 0);
+    assert!(
+        report["result"]["agentExecution"]
+            .get("finalText")
+            .is_none()
+    );
 }
 
 #[test]
@@ -250,6 +256,21 @@ fn schema_rejects_unknown_sensitive_fields_and_invalid_formats() {
     let mut with_unknown_target_field = fixture_report();
     with_unknown_target_field["target"]["providerModel"] = json!("private provider detail");
     assert!(!validator.is_valid(&with_unknown_target_field));
+
+    for forbidden in [
+        "finalText",
+        "toolErrors",
+        "command",
+        "sessionId",
+        "evidenceRelPath",
+    ] {
+        let mut report = fixture_report();
+        report["result"]["agentExecution"][forbidden] = json!("private");
+        assert!(
+            !validator.is_valid(&report),
+            "agent field {forbidden} must remain private"
+        );
+    }
 
     let mut with_unknown_source = fixture_report();
     with_unknown_source["target"]["modelSource"] = json!("future_source");

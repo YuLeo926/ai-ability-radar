@@ -180,6 +180,76 @@ export interface TaskResult {
   answerRelPath?: string | null;
 }
 
+export type AgentExecutionStatus =
+  | "completed"
+  | "provider_error"
+  | "timed_out"
+  | "cancelled";
+
+export interface AgentExitCodeCount {
+  code: number;
+  count: number;
+}
+
+export interface AgentTokenSummary {
+  input?: number | null;
+  output?: number | null;
+  total?: number | null;
+}
+
+export interface AgentModelSummary {
+  requestedModel: string;
+  observedModel?: string | null;
+  source: "provider" | "request_only" | "unavailable";
+}
+
+export interface AgentExecutionSummary {
+  taskId: string;
+  contractVersion: string;
+  status: AgentExecutionStatus;
+  commandSucceeded?: number | null;
+  commandFailed?: number | null;
+  commandUnknown?: number | null;
+  exitCodes: AgentExitCodeCount[];
+  toolErrorCount?: number | null;
+  fileChangeCount?: number | null;
+  sessionPresent?: boolean | null;
+  tokens: AgentTokenSummary;
+  model?: AgentModelSummary | null;
+  providerUnknownFieldCount?: number | null;
+  agentDurationMs?: number | null;
+  detailAvailable: boolean;
+}
+
+export interface AgentToolUsage {
+  name: string;
+  count: number;
+}
+
+export interface AgentToolError {
+  kind: string;
+  message: string;
+}
+
+export interface AgentExecutionDetail {
+  finalText: string;
+  sessionPresent: boolean;
+  tokens: AgentTokenSummary;
+  toolSummary: AgentToolUsage[];
+  commandSucceeded?: number | null;
+  commandFailed?: number | null;
+  commandUnknown?: number | null;
+  exitCodes: AgentExitCodeCount[];
+  toolErrors: AgentToolError[];
+  fileChangeCount?: number | null;
+  model: AgentModelSummary;
+  providerUnknownFieldCount: number;
+}
+
+export type AgentEvidenceResponse =
+  | { status: "available"; detail: AgentExecutionDetail }
+  | { status: "unavailable" };
+
 export interface ManualStep {
   runId: string;
   taskId: string;
@@ -191,6 +261,7 @@ export interface ManualStep {
 export interface RunDetail {
   run: RunRecord;
   taskResults: TaskResult[];
+  agentExecutionSummaries: AgentExecutionSummary[];
 }
 
 export interface StartRunInput {
@@ -254,6 +325,10 @@ export interface Backend {
   interruptManualRun(runId: string): Promise<boolean>;
   listRuns(): Promise<RunRecord[]>;
   getRunDetail(runId: string): Promise<RunDetail | null>;
+  getAgentExecutionDetail(
+    runId: string,
+    taskId: string,
+  ): Promise<AgentEvidenceResponse>;
   exportPublicReport(runId: string): Promise<string | null>;
   exportPublicBatchReport(batchId: string): Promise<string | null>;
   deleteRawArtifacts(runId: string): Promise<void>;
@@ -300,6 +375,7 @@ export interface Backend {
 
 type BatchBackendMethods = Pick<
   Backend,
+  | "getAgentExecutionDetail"
   | "estimateBatch"
   | "createAcknowledgedBatch"
   | "getBatch"
@@ -325,6 +401,7 @@ async function unsupportedBatchCall(): Promise<never> {
 }
 
 export const unsupportedBatchBackend: BatchBackendMethods = {
+  getAgentExecutionDetail: unsupportedBatchCall,
   estimateBatch: unsupportedBatchCall,
   createAcknowledgedBatch: unsupportedBatchCall,
   getBatch: unsupportedBatchCall,

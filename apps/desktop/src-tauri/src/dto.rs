@@ -1,8 +1,9 @@
 use ability_adapters::{RunEvent, TargetAvailability};
 use ability_core::{
-    BatchExecutionSurface, BatchFeatureLevel, BatchMode, Category, ExecutionAdapterIdentity,
-    FailureKind, ModelSource, ModelVerification, RunMode, RunRecord, ScanBatchMemberRecord,
-    ScanBatchPlan, ScanBatchTarget, TargetKind, TaskOutcome, TaskResult,
+    AgentExecutionStatus, AgentExecutionSummary, AgentExitCodeCount, AgentModelSummary,
+    AgentTokenSummary, BatchExecutionSurface, BatchFeatureLevel, BatchMode, Category,
+    ExecutionAdapterIdentity, FailureKind, ModelSource, ModelVerification, RunMode, RunRecord,
+    ScanBatchMemberRecord, ScanBatchPlan, ScanBatchTarget, TargetKind, TaskOutcome, TaskResult,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -247,6 +248,13 @@ pub struct RunIdInput {
     pub run_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentEvidenceInput {
+    pub run_id: String,
+    pub task_id: String,
+}
+
 fn deserialize_required_nullable_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -331,6 +339,87 @@ pub struct DataSettingsDto {
 pub struct RunDetailDto {
     pub run: RunRecord,
     pub task_results: Vec<TaskResultDto>,
+    pub agent_execution_summaries: Vec<AgentExecutionSummaryDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentExecutionSummaryDto {
+    pub task_id: String,
+    pub contract_version: String,
+    pub status: AgentExecutionStatus,
+    pub command_succeeded: Option<u64>,
+    pub command_failed: Option<u64>,
+    pub command_unknown: Option<u64>,
+    pub exit_codes: Vec<AgentExitCodeCount>,
+    pub tool_error_count: Option<u64>,
+    pub file_change_count: Option<u64>,
+    pub session_present: Option<bool>,
+    pub tokens: AgentTokenSummary,
+    pub model: Option<AgentModelSummary>,
+    pub provider_unknown_field_count: Option<u64>,
+    pub agent_duration_ms: Option<u64>,
+    pub detail_available: bool,
+}
+
+impl From<AgentExecutionSummary> for AgentExecutionSummaryDto {
+    fn from(summary: AgentExecutionSummary) -> Self {
+        Self {
+            task_id: summary.task_id,
+            contract_version: summary.contract_version,
+            status: summary.status,
+            command_succeeded: summary.command_succeeded,
+            command_failed: summary.command_failed,
+            command_unknown: summary.command_unknown,
+            exit_codes: summary.exit_codes,
+            tool_error_count: summary.tool_error_count,
+            file_change_count: summary.file_change_count,
+            session_present: summary.session_present,
+            tokens: summary.tokens,
+            model: summary.model,
+            provider_unknown_field_count: summary.provider_unknown_field_count,
+            agent_duration_ms: summary.agent_duration_ms,
+            detail_available: summary.evidence_rel_path.is_some(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentToolUsageDto {
+    pub name: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentToolErrorDto {
+    pub kind: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentExecutionDetailDto {
+    pub final_text: String,
+    pub session_present: bool,
+    pub tokens: AgentTokenSummary,
+    pub tool_summary: Vec<AgentToolUsageDto>,
+    pub command_succeeded: Option<u64>,
+    pub command_failed: Option<u64>,
+    pub command_unknown: Option<u64>,
+    pub exit_codes: Vec<AgentExitCodeCount>,
+    pub tool_errors: Vec<AgentToolErrorDto>,
+    pub file_change_count: Option<u64>,
+    pub model: AgentModelSummary,
+    pub provider_unknown_field_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", content = "detail", rename_all = "snake_case")]
+pub enum AgentEvidenceResponseDto {
+    Available(AgentExecutionDetailDto),
+    Unavailable,
 }
 
 #[derive(Debug, Clone, Serialize)]

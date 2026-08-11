@@ -95,6 +95,29 @@ pub struct AgentToolUsage {
     pub count: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct AgentExitCodeCount {
+    pub code: i32,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct AgentCommandSummary {
+    pub succeeded: Option<u64>,
+    pub failed: Option<u64>,
+    pub unknown: Option<u64>,
+    pub exit_codes: Vec<AgentExitCodeCount>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct AgentToolErrorSummary {
+    pub kind: String,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelEvidenceSource {
@@ -124,11 +147,23 @@ pub struct AgentExecutionEvidence {
     pub contract_version: String,
     pub run_id: uuid::Uuid,
     pub final_text: String,
-    pub session_id: Option<String>,
+    pub session_present: bool,
     pub tokens: AgentTokenUsage,
     pub tool_summary: Vec<AgentToolUsage>,
+    pub command_summary: AgentCommandSummary,
+    pub tool_error_summary: Vec<AgentToolErrorSummary>,
+    pub file_change_count: Option<u64>,
     pub model_evidence: AgentModelEvidence,
     pub provider_summary: AgentProviderSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StoredAgentExecutionEvidence {
+    pub schema_version: u32,
+    pub run_id: uuid::Uuid,
+    pub task_id: String,
+    pub evidence: AgentExecutionEvidence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

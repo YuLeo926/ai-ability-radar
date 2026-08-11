@@ -1,9 +1,9 @@
 use crate::{
-    AdapterCompletion, AdapterError, AgentAdapter, AgentExecutionEvidence, AgentModelEvidence,
-    AgentProviderSummary, AgentTokenUsage, AgentToolUsage, AuthState, AvailabilityStatus,
-    ClaudeCodeAdapter, CodexAdapter, ExecutionRequest, LaunchSource, ModelEvidenceSource,
-    PrerequisiteStatus, ProcessEnvironment, ProcessError, ProcessOutput, ProcessRunner,
-    ProcessSpec, TargetAvailability,
+    AdapterCompletion, AdapterError, AgentAdapter, AgentCommandSummary, AgentExecutionEvidence,
+    AgentModelEvidence, AgentProviderSummary, AgentTokenUsage, AgentToolErrorSummary,
+    AgentToolUsage, AuthState, AvailabilityStatus, ClaudeCodeAdapter, CodexAdapter,
+    ExecutionRequest, LaunchSource, ModelEvidenceSource, PrerequisiteStatus, ProcessEnvironment,
+    ProcessError, ProcessOutput, ProcessRunner, ProcessSpec, TargetAvailability,
 };
 use ability_core::{FailureKind, TargetKind};
 use async_trait::async_trait;
@@ -15,12 +15,13 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-pub const PROMPTFOO_AGENT_CONTRACT_VERSION: &str = "promptfoo-agent-v1";
+pub const PROMPTFOO_AGENT_CONTRACT_VERSION: &str = "promptfoo-agent-v2";
 const PROMPTFOO_VERSION: &str = "0.122.0";
 const CODEX_SDK_VERSION: &str = "0.147.0";
 const CLAUDE_SDK_VERSION: &str = "0.3.226";
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
-const MAX_FINAL_TEXT_BYTES: usize = 768 * 1024;
+const MAX_FINAL_TEXT_BYTES: usize = 64 * 1024;
+const MAX_TOOL_ERROR_TEXT_BYTES: usize = 512;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptfooRuntime {
@@ -575,9 +576,12 @@ struct RunnerResponse {
     run_id: Option<Uuid>,
     status: RunnerStatus,
     final_text: String,
-    session_id: Option<String>,
+    session_present: bool,
     tokens: AgentTokenUsage,
     tool_summary: Vec<AgentToolUsage>,
+    command_summary: AgentCommandSummary,
+    tool_error_summary: Vec<AgentToolErrorSummary>,
+    file_change_count: Option<u64>,
     model_evidence: RunnerModelEvidence,
     provider_summary: AgentProviderSummary,
     provider_error_code: Option<ProviderErrorCode>,
@@ -630,9 +634,12 @@ fn classify_runner_output(
                 contract_version: response.contract_version,
                 run_id: request.run_id,
                 final_text: response.final_text,
-                session_id: response.session_id,
+                session_present: response.session_present,
                 tokens: response.tokens,
                 tool_summary: response.tool_summary,
+                command_summary: response.command_summary,
+                tool_error_summary: response.tool_error_summary,
+                file_change_count: response.file_change_count,
                 model_evidence,
                 provider_summary: response.provider_summary,
             };
@@ -664,11 +671,28 @@ fn validate_runner_response(
         kind: FailureKind::AppInterrupted,
         detail: "Promptfoo runner returned invalid evidence".into(),
     };
+    let command_counts = [
+        response.command_summary.succeeded,
+        response.command_summary.failed,
+        response.command_summary.unknown,
+    ];
+    let command_counts_known = command_counts.iter().all(Option::is_some);
+    let command_counts_unknown = command_counts.iter().all(Option::is_none);
+    let command_total = command_counts
+        .into_iter()
+        .flatten()
+        .try_fold(0_u64, u64::checked_add);
+    let mut previous_exit_code = None;
+    let mut exit_code_count = 0_u64;
+    let exits_valid = response.command_summary.exit_codes.iter().all(|entry| {
+        let ordered = previous_exit_code.is_none_or(|previous| previous < entry.code);
+        previous_exit_code = Some(entry.code);
+        exit_code_count = exit_code_count.saturating_add(entry.count);
+        ordered && entry.count > 0 && entry.count <= 1_000_000
+    });
+
     if response.final_text.len() > MAX_FINAL_TEXT_BYTES
-        || response
-            .session_id
-            .as_deref()
-            .is_some_and(|value| !safe_label(value, 256))
+        || !safe_diagnostic_text(&response.final_text)
         || response.tool_summary.len() > 64
         || response.tool_summary.iter().any(|tool| {
             !safe_tool_name(&tool.name)
@@ -680,6 +704,22 @@ fn validate_runner_response(
                         "Read" | "Grep" | "Glob" | "Edit" | "Write" | "Bash"
                     ))
         })
+        || (!command_counts_known && !command_counts_unknown)
+        || command_total.is_none_or(|total| total > 1_000_000)
+        || response.command_summary.exit_codes.len() > 64
+        || !exits_valid
+        || (command_counts_unknown && !response.command_summary.exit_codes.is_empty())
+        || command_total.is_some_and(|total| exit_code_count > total)
+        || response.tool_error_summary.len() > 32
+        || response.tool_error_summary.iter().any(|error| {
+            !safe_error_kind(&error.kind)
+                || error.message.is_empty()
+                || error.message.len() > MAX_TOOL_ERROR_TEXT_BYTES
+                || !safe_diagnostic_text(&error.message)
+        })
+        || response
+            .file_change_count
+            .is_some_and(|count| count > 1_000_000)
         || response.provider_summary.unknown_fields.len() > 64
         || response
             .provider_summary
@@ -701,16 +741,43 @@ fn validate_runner_response(
     }
     if response.status == RunnerStatus::Error
         && (!response.final_text.is_empty()
-            || response.session_id.is_some()
+            || response.session_present
             || response.tokens.input.is_some()
             || response.tokens.output.is_some()
             || response.tokens.total.is_some()
             || !response.tool_summary.is_empty()
+            || response.command_summary.succeeded.is_some()
+            || response.command_summary.failed.is_some()
+            || response.command_summary.unknown.is_some()
+            || !response.command_summary.exit_codes.is_empty()
+            || !response.tool_error_summary.is_empty()
+            || response.file_change_count.is_some()
             || response.model_evidence.source != ModelEvidenceSource::Unavailable)
     {
         return Err(invalid());
     }
     Ok(())
+}
+
+fn safe_diagnostic_text(value: &str) -> bool {
+    value.chars().all(|character| match character {
+        '\n' | '\r' | '\t' => true,
+        '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}' | '\u{feff}' => false,
+        _ => !character.is_control(),
+    })
+}
+
+fn safe_error_kind(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .chars()
+            .enumerate()
+            .all(|(index, character)| match character {
+                'A'..='Z' | 'a'..='z' => true,
+                '0'..='9' | '_' | '.' | ':' | '-' => index > 0,
+                _ => false,
+            })
 }
 
 impl ProviderErrorCode {
