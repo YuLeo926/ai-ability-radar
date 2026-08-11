@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": "package-lock.json",
-  "lockfileSha256": "afb9a07309c110079819f5d85e02ceaaa866e10ff1e267f77efd92f1b8e4e33f",
+  "lockfileSha256": "da34649780d1a84179bb5a0d77ac53a9d1b9e26ad8828347f8ced019dadb1439",
   "hashNormalization": "UTF-8 text with CRLF and CR normalized to LF",
   "note": "Metadata inventory only; dependency license texts are not bundled here.",
   "licenseMetadataOverrides": [
@@ -3971,6 +3971,13 @@
     },
     {
       "name": "gcp-metadata",
+      "version": "7.0.1",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/gcp-metadata/-/gcp-metadata-7.0.1.tgz",
+      "integrity": "sha512-UcO3kefx6dCcZkgcTGgVOTFb7b1LlQ02hY1omMjjrrBzkajRMCFgYOjs7J71WqnuG1k2b+9ppGL7FsOfhZMQKQ=="
+    },
+    {
+      "name": "gcp-metadata",
       "version": "8.1.2",
       "license": "Apache-2.0",
       "resolved": "https://registry.npmjs.org/gcp-metadata/-/gcp-metadata-8.1.2.tgz",
@@ -4874,10 +4881,10 @@
     },
     {
       "name": "nanoid",
-      "version": "3.3.16",
+      "version": "3.3.18",
       "license": "MIT",
-      "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.16.tgz",
-      "integrity": "sha512-bzlKTyNJ7+LdGIIwy8ijFpIqEQIvafahV7eYykJ8Cvh42EdJeODoJ6gUJXpQJvej1BddH8OqTXZNE/KfbWAu8Q=="
+      "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.18.tgz",
+      "integrity": "sha512-DTg4MJbGMWkfi6VZFdNt2/caMbQy4Ou+Op/hJQvGEWcnVfoA1QA+xzRKAzw9jD6+GVOOeYr/mIcuDSdug6F6+w=="
     },
     {
       "name": "natural",
@@ -5350,10 +5357,10 @@
     },
     {
       "name": "postcss",
-      "version": "8.5.19",
+      "version": "8.5.26",
       "license": "MIT",
-      "resolved": "https://registry.npmjs.org/postcss/-/postcss-8.5.19.tgz",
-      "integrity": "sha512-Mz8SaolMd8nB+G13WkORcxQKHZ/NE4xXevtkJHVuG+guo9/wYKlIMTKAqGdEmYOXR2ijPjTYNHssizdaVSUNdQ=="
+      "resolved": "https://registry.npmjs.org/postcss/-/postcss-8.5.26.tgz",
+      "integrity": "sha512-u82N74LFzG8ca+dD8puPnplTXoGH4fTPpVGuIbt36G3qvNlkvfD0lEAZSxaly3KX8TS/L1A1gsCEmvKmBcVbkQ=="
     },
     {
       "name": "postgres-array",
@@ -6306,13 +6313,6 @@
       "license": "MIT",
       "resolved": "https://registry.npmjs.org/undici/-/undici-6.28.0.tgz",
       "integrity": "sha512-LIY910g9TI13YS95lrMFrs8Rm/u/irgHeTWoKCoteeJ04CUJ92eEfj0rVn+7VKMPBpUPiUoBKfhNyLI23EE/KA=="
-    },
-    {
-      "name": "undici",
-      "version": "7.28.0",
-      "license": "MIT",
-      "resolved": "https://registry.npmjs.org/undici/-/undici-7.28.0.tgz",
-      "integrity": "sha512-cRZYrTDwWznlnRiPjggAGxZXanty6M8RV1ff8Wm4LWXBp7/IG8v5DnOm74DtUBp9OONpK75YlPnIjQqX0dBDtA=="
     },
     {
       "name": "undici",
