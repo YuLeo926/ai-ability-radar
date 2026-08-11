@@ -8,6 +8,7 @@ import {
   mkdir,
   readFile,
   readdir,
+  realpath,
   rename,
   rm,
   stat,
@@ -153,7 +154,9 @@ async function assertNoFinalArchive(fixture) {
 }
 
 async function createFixture({ cli = false } = {}) {
-  const root = await mkdtemp(join(tmpdir(), "ability-radar-portable-"));
+  const root = await mkdtemp(
+    join(await realpath(tmpdir()), "ability-radar-portable-"),
+  );
   const repoRoot = join(root, "repo");
   const targetDir = cli
     ? join(repoRoot, "target", "release")
