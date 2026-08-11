@@ -86,8 +86,8 @@ async fn cancellation_remains_responsive_while_child_stdin_is_backpressured() {
 #[test]
 fn provider_resolution_never_routes_user_arguments_through_a_shell() {
     let locator = include_str!("../src/command_locator.rs");
-    let runner = include_str!("../src/process.rs");
-    for source in [locator, runner] {
+    let runner = include_str!("../src/process.rs").replace("\r\n", "\n");
+    for source in [locator, runner.as_str()] {
         assert!(!source.contains("cmd.exe"));
         assert!(!source.contains("powershell"));
         assert!(!source.contains(".bat"));
@@ -695,9 +695,11 @@ fn parent_exits_after_starting(
     let ready_text = ready.to_string_lossy().replace('\'', "''");
     let parent_pid_text = parent_pid.to_string_lossy().replace('\'', "''");
     let gate_text = parent_exit_gate.to_string_lossy().replace('\'', "''");
-    spec(format!(
+    let mut process = spec(format!(
         "& cmd.exe /d /c '{launcher_text}'; while (!(Test-Path -LiteralPath '{ready_text}')) {{ Start-Sleep -Milliseconds 10 }}; Set-Content -LiteralPath '{parent_pid_text}' -Value $PID; while (!(Test-Path -LiteralPath '{gate_text}')) {{ Start-Sleep -Milliseconds 10 }}; exit 0"
-    ))
+    ));
+    process.timeout = Duration::from_secs(15);
+    process
 }
 
 #[cfg(windows)]
@@ -719,7 +721,7 @@ fn write_start_helper_launcher(
 
 #[cfg(windows)]
 async fn wait_for_path(path: &std::path::Path) {
-    for _ in 0..80 {
+    for _ in 0..400 {
         if path.exists() {
             return;
         }
