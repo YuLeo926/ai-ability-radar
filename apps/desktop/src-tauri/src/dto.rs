@@ -418,7 +418,7 @@ pub struct AgentExecutionDetailDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "status", content = "detail", rename_all = "snake_case")]
 pub enum AgentEvidenceResponseDto {
-    Available(AgentExecutionDetailDto),
+    Available(Box<AgentExecutionDetailDto>),
     Unavailable,
 }
 

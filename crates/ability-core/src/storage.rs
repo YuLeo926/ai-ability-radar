@@ -4346,8 +4346,8 @@ fn validate_agent_execution_summary_shape(
     {
         to_sqlite_u64(token, "agent token count")?;
     }
-    if let Some(model) = &summary.model {
-        if !safe_agent_label(&model.requested_model, 120)
+    if let Some(model) = &summary.model
+        && (!safe_agent_label(&model.requested_model, 120)
             || model
                 .observed_model
                 .as_deref()
@@ -4356,12 +4356,11 @@ fn validate_agent_execution_summary_shape(
                 model.source.as_str(),
                 "provider" | "request_only" | "unavailable"
             )
-            || (model.source == "provider") != model.observed_model.is_some()
-        {
-            return Err(StorageError::InvalidData(
-                "agent model summary is invalid".into(),
-            ));
-        }
+            || (model.source == "provider") != model.observed_model.is_some())
+    {
+        return Err(StorageError::InvalidData(
+            "agent model summary is invalid".into(),
+        ));
     }
     if let Some(path) = &summary.evidence_rel_path {
         let expected = format!("runs/{}/evidence/{}.json", summary.run_id, summary.task_id);

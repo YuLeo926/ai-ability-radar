@@ -637,19 +637,19 @@ impl CliRunService {
             ) {
                 Ok(summary) => summary,
                 Err(error) => {
-                    if let Some(artifact) = evidence_artifact.as_mut() {
-                        if let Err(cleanup) = artifact.cleanup() {
-                            return Err(self.interrupt_after_error(
-                                run_id,
-                                CliRunError::CleanupFailed {
-                                    original: Box::new(error),
-                                    cleanup,
-                                },
-                                &events,
-                                completed_tasks,
-                                total_tasks,
-                            ));
-                        }
+                    if let Some(artifact) = evidence_artifact.as_mut()
+                        && let Err(cleanup) = artifact.cleanup()
+                    {
+                        return Err(self.interrupt_after_error(
+                            run_id,
+                            CliRunError::CleanupFailed {
+                                original: Box::new(error),
+                                cleanup,
+                            },
+                            &events,
+                            completed_tasks,
+                            total_tasks,
+                        ));
                     }
                     return Err(self.interrupt_after_error(
                         run_id,
@@ -674,19 +674,19 @@ impl CliRunService {
                     .save_task_result_with_agent_summary(&result, &summary),
             };
             if let Err(error) = checkpoint {
-                if let Some(artifact) = evidence_artifact.as_mut() {
-                    if let Err(cleanup) = artifact.cleanup() {
-                        return Err(self.interrupt_after_error(
-                            run_id,
-                            CliRunError::CleanupFailed {
-                                original: Box::new(CliRunError::Storage(error)),
-                                cleanup,
-                            },
-                            &events,
-                            completed_tasks,
-                            total_tasks,
-                        ));
-                    }
+                if let Some(artifact) = evidence_artifact.as_mut()
+                    && let Err(cleanup) = artifact.cleanup()
+                {
+                    return Err(self.interrupt_after_error(
+                        run_id,
+                        CliRunError::CleanupFailed {
+                            original: Box::new(CliRunError::Storage(error)),
+                            cleanup,
+                        },
+                        &events,
+                        completed_tasks,
+                        total_tasks,
+                    ));
                 }
                 return Err(self.interrupt_after_error(
                     run_id,

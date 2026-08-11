@@ -2417,10 +2417,10 @@ fn agent_execution_detail_from_repository(
         return Ok(AgentEvidenceResponseDto::Unavailable);
     };
     Ok(
-        validate_agent_execution_detail(stored, &summary, run_id, task_id).map_or(
-            AgentEvidenceResponseDto::Unavailable,
-            AgentEvidenceResponseDto::Available,
-        ),
+        validate_agent_execution_detail(stored, &summary, run_id, task_id)
+            .map_or(AgentEvidenceResponseDto::Unavailable, |detail| {
+                AgentEvidenceResponseDto::Available(Box::new(detail))
+            }),
     )
 }
 
