@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   mkdtemp,
   readFile,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -49,6 +50,27 @@ test("a waiting caller acquires only after the current owner releases", async ()
     const second = await pending;
     await second.assertOwned();
     await second.release();
+  });
+});
+
+test("release retries a transient Windows directory rename denial", async () => {
+  await withFixture(async (paths) => {
+    let attempts = 0;
+    const lock = await acquireVersionLock(paths, {
+      token: TOKEN_ONE,
+      releaseRename: async (source, destination) => {
+        attempts += 1;
+        if (attempts === 1) {
+          const error = new Error("simulated Windows directory contention");
+          error.code = "EPERM";
+          throw error;
+        }
+        await rename(source, destination);
+      },
+    });
+    await lock.release();
+    assert.equal(attempts, 2);
+    await assert.rejects(lock.assertOwned(), (error) => error?.code === "LOCK_LOST");
   });
 });
 

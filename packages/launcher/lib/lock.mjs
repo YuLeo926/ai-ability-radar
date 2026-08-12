@@ -18,6 +18,9 @@ const LOCK_OWNER_NAME = "owner.json";
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_STALE_MS = 10 * 60_000;
 const DEFAULT_POLL_MS = 100;
+const MOVE_RETRY_ATTEMPTS = 20;
+const MOVE_RETRY_DELAY_MS = 25;
+const TRANSIENT_MOVE_CODES = new Set(["EACCES", "EBUSY", "EPERM"]);
 
 function lockError(code, message) {
   return new LauncherError(code, message);
@@ -197,7 +200,40 @@ function requireDuration(value, fallback, label) {
   return duration;
 }
 
-function createHandle(paths, token, acquiredIdentity) {
+async function moveOwnedLockDirectory(
+  paths,
+  source,
+  destination,
+  expected,
+  renameDirectory,
+) {
+  for (let attempt = 1; attempt <= MOVE_RETRY_ATTEMPTS; attempt += 1) {
+    const observed = await readOwnerAt(paths, source);
+    if (
+      observed.token !== expected.token ||
+      !sameIdentity(observed.identity, expected.identity)
+    ) {
+      throw lockError("LOCK_LOST", "版本锁目录身份已经变化。");
+    }
+    if (await pathInfo(destination)) {
+      throw lockError("LOCK_LOST", "版本锁移动目标已经存在。");
+    }
+    try {
+      await renameDirectory(source, destination);
+      return;
+    } catch (error) {
+      if (
+        !TRANSIENT_MOVE_CODES.has(error?.code) ||
+        attempt === MOVE_RETRY_ATTEMPTS
+      ) {
+        throw lockError("LOCK_LOST", "无法安全移动版本锁。");
+      }
+    }
+    await delay(MOVE_RETRY_DELAY_MS);
+  }
+}
+
+function createHandle(paths, token, acquiredIdentity, releaseRename) {
   let released = false;
   const assertOwned = async () => {
     if (released) throw lockError("LOCK_LOST", "版本锁已释放。");
@@ -219,7 +255,13 @@ function createHandle(paths, token, acquiredIdentity) {
     if (await pathInfo(releasePath)) {
       throw lockError("LOCK_LOST", "版本锁释放目录已存在。");
     }
-    await rename(paths.lockDirectory, releasePath);
+    await moveOwnedLockDirectory(
+      paths,
+      paths.lockDirectory,
+      releasePath,
+      { token, identity: acquiredIdentity },
+      releaseRename,
+    );
     try {
       const moved = await readOwnerAt(paths, releasePath);
       if (
@@ -247,6 +289,7 @@ export async function acquireVersionLock(
     staleMs,
     pollMs,
     now = Date.now,
+    releaseRename = rename,
   } = {},
 ) {
   const operationToken = assertOperationToken(token);
@@ -255,6 +298,9 @@ export async function acquireVersionLock(
   const poll = requireDuration(pollMs, DEFAULT_POLL_MS, "版本锁轮询时间");
   if (typeof now !== "function") {
     throw lockError("LOCK_BUSY", "版本锁时钟无效。");
+  }
+  if (typeof releaseRename !== "function") {
+    throw lockError("LOCK_BUSY", "版本锁文件操作无效。");
   }
   await ensureCacheRoot(paths, { token: operationToken });
   await assertCacheRootOwned(paths);
@@ -274,7 +320,12 @@ export async function acquireVersionLock(
     }
     const created = await tryCreateLock(paths, operationToken, currentTime);
     if (created) {
-      return createHandle(paths, operationToken, created.identity);
+      return createHandle(
+        paths,
+        operationToken,
+        created.identity,
+        releaseRename,
+      );
     }
 
     let observed;
