@@ -47,12 +47,11 @@ test("renders stable help and version output", () => {
   });
 });
 
-test("keeps mutating commands disconnected until their implementation tasks", () => {
+test("leaves operational commands to the asynchronous runner", () => {
   for (const command of [{ kind: "launch" }, { kind: "clear-cache" }]) {
-    assert.deepEqual(renderCliCommand(command, "0.2.2"), {
-      exitCode: 1,
-      stdout: "",
-      stderr: "启动功能尚未接线；请稍后再试。\n",
-    });
+    assert.throws(
+      () => renderCliCommand(command, "0.2.2"),
+      /异步执行/u,
+    );
   }
 });

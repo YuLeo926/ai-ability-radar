@@ -1,3 +1,5 @@
+import { LauncherError } from "./errors.mjs";
+
 const HELP_TEXT = `AI 能力雷达 npm 启动器
 
 用法：
@@ -26,7 +28,11 @@ export function parseCliArguments(args) {
   if (args.length === 1 && COMMANDS.has(args[0])) {
     return { kind: COMMANDS.get(args[0]) };
   }
-  throw new Error("不支持的参数。请运行 npx ai-ability-radar --help 查看用法。");
+  throw new LauncherError(
+    "INVALID_ARGUMENTS",
+    "不支持的参数。请运行 npx ai-ability-radar --help 查看用法。",
+    { exitCode: 2 },
+  );
 }
 
 export function renderCliCommand(command, version) {
@@ -37,11 +43,7 @@ export function renderCliCommand(command, version) {
     return { exitCode: 0, stdout: `${version}\n`, stderr: "" };
   }
   if (command?.kind === "launch" || command?.kind === "clear-cache") {
-    return {
-      exitCode: 1,
-      stdout: "",
-      stderr: "启动功能尚未接线；请稍后再试。\n",
-    };
+    throw new TypeError("该命令需要异步执行。");
   }
   throw new TypeError("启动器命令无效。");
 }

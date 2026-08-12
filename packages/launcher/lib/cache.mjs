@@ -163,6 +163,11 @@ export async function assertCacheRootOwned(paths) {
   return paths.cacheRoot;
 }
 
+export async function assertVersionCacheOwned(paths) {
+  await assertCacheRootOwned(paths);
+  return readEntryOwner(paths, paths.versionDirectory);
+}
+
 export async function ensureCacheRoot(paths, { token = randomUUID() } = {}) {
   const operationToken = assertOperationToken(token);
   await requirePlainDirectory(paths.localAppData, "LOCALAPPDATA");
@@ -238,6 +243,23 @@ export async function createVersionStaging(paths, { token = randomUUID() } = {})
     throw error;
   }
   return directory;
+}
+
+export async function discardVersionStaging(
+  paths,
+  { stagingDirectory, token } = {},
+) {
+  const operationToken = assertOperationToken(token);
+  if (stagingDirectory !== versionStagingDirectory(paths, operationToken)) {
+    throw cacheError("CACHE_TRANSACTION", "待清理暂存目录参数无效。");
+  }
+  await assertCacheRootOwned(paths);
+  await readEntryOwner(paths, stagingDirectory, operationToken);
+  const stagingIdentity = identity(
+    await requirePlainDirectory(stagingDirectory, "待清理暂存目录"),
+  );
+  await removeDirectoryWithIdentity(stagingDirectory, stagingIdentity);
+  return { removed: true };
 }
 
 async function publishVersionStagingCore(
