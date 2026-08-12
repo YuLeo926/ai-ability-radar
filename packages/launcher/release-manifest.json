@@ -1,0 +1,126 @@
+{
+  "schema_version": "launcher-release-manifest-v1",
+  "repository": "YuLeo926/ai-ability-radar",
+  "launcher_version": "0.2.2",
+  "desktop_version": "0.2.2",
+  "tag": "v0.2.2",
+  "assets": {
+    "portable": {
+      "file_name": "ability-radar_0.2.2_windows-x64-portable.zip",
+      "size": 5482157,
+      "sha256": "19dee14546d66da242c407ffc601f7c3b140b5cd9a7876656c8f411bf96f7f90",
+      "root_directory": "ability-radar-portable",
+      "executable": "ability-radar-portable/ability-radar.exe",
+      "files": [
+        {
+          "path": "ability-radar-portable/README.txt",
+          "size": 567,
+          "sha256": "73e45ea0afff86d3fe2c3a1eab5bd15028920359495f4e1078d6d2abbfd8b290"
+        },
+        {
+          "path": "ability-radar-portable/SHA256SUMS.txt",
+          "size": 2409,
+          "sha256": "c5c62ccc1c92a82f06794a56c83368293a9fe8fbfe814bb4761c9ce14a552bc8"
+        },
+        {
+          "path": "ability-radar-portable/ability-radar.exe",
+          "size": 16128512,
+          "sha256": "ca178bbb9eda4360610cdc1938279fe9244297d70ea5f64800767edf8933f03d"
+        },
+        {
+          "path": "ability-radar-portable/benchmark-packs/cli-quick-v1/candidate-runner.mjs",
+          "size": 5701,
+          "sha256": "384f254465a102244a6e0a6059ef5babd88b9f6a574ef8b8b7235f0475e035b2"
+        },
+        {
+          "path": "ability-radar-portable/benchmark-packs/cli-quick-v1/manifest.json",
+          "size": 849,
+          "sha256": "bf0568c3ed866217a1344e7dfbe7478058a3ae74128e696a55567e197de48cb3"
+        },
+        {
+          "path": "ability-radar-portable/benchmark-packs/cli-quick-v1/tasks/dedupe-events/prompt.md",
+          "size": 438,
+          "sha256": "47a9a1828ea90ff765d5b037611937caec92d711119852b6f7c7beed85d99516"
+        },
+        {
+          "path": "ability-radar-portable/benchmark-packs/cli-quick-v1/tasks/dedupe-events/starter/src/dedupeEvents.mjs",
+          "size": 206,
+          "sha256": "e7415ba8a28deac5128f17b8b3a84e003f7ede26f3708addf7a84a0a9272c18b"
+        },
+        {
+          "path": "ability-radar-portable/benchmark-packs/cli-quick-v1/tasks/dedupe-events/verify.mjs",
+          "size": 1836,
+          "sha256": "a226461b99227cd27687182d5bf7a7914440e98d247765115a5944fcfb9488a7"
+        },
+        {
+          "path": "ability-radar-portable/benchmark-packs/cli-quick-v1/tasks/retry-schedule/prompt.md",
+          "size": 594,
+          "sha256": "ebfaea301efa4653ba6afdc0c43b530cd99477529b00beb89e35456f879c5a5c"
+        },
+        {
+          "path": "ability-radar-portable/benchmark-packs/cli-quick-v1/tasks/retry-schedule/starter/src/retrySchedule.mjs",
+          "size": 259,
+          "sha256": "dc8a55ba702f2337669dce4c0c50ea26d1b04559c3409de4a17decf6c743e820"
+        },
+        {
+          "path": "ability-radar-portable/benchmark-packs/cli-quick-v1/tasks/retry-schedule/verify.mjs",
+          "size": 1837,
+          "sha256": "d109c47aa489befe50a1600ddc2da5e21438acc9055968656128068957f3b1c7"
+        },
+        {
+          "path": "ability-radar-portable/benchmark-packs/client-quick-v1/manifest.json",
+          "size": 2629,
+          "sha256": "916e4c6f99dbf90dffa13c1ced8458a1134ba207ce062d667202d346d283c871"
+        },
+        {
+          "path": "ability-radar-portable/benchmark-packs/client-quick-v1/prompts/instruction-csv.txt",
+          "size": 242,
+          "sha256": "99122e1fe6de638685d4c619621b7a30aed72d0038491d0c0a3133b7122ebb7f"
+        },
+        {
+          "path": "ability-radar-portable/benchmark-packs/client-quick-v1/prompts/instruction-filter.json.txt",
+          "size": 485,
+          "sha256": "691a0d95b117b9df409c2a36359c96f586a288f93285a069518b54b31fce2665"
+        },
+        {
+          "path": "ability-radar-portable/benchmark-packs/client-quick-v1/prompts/instruction-inventory.json.txt",
+          "size": 394,
+          "sha256": "5da4c2c231f83fb19366ec18416196c83b5e7284190e6999a8537f5d17b5fb6c"
+        },
+        {
+          "path": "ability-radar-portable/benchmark-packs/client-quick-v1/prompts/logic-capacity.txt",
+          "size": 255,
+          "sha256": "07b1bd5bf298d584db80a9dc1b5c1fe320a9a6c09b6e5502c5ed3656d2a004f3"
+        },
+        {
+          "path": "ability-radar-portable/benchmark-packs/client-quick-v1/prompts/logic-schedule.txt",
+          "size": 270,
+          "sha256": "1352699ed1b0b3ead90bdf34f866074cc11d8f0b854824f39861c92acc50fdc0"
+        },
+        {
+          "path": "ability-radar-portable/benchmark-packs/client-quick-v1/prompts/logic-truth.txt",
+          "size": 246,
+          "sha256": "71a5f0615eec86936e34b5e06d4f481a36758881f68a271c64b72eab26adb307"
+        },
+        {
+          "path": "ability-radar-portable/benchmark-packs/client-quick-v1/prompts/review-python.txt",
+          "size": 609,
+          "sha256": "647c4927f159324e37e6cab94adcdb84c1f15bd23f94fa8da0cba2e3717cf8a2"
+        },
+        {
+          "path": "ability-radar-portable/benchmark-packs/client-quick-v1/prompts/review-typescript.txt",
+          "size": 662,
+          "sha256": "64e6257c290297cced1f069dbad82e3fce2c168c6d84b6ecca0341c3baabfaaa"
+        },
+        {
+          "path": "ability-radar-portable/benchmark-packs/registry.json",
+          "size": 527,
+          "sha256": "00550eb89b41c4425e6c817ab45545d894dc8e2666ceef91ec32f384815dba88"
+        }
+      ]
+    },
+    "checksums": {
+      "file_name": "SHA256SUMS.txt"
+    }
+  }
+}

@@ -56,6 +56,16 @@ v0.2.2 目前是候选/待发布构建，没有公开下载链接。只有 clean
 内容与草稿发布中上传的构建产物一致，但不替代商业代码签名。免安装 ZIP 不创建安装/卸载项，
 历史和设置仍写入 `%APPDATA%\com.aiability.radar`。项目当前没有 Tauri updater 插件或更新清单。
 
+## npm 启动器（即将提供）
+
+公开 GitHub Release、clean Windows 10/11 验收、Node.js 22.22/24 CI 和最终 tarball 审计全部通过后，
+项目将提供 `ai-ability-radar` npm 轻量启动器。它不把桌面二进制打进 npm 包，而是下载与自身版本严格
+对应的 GitHub Release 便携 ZIP，完成哈希、ZIP 结构和解压文件树复核后缓存在本机并启动。
+
+当前 npm 包尚未公开发布，因此这里暂不提供会失败的安装命令。启动器首次运行需要联网；有效缓存可离线
+启动。下载与启动不会自动执行题目，也不会消耗 Codex/Claude 额度；只有用户随后在桌面程序中确认开始的
+真实测试才会计入自己的订阅用量。详见[安全说明](docs/security.md)和[故障排查](docs/troubleshooting.md)。
+
 ## 本地开发
 
 前置条件：

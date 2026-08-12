@@ -159,6 +159,9 @@ export function parseWorkflow(source) {
         job.envDeclaration = pair[1] === "" ? "block" : "unsupported";
         job.envValid = pair[1] === "";
         jobSection = job.envValid ? "env" : undefined;
+      } else if (pair?.[0] === "strategy") {
+        job.strategy = pair[1] === "" ? {} : { unsupported: pair[1] };
+        jobSection = pair[1] === "" ? "strategy" : undefined;
       } else if (text === "steps:") jobSection = "steps";
       else {
         jobSection = undefined;
@@ -178,6 +181,28 @@ export function parseWorkflow(source) {
       const pair = keyValue(text);
       if (!pair || pair[0] === "<<") job.envValid = false;
       else job.env[pair[0]] = pair[1];
+      continue;
+    }
+    if (
+      indent === 6 &&
+      (jobSection === "strategy" || jobSection === "strategy-matrix")
+    ) {
+      const pair = keyValue(text);
+      if (!pair || pair[0] === "<<") {
+        job.strategy.unsupported = text;
+      } else if (pair[0] === "matrix" && pair[1] === "") {
+        job.strategy.matrix = {};
+        jobSection = "strategy-matrix";
+      } else {
+        job.strategy[pair[0]] = pair[1];
+        jobSection = "strategy";
+      }
+      continue;
+    }
+    if (indent === 8 && jobSection === "strategy-matrix") {
+      const pair = keyValue(text);
+      if (!pair || pair[0] === "<<") job.strategy.unsupported = text;
+      else job.strategy.matrix[pair[0]] = pair[1];
       continue;
     }
     if (indent === 6 && jobSection === "steps" && text.startsWith("-")) {

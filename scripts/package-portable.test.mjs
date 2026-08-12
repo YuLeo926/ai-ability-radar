@@ -681,7 +681,12 @@ test("rejects invalid or path-shaped versions inside stagePortable", async () =>
       );
     }
   } finally {
-    await rm(fixture.root, { recursive: true, force: true });
+    await rm(fixture.root, {
+      recursive: true,
+      force: true,
+      maxRetries: 10,
+      retryDelay: 100,
+    });
   }
 });
 

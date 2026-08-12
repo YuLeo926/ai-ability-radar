@@ -1,0 +1,36 @@
+{
+  "schema_version": "launcher-release-manifest-v1",
+  "repository": "YuLeo926/ai-ability-radar",
+  "launcher_version": "0.2.2",
+  "desktop_version": "0.2.2",
+  "tag": "v0.2.2",
+  "assets": {
+    "portable": {
+      "file_name": "ability-radar_0.2.2_windows-x64-portable.zip",
+      "size": 4096,
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "root_directory": "ability-radar-portable",
+      "executable": "ability-radar-portable/ability-radar.exe",
+      "files": [
+        {
+          "path": "ability-radar-portable/README.txt",
+          "size": 12,
+          "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        {
+          "path": "ability-radar-portable/SHA256SUMS.txt",
+          "size": 128,
+          "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+        },
+        {
+          "path": "ability-radar-portable/ability-radar.exe",
+          "size": 2048,
+          "sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+        }
+      ]
+    },
+    "checksums": {
+      "file_name": "SHA256SUMS.txt"
+    }
+  }
+}

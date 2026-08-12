@@ -1,5 +1,5 @@
 {
-  "name": "ai-ability-radar",
+  "name": "ai-ability-radar-monorepo",
   "version": "0.2.2",
   "private": true,
   "license": "Apache-2.0",
@@ -10,7 +10,8 @@
     "esbuild@0.28.1": true
   },
   "workspaces": [
-    "apps/desktop"
+    "apps/desktop",
+    "packages/launcher"
   ],
   "devDependencies": {
     "typescript": "5.8.3"
@@ -29,13 +30,16 @@
   },
   "scripts": {
     "build": "npm run build --workspace apps/desktop",
-    "test": "cargo build -p ability-core --bin ability-pack-validator --locked --offline && node --test scripts/package-portable.test.mjs && node --test scripts/repository-contracts.test.mjs && npm run test --workspace apps/desktop",
+    "test": "cargo build -p ability-core --bin ability-pack-validator --locked --offline && node --test scripts/package-portable.test.mjs && node --test scripts/repository-contracts.test.mjs && npm run test:launcher && npm run test:launcher:package && npm run test --workspace apps/desktop",
     "start": "npm run tauri -- dev",
     "package:portable": "npm run tauri -- build --no-bundle && npm run package:portable:from-build",
     "package:portable:from-build": "cargo build -p ability-core --bin ability-pack-validator --release --locked --offline && node scripts/package-portable.mjs",
     "tauri": "npm run tauri --workspace apps/desktop --",
     "validate:repository": "node scripts/validate-repository.mjs",
     "licenses:generate": "node scripts/generate-license-metadata.mjs",
+    "launcher:manifest": "node scripts/generate-launcher-manifest.mjs --output packages/launcher/release-manifest.json",
+    "test:launcher": "node --test packages/launcher/tests/*.test.mjs scripts/generate-launcher-manifest.test.mjs",
+    "test:launcher:package": "node --test scripts/test-launcher-package.test.mjs",
     "test:promptfoo-runner": "node --test tools/promptfoo-runner/tests/*.test.mjs"
   }
 }

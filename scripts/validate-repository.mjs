@@ -2263,6 +2263,8 @@ const requiredActions = new Map([
     "actions/setup-node",
     "dtolnay/rust-toolchain",
     "actions/upload-artifact",
+    "actions/checkout",
+    "actions/setup-node",
   ]],
   [".github/workflows/release.yml", [
     "actions/checkout",
@@ -2280,9 +2282,12 @@ const requiredActions = new Map([
 ]);
 for (const [path, required] of requiredActions) {
   const workflow = workflows.get(path)?.workflow;
-  for (const action of required) {
+  for (const action of new Set(required)) {
     const count = actionSteps(workflow, action).length;
-    if (count !== 1) fail(`${path} must use ${action} exactly once; found ${count}`);
+    const expectedCount = required.filter((candidate) => candidate === action).length;
+    if (count !== expectedCount) {
+      fail(`${path} must use ${action} exactly ${expectedCount} time(s); found ${count}`);
+    }
   }
   const actualSequence = [...workflow.jobs.values()]
     .flatMap((job) => job.steps)
@@ -2390,8 +2395,10 @@ function requireExactJobContract(path, job, expected, label) {
     ...baseJobFields,
     ...Object.keys(extra),
   ]);
-  const extraContract = Object.entries(extra).every(
-    ([key, value]) => job?.[key] === value,
+  const extraContract = Object.entries(extra).every(([key, value]) =>
+    value !== null && typeof value === "object"
+      ? JSON.stringify(job?.[key]) === JSON.stringify(value)
+      : job?.[key] === value,
   );
   if (
     !fieldsExact ||
@@ -2578,6 +2585,58 @@ if (
   !exactObject(ciArtifact?.with, expectedCiArtifactInputs)
 ) {
   fail(`${ciPath} CI artifact input allowlist must contain only the exact debug NSIS installer`);
+}
+
+const ciLauncherJob = ciWorkflow?.jobs.get("launcher");
+const expectedLauncherStrategy = {
+  "fail-fast": "false",
+  matrix: { "node-version": '["22.22.0", "24"]' },
+};
+requireExactJobContract(
+  ciPath,
+  ciLauncherJob,
+  {
+    id: "launcher",
+    runsOn: "windows-latest",
+    timeoutMinutes: "20",
+    permissions: { contents: "read" },
+    extra: { strategy: expectedLauncherStrategy },
+  },
+  "launcher matrix job",
+);
+if (!exactPermissions(ciLauncherJob, { contents: "read" })) {
+  fail(`${ciPath} launcher job permissions must be exactly contents: read`);
+}
+const launcherSteps = [
+  {
+    name: "Check out repository for launcher",
+    uses: "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10",
+    usesComment: "v6",
+    with: { "persist-credentials": "false" },
+  },
+  {
+    name: "Set up launcher Node.js",
+    uses: "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+    usesComment: "v6",
+    with: { "node-version": "${{ matrix.node-version }}" },
+  },
+  {
+    name: "Install launcher test dependencies",
+    run: "npm ci --ignore-scripts --no-audit --no-fund",
+  },
+  { name: "Test launcher units", run: "npm run test:launcher" },
+  { name: "Test packed launcher", run: "npm run test:launcher:package" },
+  {
+    name: "Validate launcher repository contracts",
+    run: "npm run validate:repository",
+  },
+];
+if (ciLauncherJob?.steps.length !== launcherSteps.length) {
+  fail(`${ciPath} launcher matrix must contain exactly six reviewed steps`);
+}
+for (const expected of launcherSteps) {
+  const step = namedStep(ciPath, ciLauncherJob, expected.name);
+  requireExactStepContract(ciPath, step, expected, expected.name);
 }
 for (const path of workflowPaths) {
   const workflow = workflows.get(path)?.workflow;
@@ -3004,11 +3063,17 @@ const readme = requireText("README.md", [
   ["Tauri desktop development window", /npm start.*Tauri 桌面开发窗口/si],
   ["normal browser is incomplete", /普通浏览器.*http:\/\/localhost:1420.*不是完整产品/si],
   ["portable APPDATA location", /免安装 ZIP.*%APPDATA%\\com\.aiability\.radar/si],
+  ["pending npm launcher", /npm 启动器.*即将提供/si],
+  ["launcher fixed GitHub release", /npm 轻量启动器.*版本严格.*GitHub Release/si],
+  ["launcher no automatic model use", /下载与启动.*不会自动执行题目.*不会消耗 Codex\/Claude/si],
   ["design link", /docs\/superpowers\/specs\/2026-07-17-ai-ability-radar-design\.md/],
   ["plan link", /docs\/superpowers\/plans\/2026-07-17-ai-ability-radar-desktop-mvp\.md/],
 ]);
 if (/normal browser is the complete product/i.test(readme)) {
   fail("README.md must not describe localhost:1420 in a normal browser as the complete product");
+}
+if (/^\s*npx ai-ability-radar(?:@0\.2\.2)?\s*$/mu.test(readme)) {
+  fail("README.md must not expose a failing npm launcher command before publication");
 }
 if (/从仓库的\s*\*\*Releases\*\*\s*页面下载 v0\.2\.2|v0\.2\.2\s*(?:公开预览|当前发布|正式发布).*?(?:提供|开放).*?下载/si.test(readme)) {
   fail("README.md must not claim that pending v0.2.2 is currently downloadable");
@@ -3093,6 +3158,13 @@ for (const path of ["docs/privacy.md", "docs/security.md"]) {
     ["not a strong sandbox", /不是.*(?:容器|VM|虚拟机).*(?:sandbox|沙箱)/si],
   ]);
 }
+requireText("docs/security.md", [
+  ["launcher GitHub Release boundary", /npm 启动器.*GitHub Release/si],
+  ["launcher credential boundary", /启动器不读取.*登录凭据/si],
+  ["launcher cache root", /%LOCALAPPDATA%\\AI Ability Radar\\launcher/],
+  ["launcher no uploads or telemetry", /不上传.*遥测/si],
+  ["launcher zero-provider-call CI", /launcher CI.*不运行真实 AI CLI.*npm publish/si],
+]);
 requireText("apps/desktop/src/pages/HomePage.tsx", [
   ["inherited PATH immediate recheck", /已继承 PATH 目录内的变化可以立即重新检测/],
   ["new PATH directory restart boundary", /新增 PATH\s*目录，请重启应用后再重新检测/],
@@ -3111,6 +3183,13 @@ requireText("docs/troubleshooting.md", [
   ["in-app 重新检测 CLI path", /重新检测 CLI/],
   ["inherited PATH immediate recheck", /已经继承的 PATH 目录内，可以立即重新检测/],
   ["new User or Machine PATH restart boundary", /新增了 User 或 Machine PATH 目录，请先重启应用/],
+  ["launcher first-run network", /npm 启动器.*首次运行需要联网/si],
+  ["launcher proxy and certificate", /代理和证书/],
+  ["launcher hash mismatch", /哈希不一致/],
+  ["launcher corrupt cache recovery", /缓存损坏.*本地 ZIP.*重新下载/si],
+  ["launcher concurrent start", /并发启动.*重新验证/si],
+  ["launcher Node matrix", /Node\.js 22\.22\+.*Node\.js 24 LTS/si],
+  ["launcher safe cache clearing", /--clear-cache.*%LOCALAPPDATA%\\AI Ability Radar\\launcher/si],
 ]);
 const troubleshooting = read("docs/troubleshooting.md");
 if (/重新检测 CLI[”"`'，,\s]*无需重启应用/.test(troubleshooting)) {
@@ -3121,6 +3200,11 @@ requireText("docs/release-checklist.md", [
   ["portable APPDATA gate", /免安装 ZIP.*%APPDATA%\\com\.aiability\.radar/si],
   ["outer checksum release assets", /外层 `SHA256SUMS\.txt`.*NSIS.*MSI.*portable ZIP/si],
   ["release upload ownership", /Tauri action.*唯一.*安装程序上传者.*gh release upload/si],
+  ["npm identity gates", /npm login.*npm whoami/si],
+  ["npm package name ownership", /包名所有权/],
+  ["npm tarball audit", /tarball 内容审计/],
+  ["public release manifest recheck", /公开 GitHub Release.*清单二次复核/si],
+  ["real npx acceptance", /真实 `npx` 验收/],
 ]);
 requireText("docs/test-matrix.md", [
   ["Portable ZIP launch Windows matrix row", /^\| Portable ZIP launch \| Yes \| Yes \| No \| Yes \|$/m],
