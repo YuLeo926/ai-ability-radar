@@ -49,3 +49,22 @@ and Windows 11 VM evidence is still Pending.
 - [ ] 发布说明明确安装程序和免安装 ZIP 均未签名，并要求校验所有下载文件。
 - [ ] Updater remains disabled.
 - [ ] Pages links point to the correct repository and release.
+
+## npm launcher publication
+
+- [ ] Windows Node.js 22.22.0 与 24 launcher CI 矩阵全部通过，且没有 secrets、真实 AI CLI、真实
+  Release 下载或发布步骤。
+- [ ] `npm run test:launcher`、`npm run test:launcher:package`、仓库验证和 `npm audit --audit-level=high`
+  全部通过。
+- [ ] `npm pack --workspace packages/launcher --json` 的 tarball 内容审计只包含批准的 18 个文件，
+  不含测试、证书、桌面二进制、便携 ZIP、日志、缓存或用户数据。
+- [ ] 在全新目录使用 `--ignore-scripts` 安装最终 `.tgz`，复验帮助、版本、未知参数、首次下载、离线命中、
+  损坏修复和 `--clear-cache`。
+- [ ] clean Windows 10/11 验收完成后才公开 GitHub Release；公开后从全新目录重新下载 ZIP 与
+  `SHA256SUMS.txt`，重新生成清单并确认与候选清单逐字节相同，完成公开 Release 清单二次复核。
+- [ ] 使用 `npm view ai-ability-radar` 核对包名所有权与当前状态；发布者本人完成 `npm login`，并用
+  `npm whoami` 确认身份。令牌不得发送给维护工具或写入仓库。
+- [ ] 执行不可逆的 `npm publish --workspace packages/launcher --access public` 前，再次人工确认包名
+  `ai-ability-radar`、版本 `0.2.2` 和公开可见性。
+- [ ] 发布后在不含仓库源码的全新目录完成真实 `npx` 验收，记录 npm integrity、`.tgz` SHA-256、
+  GitHub Release URL 与结果。真实 `npx` 只启动桌面程序，不自动开始能力测试。

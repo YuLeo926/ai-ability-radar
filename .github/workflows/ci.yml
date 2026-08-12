@@ -72,3 +72,30 @@ jobs:
           path: target/debug/bundle/nsis/ability-radar_0.2.2_x64-setup.exe
           if-no-files-found: error
           retention-days: 7
+
+  launcher:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["22.22.0", "24"]
+    steps:
+      - name: Check out repository for launcher
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - name: Set up launcher Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Install launcher test dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Test launcher units
+        run: npm run test:launcher
+      - name: Test packed launcher
+        run: npm run test:launcher:package
+      - name: Validate launcher repository contracts
+        run: npm run validate:repository

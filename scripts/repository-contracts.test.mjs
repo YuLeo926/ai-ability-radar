@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { parseReleaseManifest } from "../packages/launcher/lib/manifest.mjs";
+import { parseWorkflow } from "./workflow-contracts.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const validator = join(root, "scripts", "validate-repository.mjs");
@@ -275,6 +276,119 @@ test("npm launcher test scripts audit units and the real packed tarball", () => 
   );
   assert.match(rootManifest.scripts.test, /npm run test:launcher && npm run test:launcher:package/u);
 });
+
+test("CI has an exact read-only Windows Node 22.22 and 24 launcher matrix", () => {
+  const workflow = parseWorkflow(
+    readFileSync(join(root, ".github", "workflows", "ci.yml"), "utf8"),
+  );
+  const launcher = workflow.jobs.get("launcher");
+  assert.equal(launcher?.["runs-on"], "windows-latest");
+  assert.equal(launcher?.timeoutMinutes, "20");
+  assert.deepEqual(launcher?.permissions, { contents: "read" });
+  assert.deepEqual(launcher?.strategy, {
+    "fail-fast": "false",
+    matrix: { "node-version": '["22.22.0", "24"]' },
+  });
+  assert.deepEqual(
+    launcher?.steps.map(({ name }) => name),
+    [
+      "Check out repository for launcher",
+      "Set up launcher Node.js",
+      "Install launcher test dependencies",
+      "Test launcher units",
+      "Test packed launcher",
+      "Validate launcher repository contracts",
+    ],
+  );
+  const source = launcher?.steps.map(({ run }) => run).filter(Boolean).join("\n") ?? "";
+  for (const command of [
+    "npm ci --ignore-scripts --no-audit --no-fund",
+    "npm run test:launcher",
+    "npm run test:launcher:package",
+    "npm run validate:repository",
+  ]) {
+    assert.match(source, new RegExp(command.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "u"));
+  }
+  assert.doesNotMatch(source, /npm publish|gh release|codex|claude/iu);
+});
+
+test("pending npm launcher documentation covers security, recovery, and release gates", () => {
+  const security = readFileSync(join(root, "docs", "security.md"), "utf8");
+  const troubleshooting = readFileSync(join(root, "docs", "troubleshooting.md"), "utf8");
+  const checklist = readFileSync(join(root, "docs", "release-checklist.md"), "utf8");
+  const readme = readFileSync(join(root, "README.md"), "utf8");
+  for (const pattern of [
+    /npm 启动器.*GitHub Release/su,
+    /不读取.*登录凭据/su,
+    /LOCALAPPDATA.*AI Ability Radar.*launcher/su,
+    /不上传.*遥测/su,
+  ]) assert.match(security, pattern);
+  for (const pattern of [
+    /首次运行.*联网/su,
+    /代理.*证书/su,
+    /哈希.*不一致/su,
+    /缓存.*损坏/su,
+    /并发.*启动/su,
+    /Node\.js 22\.22.*24/su,
+    /--clear-cache/u,
+  ]) assert.match(troubleshooting, pattern);
+  for (const pattern of [
+    /npm login/u,
+    /npm whoami/u,
+    /包名.*所有权/su,
+    /tarball.*审计/su,
+    /公开.*Release.*清单.*复核/su,
+    /真实.*npx/su,
+  ]) assert.match(checklist, pattern);
+  assert.match(readme, /npm 启动器.*即将提供/su);
+  assert.doesNotMatch(readme, /^\s*npx ai-ability-radar(?:@0\.2\.2)?\s*$/mu);
+});
+
+for (const [label, transform, expected] of [
+  [
+    "drops Node 24 from the launcher matrix",
+    (source) => source.replace(
+      'node-version: ["22.22.0", "24"]',
+      'node-version: ["22.22.0"]',
+    ),
+    /launcher matrix job.*exact|launcher matrix/u,
+  ],
+  [
+    "grants launcher contents write permission",
+    (source) => source.replace(
+      /launcher:\r?\n([\s\S]*?)permissions:\r?\n\s+contents: read/u,
+      (match) => match.replace("contents: read", "contents: write"),
+    ),
+    /launcher matrix job.*exact|launcher job permissions/u,
+  ],
+  [
+    "allows launcher lifecycle scripts during install",
+    (source) => source.replace(
+      "npm ci --ignore-scripts --no-audit --no-fund",
+      "npm ci --no-audit --no-fund",
+    ),
+    /Install launcher test dependencies.*exact/u,
+  ],
+  [
+    "replaces packed tests with npm publication",
+    (source) => source.replace(
+      "npm run test:launcher:package",
+      "npm publish --workspace packages/launcher --access public",
+    ),
+    /Test packed launcher.*exact/u,
+  ],
+]) {
+  test(`launcher CI rejects a workflow that ${label}`, () => {
+    const result = runNegativeFixture((fixture) => {
+      replace(join(fixture, ".github", "workflows", "ci.yml"), (source) => {
+        const changed = transform(source);
+        assert.notEqual(changed, source, label);
+        return changed;
+      });
+    });
+    assertRejected(result, expected);
+  });
+}
 
 test("source start command cannot point to Vite", () => {
   const result = runNegativeFixture((fixture) => {
@@ -964,10 +1078,7 @@ test("troubleshooting requires the confirmed npm shim checks", () => {
 test("troubleshooting must say the version check sends no model request", () => {
   const result = runNegativeFixture((fixture) => {
     replace(join(fixture, "docs", "troubleshooting.md"), (source) =>
-      source.replace(
-        /`--version`[^\n]*(?:不会|不发送)[^\n]*(?:模型请求|model request)[^\n]*/i,
-        "",
-      ));
+      source.replaceAll("不会发送模型请求", "不会发送推理请求"));
   });
   assertRejected(result, /troubleshooting\.md.*--version.*model request|模型请求/si);
 });
