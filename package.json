@@ -37,6 +37,7 @@
     "tauri": "npm run tauri --workspace apps/desktop --",
     "validate:repository": "node scripts/validate-repository.mjs",
     "licenses:generate": "node scripts/generate-license-metadata.mjs",
+    "launcher:manifest": "node scripts/generate-launcher-manifest.mjs --output packages/launcher/release-manifest.json",
     "test:promptfoo-runner": "node --test tools/promptfoo-runner/tests/*.test.mjs"
   }
 }

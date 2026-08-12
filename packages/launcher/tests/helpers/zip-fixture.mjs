@@ -74,9 +74,13 @@ function byteSort(left, right) {
   return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"));
 }
 
-export function createPortableFixture({ checksumText } = {}) {
-  const readme = Buffer.from("portable fixture\n");
-  const executable = Buffer.from("MZ fake executable bytes");
+export function createPortableFixture({
+  checksumText,
+  readmeText = "portable fixture\n",
+  executableText = "MZ fake executable bytes",
+} = {}) {
+  const readme = Buffer.from(readmeText);
+  const executable = Buffer.from(executableText);
   const payloads = new Map([
     ["ability-radar-portable/README.txt", readme],
     ["ability-radar-portable/ability-radar.exe", executable],

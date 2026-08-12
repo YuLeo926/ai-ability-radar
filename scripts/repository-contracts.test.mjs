@@ -15,6 +15,8 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import { parseReleaseManifest } from "../packages/launcher/lib/manifest.mjs";
+
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const validator = join(root, "scripts", "validate-repository.mjs");
 const fixtureRootControlDirectories = new Set([
@@ -238,6 +240,26 @@ test("npm launcher workspace has an exact public package boundary", () => {
   assert.deepEqual(
     readFileSync(join(root, "packages", "launcher", "LICENSE")),
     readFileSync(join(root, "LICENSE")),
+  );
+});
+
+test("npm launcher embeds the exact reviewed v0.2.2 portable release manifest", () => {
+  const source = readFileSync(
+    join(root, "packages", "launcher", "release-manifest.json"),
+    "utf8",
+  );
+  assert.doesNotMatch(source, /placeholder|example\.com|localhost|test[-_ ]hash/iu);
+  const manifest = parseReleaseManifest(source, { packageVersion: "0.2.2" });
+  assert.equal(manifest.tag, "v0.2.2");
+  assert.equal(manifest.assets.portable.size, 5_482_157);
+  assert.equal(
+    manifest.assets.portable.sha256,
+    "19dee14546d66da242c407ffc601f7c3b140b5cd9a7876656c8f411bf96f7f90",
+  );
+  assert.equal(manifest.assets.portable.files.length, 21);
+  assert.equal(
+    manifest.assets.portable.files.some(({ path }) => path.endsWith("/ability-radar.exe")),
+    true,
   );
 });
 
