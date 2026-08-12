@@ -263,6 +263,19 @@ test("npm launcher embeds the exact reviewed v0.2.2 portable release manifest", 
   );
 });
 
+test("npm launcher test scripts audit units and the real packed tarball", () => {
+  const rootManifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  assert.equal(
+    rootManifest.scripts["test:launcher"],
+    "node --test packages/launcher/tests/*.test.mjs scripts/generate-launcher-manifest.test.mjs",
+  );
+  assert.equal(
+    rootManifest.scripts["test:launcher:package"],
+    "node --test scripts/test-launcher-package.test.mjs",
+  );
+  assert.match(rootManifest.scripts.test, /npm run test:launcher && npm run test:launcher:package/u);
+});
+
 test("source start command cannot point to Vite", () => {
   const result = runNegativeFixture((fixture) => {
     replace(join(fixture, "package.json"), (source) => {
