@@ -1,5 +1,5 @@
 {
-  "name": "ai-ability-radar",
+  "name": "ai-ability-radar-monorepo",
   "version": "0.2.2",
   "private": true,
   "license": "Apache-2.0",
@@ -10,7 +10,8 @@
     "esbuild@0.28.1": true
   },
   "workspaces": [
-    "apps/desktop"
+    "apps/desktop",
+    "packages/launcher"
   ],
   "devDependencies": {
     "typescript": "5.8.3"

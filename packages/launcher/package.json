@@ -1,0 +1,40 @@
+{
+  "name": "ai-ability-radar",
+  "version": "0.2.2",
+  "description": "AI 能力雷达的 Windows 便携版安全下载与启动器",
+  "type": "module",
+  "license": "Apache-2.0",
+  "bin": {
+    "ai-ability-radar": "bin/ai-ability-radar.mjs"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "extract.ps1",
+    "release-manifest.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.22.0 <23 || >=24.0.0 <25"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YuLeo926/ai-ability-radar.git",
+    "directory": "packages/launcher"
+  },
+  "homepage": "https://yuleo926.github.io/ai-ability-radar/",
+  "bugs": {
+    "url": "https://github.com/YuLeo926/ai-ability-radar/issues"
+  },
+  "keywords": [
+    "ai",
+    "benchmark",
+    "codex",
+    "claude",
+    "windows"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

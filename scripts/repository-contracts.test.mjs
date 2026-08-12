@@ -186,6 +186,61 @@ test("all first-party manifests require version 0.2.2", () => {
   assertRejected(result, /package\.json version must be 0\.2\.2/i);
 });
 
+test("npm launcher workspace has an exact public package boundary", () => {
+  const rootManifest = JSON.parse(
+    readFileSync(join(root, "package.json"), "utf8"),
+  );
+  const launcherManifest = JSON.parse(
+    readFileSync(join(root, "packages", "launcher", "package.json"), "utf8"),
+  );
+
+  assert.equal(rootManifest.name, "ai-ability-radar-monorepo");
+  assert.equal(rootManifest.private, true);
+  assert.deepEqual(rootManifest.workspaces, ["apps/desktop", "packages/launcher"]);
+
+  assert.equal(launcherManifest.name, "ai-ability-radar");
+  assert.equal(launcherManifest.version, "0.2.2");
+  assert.notEqual(launcherManifest.private, true);
+  assert.equal(launcherManifest.type, "module");
+  assert.equal(launcherManifest.license, "Apache-2.0");
+  assert.equal(
+    launcherManifest.engines?.node,
+    ">=22.22.0 <23 || >=24.0.0 <25",
+  );
+  assert.deepEqual(launcherManifest.bin, {
+    "ai-ability-radar": "bin/ai-ability-radar.mjs",
+  });
+  assert.deepEqual(launcherManifest.files, [
+    "bin",
+    "lib",
+    "extract.ps1",
+    "release-manifest.json",
+    "README.md",
+    "LICENSE",
+  ]);
+  assert.deepEqual(launcherManifest.publishConfig, { access: "public" });
+  for (const forbidden of [
+    "scripts",
+    "dependencies",
+    "optionalDependencies",
+    "peerDependencies",
+    "devDependencies",
+    "os",
+    "cpu",
+  ]) {
+    assert.equal(
+      Object.hasOwn(launcherManifest, forbidden),
+      false,
+      forbidden,
+    );
+  }
+
+  assert.deepEqual(
+    readFileSync(join(root, "packages", "launcher", "LICENSE")),
+    readFileSync(join(root, "LICENSE")),
+  );
+});
+
 test("source start command cannot point to Vite", () => {
   const result = runNegativeFixture((fixture) => {
     replace(join(fixture, "package.json"), (source) => {
